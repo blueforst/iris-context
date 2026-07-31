@@ -12,13 +12,14 @@
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.mjs",
+    "dist:smoke": "node scripts/dist-smoke.mjs",
     "test": "tsx --test test/**/*.test.ts",
     "test:contract": "tsx --test test/contracts.test.ts test/migration.test.ts",
     "migration:smoke": "tsx scripts/migration-smoke.ts",
     "bench": "tsx scripts/bench-smoke.ts",
     "crash:harness": "tsx scripts/crash-harness.ts",
-    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run migration:smoke && npm run build"
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run migration:smoke && npm run build && npm run dist:smoke"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.82.1",

@@ -93,8 +93,17 @@ test("R1-P0 mock vertical slice reaches settled with one sequential tool", async
     computeContentLayoutHash(input, encodeInputFrames(input.blocks)),
   );
 
-  const toolResult = toolResults[0]?.message as { details: { iris: { toolExecutionKey: string } } };
+  const toolResult = toolResults[0]?.message as {
+    details: { iris: { toolExecutionKey: string; assistantEntryId: string } };
+  };
   assert.ok(toolResult.details.iris.toolExecutionKey.length === 64);
+  const assistantToolEntry = result.entries.find(
+    (entry) =>
+      entry.type === "message" &&
+      entry.message.role === "assistant" &&
+      JSON.stringify(entry.message).includes("tool-call-1"),
+  );
+  assert.equal(toolResult.details.iris.assistantEntryId, assistantToolEntry?.id);
   assert.equal(result.assistantMessage.role, "assistant");
 });
 
