@@ -1,0 +1,30 @@
+{
+  "inputId": "input-0001",
+  "triggerOrigin": {
+    "schemaVersion": 1,
+    "channel": "cli",
+    "principalKind": "user",
+    "authority": "user_request",
+    "trust": "limited"
+  },
+  "blocks": [
+    {
+      "blockId": "block-0001",
+      "sourceOrigin": {
+        "schemaVersion": 1,
+        "channel": "cli",
+        "principalKind": "user",
+        "authority": "user_request",
+        "trust": "limited"
+      },
+      "content": {
+        "mode": "inline_text",
+        "text": "hello iris, run the read tool"
+      },
+      "contentHash": "51abb9636078defbf888d8457a7c76f85c8f114c9d9c1b8e6b8c0c8b4f3c3c3c3"
+    }
+  ],
+  "interaction": {
+    "interactionId": "interaction-0001"
+  }
+}

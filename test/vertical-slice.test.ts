@@ -1,0 +1,115 @@
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import assert from "node:assert/strict";
+
+import type { CustomMessage, SessionTreeEntry } from "@earendil-works/pi-agent-core";
+
+import { defaultAgentConfig } from "../src/config/load.js";
+import { IRIS_INPUT_META_CONTENT, IRIS_INPUT_META_CUSTOM_TYPE } from "../src/contracts/context.js";
+import {
+  computeContentLayoutHash,
+  encodeInputFrames,
+  inputPairKey,
+} from "../src/runtime/companion.js";
+import {
+  reopenActiveSession,
+  runMinimalSlice,
+  sampleAgentInput,
+} from "../src/runtime/vertical-slice.js";
+
+function messageEntries(entries: SessionTreeEntry[]): Array<{
+  type: string;
+  message: {
+    role: string;
+    customType?: string;
+    content: unknown;
+    details?: unknown;
+  };
+}> {
+  return entries
+    .filter((entry) => entry.type === "message")
+    .map(
+      (entry) =>
+        entry as SessionTreeEntry & {
+          message: { role: string; customType?: string; content: unknown; details?: unknown };
+        },
+    );
+}
+
+test("R1-P0 mock vertical slice reaches settled with one sequential tool", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-slice-test-"));
+  const config = defaultAgentConfig();
+  const input = sampleAgentInput();
+
+  const result = await runMinimalSlice({ dataRoot, config, input });
+  const messages = messageEntries(result.entries);
+  const users = messages.filter((entry) => entry.message.role === "user");
+  const companions = messages.filter(
+    (entry) =>
+      entry.message.role === "custom" && entry.message.customType === IRIS_INPUT_META_CUSTOM_TYPE,
+  );
+  const assistants = messages.filter((entry) => entry.message.role === "assistant");
+  const toolResults = messages.filter((entry) => entry.message.role === "toolResult");
+
+  assert.equal(result.observers.settled, true);
+  assert.ok(result.observers.contextPasses >= 2);
+  assert.equal(result.observers.toolCallOrder.length, 1);
+  assert.equal(result.observers.toolResultOrder.length, 1);
+  assert.equal(result.observers.toolCallOrder[0]?.toolCallId, "tool-call-1");
+  assert.equal(result.observers.toolResultOrder[0]?.toolCallId, "tool-call-1");
+  assert.equal(new Set(result.observers.systemPromptValues).size, 1);
+  assert.ok(result.observers.systemPromptValues[0]?.includes("IRIS SYSTEM PROMPT V1"));
+
+  for (const snapshot of result.observers.providerContextSnapshots) {
+    assert.ok(!snapshot.includes(IRIS_INPUT_META_CONTENT));
+    assert.ok(!snapshot.includes("iris_input_meta"));
+    assert.ok(!snapshot.includes("IRIS_INPUT_V1"));
+  }
+
+  assert.equal(users.length, 1);
+  assert.equal(companions.length, 1);
+  assert.equal(assistants.length, 2);
+  assert.equal(toolResults.length, 1);
+
+  const userIndex = result.entries.findIndex(
+    (entry) => entry.type === "message" && entry.message.role === "user",
+  );
+  const companionEntry = result.entries[userIndex + 1];
+  assert.ok(
+    companionEntry?.type === "message" &&
+      companionEntry.message.role === "custom" &&
+      companionEntry.message.customType === IRIS_INPUT_META_CUSTOM_TYPE,
+  );
+  const companion = companionEntry.message as CustomMessage<{
+    iris: { inputId: string; pairKey: string; contentLayoutHash: string };
+  }>;
+  assert.equal(companion.details?.iris.inputId, input.inputId);
+  assert.equal(companion.details?.iris.pairKey, inputPairKey(input));
+  assert.equal(
+    companion.details?.iris.contentLayoutHash,
+    computeContentLayoutHash(input, encodeInputFrames(input.blocks)),
+  );
+
+  const toolResult = toolResults[0]?.message as { details: { iris: { toolExecutionKey: string } } };
+  assert.ok(toolResult.details.iris.toolExecutionKey.length === 64);
+  assert.equal(result.assistantMessage.role, "assistant");
+});
+
+test("restart reopens the same active Session without synthetic entries", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-restart-test-"));
+  const config = defaultAgentConfig();
+  const input = sampleAgentInput();
+
+  const first = await runMinimalSlice({ dataRoot, config, input });
+  const firstEntryCount = first.entries.length;
+
+  const reopened = await reopenActiveSession({ dataRoot, config, input });
+  assert.equal(reopened.runtimeSessionId, first.runtimeSessionId);
+  assert.equal(reopened.entries.length, firstEntryCount);
+
+  assert.ok(!existsSync(join(dataRoot, "invocation.db")));
+  assert.ok(!existsSync(join(dataRoot, "result.db")));
+});
