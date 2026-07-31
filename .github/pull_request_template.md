@@ -1,36 +1,42 @@
-## Roadmap binding
+## Roadmap 绑定
 
-- Milestone:
-- Exit Gate:
+- 里程碑：
+- Exit Gate：
 
-## Notion specifications consulted
+## 已查阅的 Notion 规格
 
-- Page and section:
+- 页面与章节：
 
-## What changed
+## 本次修改
 
 
-## Durable state or public contract impact
+## 持久状态与公开契约影响
 
-- [ ] None
-- [ ] Migration included
-- [ ] Contract compatibility tests included
+- [ ] 无
+- [ ] 已包含 migration
+- [ ] 已包含契约兼容性测试
 
-## Validation
+## 验证
 
-Commands executed:
+实际执行的命令：
 
 ```text
 
 ```
 
-## Known gaps
+结果：
 
-- Mocks:
-- Untested paths:
-- Remaining work:
+## 已知缺口
 
-## Specification impact
+- Mock：
+- 未测试路径：
+- 剩余工作：
 
-- [ ] No specification update required
-- [ ] Specification update required and described above
+## 规格影响
+
+- [ ] 不需要更新规格
+- [ ] 需要更新规格，并已在上文说明
+
+## 进度声明
+
+- [ ] 本 PR 只提交可审查证据，不自行修改 Notion 正式完成率
