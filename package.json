@@ -1,0 +1,15 @@
+{
+  "name": "iris-agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Runtime and identity project for Iris.",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "syntax:check": "node --check src/project.js && node --check src/index.js && node --check test/project.test.js",
+    "test": "node --test",
+    "check": "npm run syntax:check && npm test"
+  }
+}
