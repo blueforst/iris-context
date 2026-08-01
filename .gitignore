@@ -1,6 +1,11 @@
 node_modules/
 dist/
 coverage/
+var/
+.iris-data/
+test-results/
+*.sqlite
+*.sqlite3
 *.log
 .env
 .env.*

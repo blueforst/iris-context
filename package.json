@@ -5,11 +5,38 @@
   "type": "module",
   "description": "Runtime and identity project for Iris.",
   "engines": {
-    "node": ">=22.19.0"
+    "node": "22.19.0"
   },
   "scripts": {
-    "syntax:check": "node --check src/project.js && node --check src/index.js && node --check test/project.test.js",
-    "test": "node --test",
-    "check": "npm run syntax:check && npm test"
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.mjs",
+    "dist:smoke": "node scripts/dist-smoke.mjs",
+    "test": "tsx --test test/**/*.test.ts",
+    "test:contract": "tsx --test test/contracts.test.ts test/migration.test.ts",
+    "migration:smoke": "tsx scripts/migration-smoke.ts",
+    "bench": "tsx scripts/bench-smoke.ts",
+    "crash:harness": "tsx scripts/crash-harness.ts",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run migration:smoke && npm run build && npm run dist:smoke"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.82.1",
+    "@earendil-works/pi-ai": "0.82.1",
+    "@earendil-works/pi-storage-sqlite-node": "0.82.1",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "proper-lockfile": "4.1.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@types/node": "22.19.0",
+    "@types/proper-lockfile": "4.1.4",
+    "eslint": "9.39.5",
+    "prettier": "3.9.6",
+    "tsx": "4.23.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.65.0"
   }
 }
