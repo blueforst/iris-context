@@ -5,18 +5,19 @@
   "publishStatus": "artifact_ready_pending_release",
   "consumptionRule": "iris_agent must consume this exact major.minor version and must not copy or hand-write memory DTOs.",
   "schemas": [
-    "capability-handshake-v1.schema.json",
-    "historian-publication-v1.schema.json",
-    "publication-acceptance-request-v1.schema.json",
     "acceptance-receipt-v1.schema.json",
+    "capability-handshake-v1.schema.json",
     "duplicate-replay-receipt-v1.schema.json",
-    "idempotency-conflict-error-v1.schema.json",
-    "unsupported-version-error-v1.schema.json",
-    "health-response-v1.schema.json",
-    "recall-request-v1.schema.json",
-    "memory-recall-card-v1.schema.json",
     "expansion-request-v1.schema.json",
-    "expansion-response-v1.schema.json"
+    "expansion-response-v1.schema.json",
+    "health-response-v1.schema.json",
+    "historian-publication-v1.schema.json",
+    "idempotency-conflict-error-v1.schema.json",
+    "memory-recall-card-v1.schema.json",
+    "publication-acceptance-request-v1.schema.json",
+    "recall-request-v1.schema.json",
+    "sequence-conflict-error-v1.schema.json",
+    "unsupported-version-error-v1.schema.json"
   ],
   "owner": "blueforst/iris_memory"
 }

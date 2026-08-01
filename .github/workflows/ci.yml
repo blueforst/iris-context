@@ -23,4 +23,6 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run migration:smoke
+      - run: npm run crash:check
       - run: npm run build
+      - run: npm run dist:smoke

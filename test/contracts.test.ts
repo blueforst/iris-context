@@ -25,6 +25,33 @@ test("memory contract pin is exact and does not copy memory DTOs", () => {
   );
 });
 
+test("memory contract pin schema set matches the published v1 manifest", () => {
+  // This is the authoritative schema list published by iris-memory v0.1.0
+  // (contracts/assets/manifest.json). The pin must match it exactly so the
+  // agent consumes the same contract surface the memory service accepts.
+  const publishedSchemas = [
+    "acceptance-receipt-v1.schema.json",
+    "capability-handshake-v1.schema.json",
+    "duplicate-replay-receipt-v1.schema.json",
+    "expansion-request-v1.schema.json",
+    "expansion-response-v1.schema.json",
+    "health-response-v1.schema.json",
+    "historian-publication-v1.schema.json",
+    "idempotency-conflict-error-v1.schema.json",
+    "memory-recall-card-v1.schema.json",
+    "publication-acceptance-request-v1.schema.json",
+    "recall-request-v1.schema.json",
+    "sequence-conflict-error-v1.schema.json",
+    "unsupported-version-error-v1.schema.json",
+  ];
+  assert.deepEqual([...MEMORY_CONTRACTS_PIN.schemas].sort(), publishedSchemas.sort());
+});
+
+test("memory contract pin version is a strict 0.1.x semver", () => {
+  assert.match(MEMORY_CONTRACTS_PIN.version, /^0\.1\.\d+$/);
+  assert.equal(MEMORY_CONTRACTS_PIN.major, 0);
+});
+
 test("originHash is deterministic and canonical", () => {
   const origin = {
     schemaVersion: 1,
