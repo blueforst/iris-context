@@ -1,13 +1,13 @@
 {
   "package": "iris-memory-contracts",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "major": 0,
   "publishStatus": "artifact_ready_pending_release",
   "consumptionRule": "iris_agent must consume this exact major.minor version and must not copy or hand-write memory DTOs.",
   "manifestSha256": "2cb22deb5efded5a112dbb38c19506e6185ad328a973f7a96d9e66faf59a761b",
   "schemas": [
     "acceptance-receipt-v1.schema.json",
-    "capability-handshake-v1.schema.json",
+    "capability-handshake-v2.schema.json",
     "duplicate-replay-receipt-v1.schema.json",
     "expansion-request-v1.schema.json",
     "expansion-response-v1.schema.json",

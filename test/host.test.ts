@@ -677,3 +677,152 @@ test("review-pass2 #5: Host acceptInput validates and is the only normalization 
     await host.shutdown();
   }
 });
+
+test("review-pass3 #1: corrupt companion pairKey/layout is NOT a verified full pair", async () => {
+  // A companion carrying the right inputId but a WRONG pairKey or layout hash
+  // must not promote the ingress record — identity-safe verification.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-badpair-"));
+  const config = defaultAgentConfig();
+  const paths = resolveDataRootPaths(dataRoot, config);
+  initializeDataRoot(dataRoot, config);
+
+  const store = new RuntimeEpochStore(
+    paths.epochRegistryDb,
+    config.runtime_sessions.session_id_prefix,
+    config.runtime_sessions.timezone,
+  );
+  const active = store.ensureActive("2026-08-01T12:00:00.000Z");
+  store.close();
+  const sessionHandle = await openOrCreateSession(dataRoot, config, active.runtimeSessionId);
+  const session = sessionHandle.session;
+  const wire = "IRIS_INPUT_V1\ninline_text:10\nhello iris\n";
+  await session.appendMessage({ role: "user", content: wire, timestamp: Date.now() });
+  // Companion with the right inputId but a WRONG pairKey (all zeros).
+  await session.appendCustomMessageEntry("iris_input_meta", "IRIS_INPUT_META_V1", false, {
+    iris: {
+      schemaVersion: 1,
+      inputId: "corrupt-0001",
+      pairKey: "0".repeat(64),
+      contentLayoutHash: "0".repeat(64),
+      blocks: [],
+    },
+  });
+  const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
+  await storage.cleanup();
+
+  const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
+  const ledger = new InputAcceptanceLedger(paths.ingressDb, paths.blobsIngress, 20, 1);
+  ledger.accept(makeInput("corrupt-0001", "hello iris"), "corrupt-0001");
+  ledger.close();
+
+  // The corrupt pair must NOT be verified as a full pair: the UserMessage
+  // wire exists but the companion fails pairKey/layout verification, so the
+  // record enters partial/incomplete recovery (rejected, never re-prompted,
+  // never guessed). The corrupt companion must not block delivery NOR falsely
+  // commit.
+  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  const events: string[] = [];
+  const unsub = host.onEvent((e) => events.push(e.type));
+  const pump = host.run();
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  const record = host.getIngress().getRecord("corrupt-0001", 1);
+  assert.equal(
+    record?.rejectionCode,
+    "partial_pair_incomplete",
+    "corrupt companion must not be trusted: partial recovery, no false commit",
+  );
+  assert.equal(events.includes("turn_start"), false, "partial recovery must not re-prompt");
+  unsub();
+  await host.shutdown();
+  await pump;
+});
+
+test("review-pass3 #2: two inputs with identical body under different inputIds are classified independently", async () => {
+  // Same wire, different inputId: an orphan UserMessage (no companion) for
+  // input A must NOT reject input B (same body) that was never appended.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-ambig-"));
+  const config = defaultAgentConfig();
+  const paths = resolveDataRootPaths(dataRoot, config);
+  initializeDataRoot(dataRoot, config);
+
+  const store = new RuntimeEpochStore(
+    paths.epochRegistryDb,
+    config.runtime_sessions.session_id_prefix,
+    config.runtime_sessions.timezone,
+  );
+  const active = store.ensureActive("2026-08-01T12:00:00.000Z");
+  store.close();
+  const sessionHandle = await openOrCreateSession(dataRoot, config, active.runtimeSessionId);
+  const session = sessionHandle.session;
+  // UserMessage for input "a-0001" with body "same body" — NO companion.
+  await session.appendMessage({
+    role: "user",
+    content: "IRIS_INPUT_V1\ninline_text:9\nsame body\n",
+    timestamp: Date.now(),
+  });
+  const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
+  await storage.cleanup();
+
+  // BOTH a-0001 and b-0001 accepted with the SAME body.
+  const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
+  const ledger = new InputAcceptanceLedger(paths.ingressDb, paths.blobsIngress, 20, 1);
+  ledger.accept(makeInput("a-0001", "same body"), "a-0001");
+  ledger.accept(makeInput("b-0001", "same body"), "b-0001");
+  ledger.close();
+
+  // The orphan UserMessage wire matches BOTH envelopes -> ambiguous recovery:
+  // neither is silently committed, neither is blindly re-prompted as "no
+  // append". Both become rejected ambiguous_wire_recovery (safe: no second
+  // logical input can be appended, and no wrong identity is guessed).
+  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  const events: string[] = [];
+  const unsub = host.onEvent((e) => events.push(e.type));
+  const pump = host.run();
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  const recA = host.getIngress().getRecord("a-0001", 1);
+  const recB = host.getIngress().getRecord("b-0001", 1);
+  assert.equal(recA?.rejectionCode, "ambiguous_wire_recovery");
+  assert.equal(recB?.rejectionCode, "ambiguous_wire_recovery");
+  assert.equal(events.includes("turn_start"), false, "ambiguous recovery must not re-prompt");
+  unsub();
+  await host.shutdown();
+  await pump;
+});
+
+test("review-pass3 #3: rollover post-construction fault flips not-ready and releases resources", async () => {
+  // Fault injection on each post-construction window (dispose_old,
+  // activate_rollover, cas_swap): the rollover must throw deterministically,
+  // the pump must flip not-ready, and shutdown must still release the lock.
+  for (const fault of ["dispose_old", "activate_rollover", "cas_swap"] as const) {
+    const dataRoot = mkdtempSync(join(tmpdir(), `iris-host-fault-${fault}-`));
+    const config = defaultAgentConfig();
+    const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+    host._setFaultPoint(fault);
+    const events: string[] = [];
+    const unsub = host.onEvent((e) => events.push(e.type));
+    let pump: Promise<void>;
+    try {
+      pump = host.run();
+      host.acceptInput(makeInput(`f-${fault}`), `f-${fault}`);
+      // The invocation settles (token produced); the pending rollover then
+      // faults at the injected point.
+      await waitFor(() => events.filter((e) => e === "settled").length >= 1);
+      host.requestRollover(`fault_${fault}`);
+      // The pump must fail (not-ready), NOT silently mis-switch.
+      const messages = {
+        dispose_old: "old Capsule dispose failure",
+        activate_rollover: "epoch activation failure",
+        cas_swap: "registry swap failure",
+      } as const;
+      await assert.rejects(pump, new RegExp(messages[fault]));
+      assert.equal(host.health().ready, false, "rollover fault must flip not-ready");
+    } finally {
+      unsub();
+      // Shutdown must still release the lock (no leak).
+      await host.shutdown().catch(() => undefined);
+      // Lock is re-acquirable: a fresh host opens immediately.
+      const second = await IrisHost.open({ dataRoot, config, provider: "mock" });
+      await second.shutdown();
+    }
+  }
+});

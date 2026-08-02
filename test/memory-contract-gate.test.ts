@@ -180,3 +180,35 @@ test("cross-repo: committed artifact carries provenance and matches its pin", ()
   assert.deepEqual(rootFiles, ["manifest.json"]);
   assert.deepEqual(rootDirs.sort(), ["fixtures", "openapi", "schemas"]);
 });
+
+test("cross-repo: pin metadata EXACTLY equals the pinned artifact (review-pass-3)", () => {
+  // The pin is an exact contract-version pinning: version, schema set,
+  // package and owner must equal the artifact/provenance byte-for-byte —
+  // not just the manifest hash.
+  const manifest = readJson("manifest.json");
+  const provenance = JSON.parse(
+    readFileSync(join(ARTIFACT_ROOT, "..", "provenance.json"), "utf8"),
+  ) as Record<string, unknown>;
+  const pin = readContractPin();
+
+  assert.equal(pin.version, manifest["version"], "pin.version must equal manifest.version");
+  assert.equal(
+    pin.version,
+    provenance["contractVersion"],
+    "pin.version must equal provenance contractVersion",
+  );
+  assert.equal(pin.package, manifest["package"]);
+  assert.equal(pin.package, "iris-memory-contracts");
+  assert.equal(provenance["producer"], "blueforst/iris_memory");
+  assert.equal(pin.owner, "blueforst/iris_memory");
+  assert.equal(pin.owner, provenance["producer"]);
+
+  // Schema set: exact basename set equality (v2 present, v1 absent).
+  const manifestSchemas = (manifest["schemas"] as string[]).map((relative) =>
+    relative.split("/").pop(),
+  );
+  const pinSchemas = [...pin.schemaSet].map((name) => name.split("/").pop());
+  assert.deepEqual([...pinSchemas].sort(), [...manifestSchemas].sort());
+  assert.ok(pinSchemas.includes("capability-handshake-v2.schema.json"));
+  assert.ok(!pinSchemas.includes("capability-handshake-v1.schema.json"));
+});
