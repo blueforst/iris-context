@@ -125,7 +125,9 @@ test("IrisHost: rollover recovery — window 2/3 (creating epoch + new session b
   );
   const active = store.ensureActive("2026-08-01T12:00:00.000Z");
   const pending = store.beginRollover("2026-08-01T12:00:00.000Z");
-  // The new Pi Session row was created (crash after create, before CAS).
+  // The active Epoch's Session exists (a real product data root always has
+  // one); the new Pi Session row was created (crash after create, before CAS).
+  await openOrCreateSession(dataRoot, config, active.runtimeSessionId);
   await openOrCreateSession(dataRoot, config, pending.runtimeSessionId);
   store.close();
 
@@ -151,6 +153,7 @@ test("IrisHost: rollover recovery — multiple active epochs is corrupt and refu
     config.runtime_sessions.timezone,
   );
   store.ensureActive("2026-08-01T12:00:00.000Z");
+  await openOrCreateSession(dataRoot, config, "iris-runtime-2026-08-01-1");
   // Force a second active row (corrupt state) — the Host must NOT pick one
   // by creation time; it enters not-ready/corrupt.
   const { DatabaseSync } = await import("node:sqlite");
@@ -188,6 +191,8 @@ test("IrisHost: closed/closed_incomplete sessions never receive new inputs", asy
   const active = store.ensureActive("2026-08-01T12:00:00.000Z");
   store.markClosed(active.epochId, "closed", "2026-08-01T13:00:00.000Z");
   const fresh = store.ensureActive("2026-08-01T14:00:00.000Z");
+  // The fresh active Epoch's Session exists (real data root invariant).
+  await openOrCreateSession(dataRoot, config, fresh.runtimeSessionId);
   store.close();
 
   const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
@@ -349,6 +354,8 @@ test("IrisHost: rollover recovery — window 1 (requested, old Session not yet s
   const active = store.ensureActive("2026-08-01T12:00:00.000Z");
   store.requestRollover("crash_before_settled"); // pending only, no switch
   store.close();
+  // The active Epoch's Session exists (real data root invariant).
+  await openOrCreateSession(dataRoot, config, active.runtimeSessionId);
 
   const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
   try {
@@ -407,3 +414,130 @@ async function waitFor(predicate: () => boolean, timeoutMs = 15000): Promise<voi
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
 }
+
+test("IrisHost: A3 — rollover requires a native-settled token, not just idle", async () => {
+  // A freshly started Host is `idle` but has NO settled authorization: a
+  // pending admin rollover must NOT switch the Epoch until an invocation
+  // actually reaches native settled on the active Epoch.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-a3-"));
+  const config = defaultAgentConfig();
+  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  const events: string[] = [];
+  const unsubscribe = host.onEvent((event) => events.push(event.type));
+  try {
+    const pumpPromise = host.run();
+    const epochId = host.getCurrentEpoch().epochId;
+    // Request rollover while idle with NO settled ever observed.
+    host.requestRollover("no_settled_never");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(
+      host.getCurrentEpoch().epochId,
+      epochId,
+      "A3: rollover must not fire without a native-settled token",
+    );
+    assert.equal(events.includes("rollover_completed"), false);
+
+    // After a real invocation settles, the token is produced and consumed:
+    // rollover may then fire.
+    host.acceptInput(makeInput("a3-0001"), "a3-0001");
+    await waitFor(() => events.filter((e) => e === "settled").length >= 1);
+    // Re-request after the settled boundary, then wait for the switch.
+    host.requestRollover("after_settled");
+    await waitFor(() => events.includes("rollover_completed"));
+    assert.notEqual(host.getCurrentEpoch().epochId, epochId);
+    await host.shutdown();
+    await pumpPromise;
+  } finally {
+    unsubscribe();
+    await host.shutdown().catch(() => undefined);
+  }
+});
+
+test("IrisHost: A5 — active Epoch with missing Session is not-ready/corrupt", async () => {
+  // An existing active Epoch whose Pi Session row is missing must fail closed
+  // at startup (never silently create an empty Session masquerading as the
+  // lost history).
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-a5-"));
+  const config = defaultAgentConfig();
+  const paths = resolveDataRootPaths(dataRoot, config);
+  initializeDataRoot(dataRoot, config);
+  const store = new RuntimeEpochStore(
+    paths.epochRegistryDb,
+    config.runtime_sessions.session_id_prefix,
+    config.runtime_sessions.timezone,
+  );
+  store.ensureActive("2026-08-01T12:00:00.000Z"); // Epoch exists, Session does NOT
+  store.close();
+
+  await assert.rejects(
+    IrisHost.open({ dataRoot, config, provider: "mock" }),
+    /missing\/corrupt: Pi Session/,
+  );
+  // The lock was released by the failed startup (re-openable after repair).
+  const { SqliteSessionRepo, createNodeSqliteFactory } =
+    await import("@earendil-works/pi-storage-sqlite-node");
+  const { nodeSqliteRepoEnv } = await import("../src/runtime/pi-env.js");
+  const repo = new SqliteSessionRepo({
+    env: nodeSqliteRepoEnv(dataRoot),
+    sqlite: createNodeSqliteFactory(),
+    databasePath: paths.sessionDb,
+  });
+  await repo.create({ id: "iris-runtime-2026-08-01-1", cwd: dataRoot });
+  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  await host.shutdown();
+});
+
+test("IrisHost: A1 — accepted record whose Pi pair exists is promoted, not re-prompted", async () => {
+  // Simulate: an input was accepted AND its UserMessage + companion pair was
+  // durably committed to the Pi Session, but the process crashed before
+  // settled. On restart the record must be promoted to session_committed —
+  // NOT re-prompted (no second UserMessage).
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-a1-"));
+  const config = defaultAgentConfig();
+  const paths = resolveDataRootPaths(dataRoot, config);
+  initializeDataRoot(dataRoot, config);
+
+  // First run: accept + fully settle the input (creates the Pi pair).
+  const first = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  const pump1 = first.run();
+  const events1: string[] = [];
+  const unsub1 = first.onEvent((e) => events1.push(e.type));
+  first.acceptInput(makeInput("a1-0001"), "a1-0001");
+  await waitFor(() => events1.includes("settled"));
+  const record = first.getIngress().getRecord("a1-0001", 1);
+  assert.equal(record?.state, "session_committed");
+  unsub1();
+  await first.shutdown();
+  await pump1;
+
+  // Simulate the crash-before-settled window: rewind the record to `accepted`
+  // (the Pi pair still exists in the Session).
+  const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
+  const ledger = new InputAcceptanceLedger(paths.ingressDb, paths.blobsIngress, 20, 1);
+  ledger.rewindToAccepted("a1-0001", 1);
+  ledger.close();
+
+  // Restart: the record must be promoted to session_committed by startup
+  // reconciliation (the full pair exists) and never re-prompted.
+  const restarted = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  const events2: string[] = [];
+  const unsub2 = restarted.onEvent((e) => events2.push(e.type));
+  const pump2 = restarted.run();
+  // Give the pump time to run if it (wrongly) tried to re-prompt; the input
+  // is already bound to a Pi pair, so it must NOT be prompted again.
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  const after = restarted.getIngress().getRecord("a1-0001", 1);
+  assert.equal(
+    after?.state,
+    "session_committed",
+    "A1: full pair must be promoted, not re-prompted",
+  );
+  assert.equal(
+    events2.includes("turn_start"),
+    false,
+    "A1: committed input must never be re-prompted",
+  );
+  unsub2();
+  await restarted.shutdown();
+  await pump2;
+});
