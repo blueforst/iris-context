@@ -572,20 +572,20 @@ test("review-pass2 #1: partial pair (UserMessage w/o companion) fails closed, ne
   ledger.accept(makeInput("partial-0001", "hello iris"), "partial-0001");
   ledger.close();
 
-  // Restart: reconciliation must classify the orphan UserMessage as a partial
-  // pair and mark the record rejected — no re-prompt.
-  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
-  const events: string[] = [];
-  const unsub = host.onEvent((e) => events.push(e.type));
-  const pump = host.run();
-  await new Promise((resolve) => setTimeout(resolve, 800));
-  const record = host.getIngress().getRecord("partial-0001", 1);
-  assert.equal(record?.state, "rejected", "partial pair must fail closed");
-  assert.equal(record?.rejectionCode, "partial_pair_incomplete");
-  assert.equal(events.includes("turn_start"), false, "partial pair must never re-prompt");
-  unsub();
-  await host.shutdown();
-  await pump;
+  // Restart: the orphan UserMessage wire proves only content equality, never
+  // identity (review-pass-5 #2) — the Host fails closed into not-ready rather
+  // than permanently rejecting a 202-accepted input or re-prompting it.
+  await assert.rejects(
+    IrisHost.open({ dataRoot, config, provider: "mock" }),
+    /ambiguous ingress recovery for inputs: partial-0001/,
+  );
+  // The lock was released by the failed startup.
+  const { DatabaseSync } = await import("node:sqlite");
+  const repairDb = new DatabaseSync(paths.ingressDb);
+  repairDb.prepare("DELETE FROM ingress_acceptances WHERE input_id = 'partial-0001'").run();
+  repairDb.close();
+  const second = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  await second.shutdown();
 });
 
 test("review-pass2 #2: archives-only data root creates a fresh Epoch + Session", async () => {
@@ -717,24 +717,19 @@ test("review-pass3 #1: corrupt companion pairKey/layout is NOT a verified full p
 
   // The corrupt pair must NOT be verified as a full pair: the UserMessage
   // wire exists but the companion fails pairKey/layout verification, so the
-  // record enters partial/incomplete recovery (rejected, never re-prompted,
-  // never guessed). The corrupt companion must not block delivery NOR falsely
-  // commit.
-  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
-  const events: string[] = [];
-  const unsub = host.onEvent((e) => events.push(e.type));
-  const pump = host.run();
-  await new Promise((resolve) => setTimeout(resolve, 800));
-  const record = host.getIngress().getRecord("corrupt-0001", 1);
-  assert.equal(
-    record?.rejectionCode,
-    "partial_pair_incomplete",
-    "corrupt companion must not be trusted: partial recovery, no false commit",
+  // record enters ambiguous/incomplete recovery — the Host fails closed into
+  // not-ready (never false-commits, never re-prompts, never guesses identity).
+  await assert.rejects(
+    IrisHost.open({ dataRoot, config, provider: "mock" }),
+    /ambiguous ingress recovery for inputs: corrupt-0001/,
   );
-  assert.equal(events.includes("turn_start"), false, "partial recovery must not re-prompt");
-  unsub();
-  await host.shutdown();
-  await pump;
+  // The lock was released by the failed startup.
+  const { DatabaseSync } = await import("node:sqlite");
+  const repairDb = new DatabaseSync(paths.ingressDb);
+  repairDb.prepare("DELETE FROM ingress_acceptances WHERE input_id = 'corrupt-0001'").run();
+  repairDb.close();
+  const second = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  await second.shutdown();
 });
 
 test("review-pass3 #2: two inputs with identical body under different inputIds are classified independently", async () => {
@@ -822,6 +817,18 @@ test("review-pass4 #2: rollover post-construction fault => fail-stop, recover fo
       assert.throws(() => {
         host.recover();
       }, /cannot recover a fail-stop host/);
+      // review-pass-5 #3: state-ownership assertions per window. For
+      // cas_swap the Epoch DB was already activated to the new Epoch but the
+      // registry still points at the old (disposed) runtime — the process is
+      // deterministically not-ready and only restart can reconcile.
+      if (fault === "cas_swap") {
+        const dbActive = host.getEpochStore().getActive();
+        assert.notEqual(
+          dbActive?.epochId,
+          host.getCurrentEpoch().epochId,
+          "cas_swap fault: DB active Epoch already advanced but registry/currentEpoch still old",
+        );
+      }
     } finally {
       unsub();
       // Shutdown must still release the lock (no leak).
