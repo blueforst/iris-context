@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -949,4 +949,137 @@ test("review-pass4 #1b: same-body A and B both with verified pairs are both prom
   } finally {
     await host.shutdown();
   }
+});
+
+test("review-pass6 #2: tampered / wrong-hash / missing ingress blob is integrity-rejected, never delivered", async () => {
+  // The verified load (raw-bytes ref hash + byteLength + canonical
+  // payload_hash) is the ONLY envelope read path. A tampered blob, a blob
+  // whose bytes hash to a different ref.hash, and a missing blob must all be
+  // typed-rejected and dropped from the FIFO — never JSON.parse'd and
+  // prompted.
+  for (const scenario of ["tampered", "wrong_ref", "missing"] as const) {
+    const dataRoot = mkdtempSync(join(tmpdir(), `iris-host-integrity-${scenario}-`));
+    const config = defaultAgentConfig();
+    const paths = resolveDataRootPaths(dataRoot, config);
+    initializeDataRoot(dataRoot, config);
+
+    const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
+    const ledger = new InputAcceptanceLedger(paths.ingressDb, paths.blobsIngress, 20, 1);
+    const input = makeInput(`i-${scenario}`, `body ${scenario}`);
+    ledger.accept(input, `i-${scenario}`);
+    ledger.close();
+
+    // Locate the blob and corrupt it per scenario.
+    const record = new InputAcceptanceLedger(paths.ingressDb, paths.blobsIngress, 20, 1).getRecord(
+      `i-${scenario}`,
+      1,
+    );
+    const blobDir = paths.blobsIngress;
+    const blobPath = join(blobDir, record?.normalizedInputRef?.uri ?? "missing.json");
+    if (scenario === "tampered") {
+      const original = readFileSync(blobPath, "utf8");
+      const parsed = JSON.parse(original) as Record<string, unknown>;
+      parsed["blocks"] = [{ blockId: "tampered", content: { mode: "inline_text", text: "x" } }];
+      writeFileSync(blobPath, JSON.stringify(parsed), "utf8");
+    } else if (scenario === "wrong_ref") {
+      // Rewrite the blob so its raw bytes hash to a DIFFERENT hash than the
+      // ledger ref.hash (append a byte, then fix JSON with whitespace).
+      const original = readFileSync(blobPath, "utf8");
+      writeFileSync(blobPath, `${original} `, "utf8"); // byteLength/hash mismatch
+    } else {
+      // missing: delete the blob.
+      try {
+        unlinkSync(blobPath);
+      } catch {
+        // already missing
+      }
+    }
+
+    // Restart: the input must be integrity-rejected (no turn_start ever).
+    const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+    const events: string[] = [];
+    const unsub = host.onEvent((e) => events.push(e.type));
+    const pump = host.run();
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    const rec = host.getIngress().getRecord(`i-${scenario}`, 1);
+    assert.equal(
+      rec?.rejectionCode,
+      "envelope_integrity",
+      `scenario ${scenario}: blob must be integrity-rejected`,
+    );
+    assert.equal(
+      events.includes("turn_start"),
+      false,
+      `scenario ${scenario}: tampered/missing blob must never be prompted`,
+    );
+    unsub();
+    await host.shutdown();
+    await pump;
+  }
+});
+
+test("review-pass6 #1: same-identity pair with envelope mismatch is ambiguous, never re-prompted", async () => {
+  // A verified (inputId, pairKey) pair exists in the Session with the SAME
+  // wire as the pending envelope, but its companion metadata does NOT match
+  // the envelope (drifted provenance). The record must enter ambiguous
+  // recovery (not-ready) — NOT be treated as "no Pi append" and re-prompted
+  // (which would append a second logical input).
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-rp61-"));
+  const config = defaultAgentConfig();
+  const paths = resolveDataRootPaths(dataRoot, config);
+  initializeDataRoot(dataRoot, config);
+
+  const store = new RuntimeEpochStore(
+    paths.epochRegistryDb,
+    config.runtime_sessions.session_id_prefix,
+    config.runtime_sessions.timezone,
+  );
+  const active = store.ensureActive("2026-08-01T12:00:00.000Z");
+  store.close();
+  const sessionHandle = await openOrCreateSession(dataRoot, config, active.runtimeSessionId);
+  const session = sessionHandle.session;
+  // Append a UserMessage + companion with a REAL pairKey but a WRONG
+  // triggerOrigin (different authority than the envelope's).
+  const { createInputMetaCompanion, computeContentLayoutHash } =
+    await import("../src/runtime/companion.js");
+  const input = makeInput("mismatch-0001", "same body");
+  const wire = "IRIS_INPUT_V1\ninline_text:9\nsame body\n";
+  const layoutHash = computeContentLayoutHash(input, wire);
+  const companion = createInputMetaCompanion(input, layoutHash, new Date().toISOString());
+  // Drift the companion's triggerOrigin authority AFTER creation.
+  const driftable = companion as unknown as {
+    details: {
+      iris: { triggerOrigin: unknown };
+    };
+  };
+  driftable.details.iris.triggerOrigin = {
+    schemaVersion: 1,
+    channel: "evil",
+    principalKind: "system",
+    authority: "internal_control",
+    trust: "trusted",
+  };
+  await session.appendMessage({ role: "user", content: wire, timestamp: Date.now() });
+  await session.appendMessage(companion);
+  const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
+  await storage.cleanup();
+
+  const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
+  const ledger = new InputAcceptanceLedger(paths.ingressDb, paths.blobsIngress, 20, 1);
+  ledger.accept(makeInput("mismatch-0001", "same body"), "mismatch-0001");
+  ledger.close();
+
+  // Restart: same identity + wire but companion metadata mismatch -> ambiguous
+  // (fail closed, not-ready), never re-prompted.
+  await assert.rejects(
+    IrisHost.open({ dataRoot, config, provider: "mock" }),
+    /ambiguous ingress recovery for inputs: mismatch-0001/,
+  );
+  // Clean up the ambiguous record, then the data root reopens normally.
+  const { DatabaseSync } = await import("node:sqlite");
+  const repairDb = new DatabaseSync(paths.ingressDb);
+  repairDb.prepare("DELETE FROM ingress_acceptances WHERE input_id = 'mismatch-0001'").run();
+  repairDb.close();
+  const second = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  await second.shutdown();
 });
