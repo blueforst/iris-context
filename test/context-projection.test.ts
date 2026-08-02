@@ -82,6 +82,7 @@ function toolResultEntry(
   parentId: string,
   callId: string,
   toolExecutionKey?: string,
+  toolName = "read_only_test_tool",
 ): SessionTreeEntry {
   return {
     type: "message",
@@ -91,7 +92,7 @@ function toolResultEntry(
     message: {
       role: "toolResult",
       toolCallId: callId,
-      toolName: "read_only_test_tool",
+      toolName,
       content: [{ type: "text", text: "ok" }],
       isError: false,
       details:
@@ -302,6 +303,76 @@ test("projection: empty session projects cleanly with zero units", () => {
     result.projectionHash,
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   );
+});
+
+test("projection: corrupt companion (wrong content/display) is NOT verified (reviewer F1)", () => {
+  // The projection must reuse the SAME companion predicate as ingress
+  // reconciliation: a custom message with the right customType but the WRONG
+  // content/display (or a missing pairKey) is NOT a valid pair — it must not
+  // be marked verified and must never become the last-safe-user-anchor.
+  const entries: SessionTreeEntry[] = [
+    userEntry("u-1", null, "IRIS_INPUT_V1\ninline_text:5\nhello\n"),
+    {
+      type: "custom_message",
+      id: "c-bad",
+      parentId: "u-1",
+      timestamp: "2026-08-01T00:00:01.000Z",
+      customType: "iris_input_meta",
+      content: "EVIL-OTHER", // wrong content
+      display: true, // wrong display
+      details: { iris: { inputId: "in-1", pairKey: "k1" } },
+    },
+  ];
+  const result = projectLogicalUnits("iris-runtime-2026-08-01-1", entries);
+  const inputUnit = result.units.find(
+    (u): u is Extract<HistoryProjectionUnit, { kind: "input" }> => u.kind === "input",
+  );
+  assert.ok(inputUnit);
+  assert.equal(
+    inputUnit.verified,
+    false,
+    "corrupt companion (wrong content/display) must NOT be a verified pair",
+  );
+  assert.equal(
+    result.lastSafeUserAnchor,
+    null,
+    "corrupt pair must never become the last-safe-user-anchor (LKG safety)",
+  );
+});
+
+test("projection: companion without pairKey is NOT verified (reviewer F1)", () => {
+  const entries: SessionTreeEntry[] = [
+    userEntry("u-1", null, "IRIS_INPUT_V1\ninline_text:5\nhello\n"),
+    customCompanion("c-1", "u-1", { iris: { inputId: "in-1" } }), // NO pairKey
+  ];
+  const result = projectLogicalUnits("iris-runtime-2026-08-01-1", entries);
+  const inputUnit = result.units.find(
+    (u): u is Extract<HistoryProjectionUnit, { kind: "input" }> => u.kind === "input",
+  );
+  assert.ok(inputUnit);
+  assert.equal(inputUnit.verified, false, "missing pairKey must fail closed");
+  assert.equal(result.lastSafeUserAnchor, null);
+});
+
+test("projection: tool_result unit toolName comes from the native message field (reviewer F2)", () => {
+  const entries: SessionTreeEntry[] = [
+    userEntry("u-1", null, "IRIS_INPUT_V1\ninline_text:5\nhello\n"),
+    customCompanion("c-1", "u-1", { iris: { inputId: "in-1", pairKey: "k1" } }),
+    assistantEntry("a-1", "c-1", [
+      { type: "toolCall", id: "call-1", name: "read_file", arguments: { path: "x" } },
+    ]),
+    // Native toolName = "read_file"; details.iris.toolExecutionKey is the
+    // derived durable key (64-char) — they must NOT be conflated.
+    toolResultEntry("tr-1", "a-1", "call-1", "exec-key-1", "read_file"),
+  ];
+  const result = projectLogicalUnits("iris-runtime-2026-08-01-1", entries);
+  const toolResult = result.units.find(
+    (u): u is Extract<HistoryProjectionUnit, { kind: "tool_result" }> => u.kind === "tool_result",
+  );
+  assert.ok(toolResult);
+  assert.equal(toolResult.toolName, "read_file", "toolName = native Pi toolName field");
+  assert.equal(toolResult.toolExecutionKey, "exec-key-1", "toolExecutionKey = durable derived key");
+  assert.notEqual(toolResult.toolName, toolResult.toolExecutionKey);
 });
 
 test("projection: P5 boundary uses m0/m1 represented watermark contract", () => {

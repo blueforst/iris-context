@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { AgentMessage, SessionTreeEntry } from "@earendil-works/pi-agent-core";
 
-import { IRIS_INPUT_META_CUSTOM_TYPE } from "../contracts/context.js";
+import { findInputPairsByProjection } from "../runtime/context-adapter.js";
 import {
   projectSessionMessages,
   type ProjectedSessionMessage,
@@ -228,29 +228,14 @@ export function projectLogicalUnits(
     }
   }
 
-  // Raw-entry pair discovery (reuses the same raw-adjacency / parent-chain
-  // rule as ingress reconciliation — one pairing basis for the whole path).
+  // Raw-entry pair discovery — REUSES findInputPairsByProjection directly so
+  // the projection shares the SAME companion predicate (content/display/
+  // pairKey) and the same raw-adjacency / parent-chain linkage rule as the
+  // ingress reconciliation path (one pairing basis for the whole path,
+  // reviewer F1). Never reimplements a weaker predicate here.
   const companionByUserEntryId = new Map<string, ProjectedSessionMessage>();
-  const userByEntryId = new Map<string, ProjectedSessionMessage>();
-  for (let index = 0; index < projected.length - 1; index += 1) {
-    const user = projected[index];
-    const companion = projected[index + 1];
-    if (user === undefined || companion === undefined) {
-      continue;
-    }
-    if (user.message.role !== "user") {
-      continue;
-    }
-    const isCompanion =
-      companion.message.role === "custom" &&
-      companion.message.customType === IRIS_INPUT_META_CUSTOM_TYPE;
-    if (!isCompanion) {
-      continue;
-    }
-    if (companion.rawIndex === user.rawIndex + 1 || companion.parentId === user.entryId) {
-      companionByUserEntryId.set(user.entryId, companion);
-      userByEntryId.set(user.entryId, user);
-    }
+  for (const pair of findInputPairsByProjection(projected)) {
+    companionByUserEntryId.set(pair.user.entryId, pair.companion);
   }
 
   // Tool-call adjacency: assistant toolCall parts → toolResult messages.
@@ -376,6 +361,9 @@ export function projectLogicalUnits(
 
     if (message.role === "toolResult") {
       const callId = (message as AgentMessage & { toolCallId?: string }).toolCallId ?? "";
+      // Pi ToolResultMessage carries its native toolName (message.toolName);
+      // details.iris.toolExecutionKey is the derived durable key (F2).
+      const nativeToolName = (message as AgentMessage & { toolName?: string }).toolName ?? "";
       const details = (message as AgentMessage & { details?: unknown }).details as
         { iris?: { toolExecutionKey?: string; assistantEntryId?: string } } | undefined;
       const toolResultUnit: HistoryProjectionUnit = {
@@ -389,10 +377,13 @@ export function projectLogicalUnits(
           toolResultEntryId: item.entryId,
           entrySeq,
           toolCallId: callId,
-          toolName: "",
+          toolName: nativeToolName,
+          ...(details?.iris?.toolExecutionKey === undefined
+            ? {}
+            : { toolExecutionKey: details.iris.toolExecutionKey }),
         }),
         toolCallId: callId,
-        toolName: details?.iris?.toolExecutionKey ?? "",
+        toolName: nativeToolName,
         ...(details?.iris?.toolExecutionKey === undefined
           ? {}
           : { toolExecutionKey: details.iris.toolExecutionKey }),
