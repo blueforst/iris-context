@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:memory-recall-card:v1",
+  "title": "MemoryRecallCardV1",
+  "description": "Stable memory card returned to an Agent recall client.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "memoryRef", "text", "sourcePublicationId", "recallDisposition"],
+  "properties": {
+    "schemaVersion": {
+      "const": "memory-recall-card-v1"
+    },
+    "memoryRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sourcePublicationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "recallDisposition": {
+      "enum": ["available", "suppressed", "contested", "quarantined", "memory_unavailable"]
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "publicationId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "contractVersion": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

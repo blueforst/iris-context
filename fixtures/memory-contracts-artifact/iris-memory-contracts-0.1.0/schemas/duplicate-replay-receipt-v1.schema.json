@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:duplicate-replay-receipt:v1",
+  "title": "DuplicateReplayReceiptV1",
+  "description": "Receipt returned when the exact publication was already accepted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "receiptId",
+    "publicationId",
+    "canonicalPayloadHash",
+    "contractVersion",
+    "originalAcceptedAt"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "duplicate-replay-receipt-v1"
+    },
+    "status": {
+      "const": "duplicate_replay"
+    },
+    "receiptId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "publicationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "canonicalPayloadHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "contractVersion": {
+      "type": "string"
+    },
+    "originalAcceptedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

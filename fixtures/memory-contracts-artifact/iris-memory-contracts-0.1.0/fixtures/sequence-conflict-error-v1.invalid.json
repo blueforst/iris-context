@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "sequence-conflict-error-v1",
+  "error": "other",
+  "publicationId": "44444444-4444-4444-8444-444444444444",
+  "sourceSequence": 1,
+  "expectedCanonicalPayloadHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "receivedCanonicalPayloadHash": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+}

@@ -1,0 +1,6 @@
+{
+  "service": "iris-memory",
+  "contractVersion": "0.01.0",
+  "status": "degraded",
+  "capabilities": ["health.read"]
+}

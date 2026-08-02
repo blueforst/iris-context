@@ -34,8 +34,8 @@ test("memory contract pin schema set matches the published v1 manifest", () => {
   // the two cannot silently diverge from each other.
   assert.equal(
     MEMORY_CONTRACTS_PIN.manifestSha256,
-    "23657ae76e3adb5c55d3a7d68b5d820f34900e96cb923a19eb157e246e887b9f",
-    "manifestSha256 must equal the published iris-memory v0.1.0 manifest hash",
+    "e0a0983958d75a755b0c717e0e2ea38280829ceb3c961b6b6865d4afb631594f",
+    "manifestSha256 must equal the published iris-memory v0.1.0 artifact manifest hash",
   );
   const publishedSchemas = [
     "acceptance-receipt-v1.schema.json",
