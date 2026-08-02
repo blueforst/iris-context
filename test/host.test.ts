@@ -151,29 +151,28 @@ test("IrisHost: rollover recovery — multiple active epochs is corrupt and refu
     config.runtime_sessions.timezone,
   );
   store.ensureActive("2026-08-01T12:00:00.000Z");
-  // Force a second active row (corrupt state) — the registry must not pick
-  // one by creation time.
+  // Force a second active row (corrupt state) — the Host must NOT pick one
+  // by creation time; it enters not-ready/corrupt.
   const { DatabaseSync } = await import("node:sqlite");
   const db = new DatabaseSync(paths.epochRegistryDb);
-  db.prepare("UPDATE runtime_epochs SET status = 'creating' WHERE epoch_id = ?").run(
-    "iris-runtime-2026-08-01-1",
-  );
   db.prepare(
     `INSERT INTO runtime_epochs(epoch_id, runtime_session_id, local_date, ordinal_within_date, status, created_at)
      VALUES ('iris-runtime-2026-08-01-2', 'iris-runtime-2026-08-01-2', '2026-08-01', 2, 'active', '2026-08-01T12:00:01.000Z')`,
   ).run();
   db.close();
 
+  // Real startup path: two active Epochs => not-ready/corrupt, no silent pick.
+  await assert.rejects(
+    IrisHost.open({ dataRoot, config, provider: "mock" }),
+    /corrupt: 2 active epochs/,
+  );
+  // The lock was released by the failed startup. Repair the corrupt state
+  // (delete the duplicate active row) and re-open — the lock is re-acquirable.
+  const repair = new DatabaseSync(paths.epochRegistryDb);
+  repair.prepare("DELETE FROM runtime_epochs WHERE epoch_id = 'iris-runtime-2026-08-01-2'").run();
+  repair.close();
   const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
-  try {
-    // The real startup keeps the active Epoch whose Pi Session actually
-    // exists; the corrupt second active row has no Session row and is left
-    // untouched (no silent guessing). Exactly one Epoch is served.
-    assert.equal(host.getCurrentEpoch().epochId, "iris-runtime-2026-08-01-2");
-    assert.equal(host.sessionStatus().status, "active");
-  } finally {
-    await host.shutdown();
-  }
+  await host.shutdown();
 });
 
 test("IrisHost: closed/closed_incomplete sessions never receive new inputs", async () => {
