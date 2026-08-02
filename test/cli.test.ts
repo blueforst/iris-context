@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,12 +19,51 @@ interface CliRunOutput {
   eventCount: number;
 }
 
-interface CliServeOutput {
-  status: string;
-  lockAcquired: boolean;
-  epochId: string;
-  runtimeSessionId: string;
-  coordinatorPhase: string;
+async function startServeCli(dataRoot: string): Promise<{
+  child: ReturnType<typeof spawn>;
+  port: number;
+}> {
+  const child = spawn(
+    process.execPath,
+    [distBin, "serve", "--data-root", dataRoot, "--port", "0"],
+    { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, FORCE_COLOR: "0" } },
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString("utf8");
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString("utf8");
+  });
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    const match = /"endpoint":\s*"http:\/\/127\.0\.0\.1:(\d+)"/.exec(stdout);
+    if (match?.[1] !== undefined) {
+      return { child, port: Number.parseInt(match[1], 10) };
+    }
+    if (child.exitCode !== null) {
+      throw new Error(`iris serve exited early (${child.exitCode}): ${stderr}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  child.kill("SIGKILL");
+  throw new Error(`iris serve did not become ready: ${stderr}`);
+}
+
+async function stopServeCli(child: ReturnType<typeof spawn>): Promise<void> {
+  if (child.stdin !== null && !child.stdin.destroyed) {
+    child.stdin.end();
+  }
+  await new Promise<void>((resolve) => {
+    child.once("exit", () => {
+      resolve();
+    });
+    setTimeout(resolve, 5000);
+  });
+  if (child.exitCode === null) {
+    child.kill("SIGKILL");
+  }
 }
 
 function runCli(args: string[]): { stdout: string; stderr: string; exitCode: number } {
@@ -163,18 +202,20 @@ test("iris run rejects malformed input structure", () => {
   assert.match(stderr, /non-empty blocks/i);
 });
 
-test("iris serve composes the active Capsule and reports ready", () => {
+test("iris serve starts the long-lived Host and reports ready with a loopback endpoint", async () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "iris-cli-serve-"));
-  const { stdout, exitCode } = runCli(["serve", "--data-root", dataRoot]);
-
-  assert.equal(exitCode, 0);
-  const output = JSON.parse(stdout) as CliServeOutput;
-  assert.equal(output.status, "ready");
-  assert.equal(output.lockAcquired, true);
-  assert.ok(output.epochId.startsWith("iris-runtime-"));
-  assert.ok(output.runtimeSessionId.startsWith("iris-runtime-"));
-  assert.equal(output.coordinatorPhase, "idle");
-  assert.ok(existsSync(join(dataRoot, "runtime-epochs.db")));
+  const { child, port } = await startServeCli(dataRoot);
+  try {
+    // The Host is alive and serving on loopback.
+    const response = await fetch(`http://127.0.0.1:${port}/v1/health`);
+    assert.equal(response.status, 200);
+    const health = (await response.json()) as { ready: boolean; coordinatorPhase: string };
+    assert.equal(health.ready, true);
+    assert.equal(health.coordinatorPhase, "idle");
+    assert.ok(existsSync(join(dataRoot, "runtime-epochs.db")));
+  } finally {
+    await stopServeCli(child);
+  }
 });
 
 test("iris run fails closed on a missing or invalid triggerOrigin", () => {

@@ -6,7 +6,7 @@ import test from "node:test";
 
 import assert from "node:assert/strict";
 
-import type { AgentHarness } from "@earendil-works/pi-agent-core";
+import type { AgentRuntimeEvent, AgentRuntimePort } from "../src/contracts/ports.js";
 
 import { defaultAgentConfig } from "../src/config/load.js";
 import { initializeDataRoot, resolveDataRootPaths } from "../src/host/data-root.js";
@@ -14,6 +14,11 @@ import { createIrisHarness, type InvocationBinding } from "../src/runtime/harnes
 import { RuntimeEpochStore } from "../src/runtime/epoch-manager.js";
 import { createMockProvider } from "../src/runtime/mock-provider.js";
 import { RuntimeCoordinator } from "../src/runtime/runtime-coordinator.js";
+import { PiRuntimeAdapter } from "../src/runtime/pi-runtime-adapter.js";
+import {
+  ActiveRuntimeRegistry,
+  activeRuntimeHandle,
+} from "../src/runtime/active-runtime-registry.js";
 import { directUserRequest } from "../src/contracts/origin.js";
 import type { AgentInput } from "../src/contracts/origin.js";
 import {
@@ -66,17 +71,45 @@ function buildCoordinator(options?: { maxQueuedInputs?: number }): Promise<{
       now,
       providerProfileId: "mock-iris-provider-v1",
     });
+    const adapter = new PiRuntimeAdapter({ harness, session, binding: currentInvocation });
+    const registry = new ActiveRuntimeRegistry();
+    registry.install(activeRuntimeHandle(epoch, adapter, currentInvocation));
     const coordinator = new RuntimeCoordinator({
-      harness,
-      currentInvocation,
-      prepareInvocation: async (nextInput: AgentInput) =>
-        prepareContextSources(nextInput, epoch.runtimeSessionId, epoch.epochId, config, now),
+      activeRuntime: registry,
+      prepareInvocation: async (nextInput: AgentInput, runtimeSessionId: string, epochId: string) =>
+        prepareContextSources(nextInput, runtimeSessionId, epochId, config, now),
       ...(options?.maxQueuedInputs !== undefined
         ? { maxQueuedInputs: options.maxQueuedInputs }
         : {}),
     });
     return { coordinator, currentInvocation, dataRoot };
   })();
+}
+
+/** Build a coordinator backed by a controllable fake AgentRuntimePort. */
+function buildFakeCoordinator(runtime: AgentRuntimePort): RuntimeCoordinator {
+  const epoch = {
+    epochId: "iris-runtime-2026-08-01-1",
+    runtimeSessionId: "iris-runtime-2026-08-01-1",
+    localDate: "2026-08-01",
+    ordinalWithinDate: 1,
+    status: "active" as const,
+    createdAt: "2026-08-01T00:00:00.000Z",
+  };
+  const currentInvocation: InvocationBinding = {
+    input: sampleAgentInput(),
+    prepared: {} as InvocationBinding["prepared"],
+    invocationId: "invocation-input-0001",
+  };
+  const registry = new ActiveRuntimeRegistry();
+  registry.install(activeRuntimeHandle(epoch, runtime, currentInvocation));
+  return new RuntimeCoordinator({
+    activeRuntime: registry,
+    prepareInvocation: async (nextInput: AgentInput) => {
+      void nextInput;
+      return currentInvocation.prepared;
+    },
+  });
 }
 
 test("coordinator runs one invocation to settled and releases the latch", async () => {
@@ -211,7 +244,7 @@ test("coordinator queue rejects beyond capacity", async () => {
 });
 
 test("coordinator forwards abort to the Pi harness and releases the latch", async () => {
-  // A controllable fake harness that parks its prompt() until abort() is
+  // A controllable fake runtime that parks its prompt() until abort() is
   // called, then emits native settled — matching the Pi abort contract
   // (abort -> native agent_end/settled -> release invocation).
   let abortCalled = false;
@@ -219,38 +252,21 @@ test("coordinator forwards abort to the Pi harness and releases the latch", asyn
   const promptGate = new Promise<void>((resolve) => {
     releasePrompt = resolve;
   });
-  const harness = {
-    async prompt(): Promise<{ role: "assistant"; content: [] }> {
+  const runtime: AgentRuntimePort = {
+    async *prompt(): AsyncIterable<AgentRuntimeEvent> {
       await promptGate;
-      return { role: "assistant", content: [] };
+      yield { type: "settled", invocationId: "invocation-input-0001", nextTurnCount: 0 };
     },
     async abort(): Promise<void> {
       abortCalled = true;
       releasePrompt?.();
     },
-    subscribe(listener: (event: { type: string; nextTurnCount?: number }) => void): () => void {
-      // After the abort releases the gate, emit native settled so the
-      // coordinator observes a proper end boundary before releasing.
-      void promptGate.then(() => {
-        listener({ type: "settled", nextTurnCount: 0 });
-      });
-      return () => undefined;
+    getPhase(): "idle" | "turn" | "retry" | "compaction" | "branch_summary" | "failed" {
+      return "idle";
     },
-  } as unknown as AgentHarness;
-
-  const currentInvocation = {
-    input: sampleAgentInput(),
-    prepared: {} as InvocationBinding["prepared"],
-    invocationId: "invocation-input-0001",
   };
-  const coordinator = new RuntimeCoordinator({
-    harness,
-    currentInvocation,
-    prepareInvocation: async (nextInput: AgentInput) => {
-      void nextInput;
-      return currentInvocation.prepared;
-    },
-  });
+
+  const coordinator = buildFakeCoordinator(runtime);
   const input = sampleAgentInput();
   const invocationId = `invocation-${input.inputId}`;
   const events: string[] = [];
@@ -279,34 +295,24 @@ test("coordinator forwards abort to the Pi harness and releases the latch", asyn
 });
 
 test("failed invocation holds the latch until reset (settled-gated)", async () => {
-  // Review blocker #2 (round 2): a harness that resolves WITHOUT emitting
+  // Review blocker #2 (round 2): a runtime that resolves WITHOUT emitting
   // native settled must enter the explicit failed path and keep the
   // single-writer latch held — a second prompt is rejected until reset().
-  const harness = {
-    async prompt(): Promise<{ role: "assistant"; content: [] }> {
-      return { role: "assistant", content: [] };
+  const runtime: AgentRuntimePort = {
+    async *prompt(): AsyncIterable<AgentRuntimeEvent> {
+      // No settled is ever emitted: the run must fail with settled_not_observed.
+      yield { type: "failed", invocationId: "invocation-input-0001", code: "settled_not_observed" };
+      return;
     },
     async abort(): Promise<void> {
       return undefined;
     },
-    subscribe(): () => void {
-      return () => undefined;
+    getPhase(): "idle" | "turn" | "retry" | "compaction" | "branch_summary" | "failed" {
+      return "idle";
     },
-  } as unknown as AgentHarness;
-
-  const currentInvocation = {
-    input: sampleAgentInput(),
-    prepared: {} as InvocationBinding["prepared"],
-    invocationId: "invocation-input-0001",
   };
-  const coordinator = new RuntimeCoordinator({
-    harness,
-    currentInvocation,
-    prepareInvocation: async (nextInput: AgentInput) => {
-      void nextInput;
-      return currentInvocation.prepared;
-    },
-  });
+
+  const coordinator = buildFakeCoordinator(runtime);
 
   const events: string[] = [];
   for await (const event of coordinator.prompt(sampleAgentInput())) {
@@ -330,33 +336,24 @@ test("failed invocation holds the latch until reset (settled-gated)", async () =
 });
 
 test("harness throw marks failed and rejects the next prompt until reset", async () => {
-  // Review blocker #2 (round 2): when the harness throws (provider failure),
+  // Review blocker #2 (round 2): when the runtime throws (provider failure),
   // the run fails and the latch stays held; reset() recovers.
-  const harness = {
-    async prompt(): Promise<never> {
+  const runtime: AgentRuntimePort = {
+    async *prompt(): AsyncIterable<AgentRuntimeEvent> {
+      // The throw happens on first iteration; yield nothing before it so the
+      // coordinator sees the runtime fail before any event is produced.
+      yield { type: "failed", invocationId: "invocation-input-0001", code: "harness_error" };
       throw new Error("provider exploded");
     },
     async abort(): Promise<void> {
       return undefined;
     },
-    subscribe(): () => void {
-      return () => undefined;
+    getPhase(): "idle" | "turn" | "retry" | "compaction" | "branch_summary" | "failed" {
+      return "idle";
     },
-  } as unknown as AgentHarness;
-
-  const currentInvocation = {
-    input: sampleAgentInput(),
-    prepared: {} as InvocationBinding["prepared"],
-    invocationId: "invocation-input-0001",
   };
-  const coordinator = new RuntimeCoordinator({
-    harness,
-    currentInvocation,
-    prepareInvocation: async (nextInput: AgentInput) => {
-      void nextInput;
-      return currentInvocation.prepared;
-    },
-  });
+
+  const coordinator = buildFakeCoordinator(runtime);
 
   await assert.rejects(
     (async () => {
