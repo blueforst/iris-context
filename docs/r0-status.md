@@ -26,3 +26,24 @@ Not implemented or still mock-only:
 - complete Runtime Session rollover and full crash-window suite;
 - live OpenCode Go provider calls;
 - production Provider lock.
+
+## Round 2 status (2026-08-02, branch `round2/r1-p1-live-slice`)
+
+Implemented in this round:
+
+- R1-P1 live provider seam (`opencode-go-provider.ts`) using the locked
+  pi-ai 0.82.1 built-in `opencodeGoProvider()` + `deepseek-v4-flash`, with
+  InMemoryCredentialStore key injection;
+- `runMinimalSlice`/`reopenActiveSession` `provider` mode (`mock` | `live`);
+- `iris run --data-root --input-file [--provider]` CLI command (real
+  Host/CLI vertical slice);
+- epoch rollover (`requestRollover`/`rolloverAfterSettled`, `previous_epoch_id`
+  linkage) and thin `RuntimeCoordinator` (single-writer latch, queued inputs,
+  settled release, abort forwarding);
+- crash-window suite rewritten as real child-process SIGKILL + recovery
+  assertions (`crash:check`, 6 boundaries);
+- CI now runs `crash:check` and `dist:smoke`;
+- contract pin aligned to the published iris-memory v0.1.0 manifest (13 schemas).
+
+Still mock-only / deferred: Historian, Magic Context parity, Memory Client
+integration, production Provider lock, live thinking profile (R1-P2).
