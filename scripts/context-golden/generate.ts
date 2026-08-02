@@ -365,11 +365,19 @@ function extractFromAuthority(): Extracted {
           { sequence: 0, title: "A", content: "Alpha baseline", p1: "Alpha baseline" },
         ],
         passes: [{ isCacheBustingPass: true }],
+        // Authority scenario (m0m1-taxonomy.test.ts "HARD (TTL idle)"): the
+        // m[0] baseline was materialized 1h ago (cachedM0MaterializedAt) and a
+        // response completed AFTER that baseline (lastResponseTime =
+        // materializedAt + 1s), both frozen so regeneration is byte-
+        // deterministic (reviewer F1). cacheExpired=true → HARD fold ONCE;
+        // the fold advances materializedAt past lastResponseTime so the same
+        // signals again within the turn do NOT re-fold (idempotent).
+        cachedM0MaterializedAt: 1_785_696_925_547,
         hardSignals: {
           systemHash: "sys-v1",
           modelKey: "anthropic/opus",
           cacheExpired: true,
-          lastResponseTime: Date.now() - 60 * 60 * 1000 + 1000, // past response after baseline
+          lastResponseTime: 1_785_696_926_547,
         },
       },
       expected: {
@@ -532,7 +540,6 @@ function main(): void {
     release: authority.release,
     authorityCommit: authority.commit,
     authoritativeFiles: authority.authoritativeFiles,
-    generatedAtUtc: new Date().toISOString(),
     inputs: {
       constants: constantsFixture,
       fixtures: fixtures.map((f) => ({ id: f.id, sourceFile: f.sourceFile })),
@@ -559,7 +566,6 @@ function main(): void {
     `- Authority commit: \`${authority.commit}\``,
     `- Generator version: ${authority.generatorVersion}`,
     `- Serializer version: ${authority.serializerVersion}`,
-    `- Generated at (UTC): ${provenance.generatedAtUtc}`,
     "",
     "## Authoritative files (locked)",
     "",

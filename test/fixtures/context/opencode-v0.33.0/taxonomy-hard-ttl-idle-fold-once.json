@@ -16,11 +16,12 @@
         "isCacheBustingPass": true
       }
     ],
+    "cachedM0MaterializedAt": 1785696925547,
     "hardSignals": {
       "systemHash": "sys-v1",
       "modelKey": "anthropic/opus",
       "cacheExpired": true,
-      "lastResponseTime": 1785700525547
+      "lastResponseTime": 1785696926547
     }
   },
   "expected": {
