@@ -1,1 +1,2 @@
-export type AgentRuntimePhase = "idle" | "turn" | "retry" | "compaction" | "branch_summary";
+export type AgentRuntimePhase =
+  "idle" | "turn" | "retry" | "compaction" | "branch_summary" | "failed";

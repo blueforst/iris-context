@@ -5,9 +5,12 @@ import test from "node:test";
 
 import assert from "node:assert/strict";
 
+import { createNodeSqliteFactory, SqliteSessionRepo } from "@earendil-works/pi-storage-sqlite-node";
+
 import { defaultAgentConfig } from "../src/config/load.js";
 import { initializeDataRoot, resolveDataRootPaths } from "../src/host/data-root.js";
 import { RuntimeEpochStore } from "../src/runtime/epoch-manager.js";
+import { nodeSqliteRepoEnv } from "../src/runtime/pi-env.js";
 import {
   reopenActiveSession,
   rolloverActiveSession,
@@ -26,13 +29,26 @@ test("settled rollover closes the old epoch and activates a fresh linked epoch",
   const rolled = await rolloverActiveSession({ dataRoot, config, now });
   assert.notEqual(rolled.newEpochId, rolled.previousEpochId);
   assert.notEqual(rolled.newSessionId, rolled.previousSessionId);
-  assert.equal(rolled.previousStatus, "closed");
+  // previousStatus reflects the state at rollover time (active, before the
+  // two-phase switch closed it); "closed" is asserted on the store row.
+  assert.equal(rolled.previousStatus, "active");
 
-  // The new session is a fresh empty Pi Session (no copied history).
+  // The new session is a fresh empty Pi Session (no copied history), and it
+  // is a REAL session row — not a missing one that masquerades as empty.
   assert.equal(rolled.entries.length, 0);
+  const paths = resolveDataRootPaths(dataRoot, config);
+  const repo = new SqliteSessionRepo({
+    env: nodeSqliteRepoEnv(dataRoot),
+    sqlite: createNodeSqliteFactory(),
+    databasePath: paths.sessionDb,
+  });
+  const list = await repo.list({ cwd: dataRoot });
+  assert.ok(
+    list.some((candidate) => candidate.id === rolled.newSessionId),
+    "rollover must actually create the new Pi Session row",
+  );
 
   // The new epoch links back through previous_epoch_id.
-  const paths = resolveDataRootPaths(dataRoot, config);
   const store = new RuntimeEpochStore(
     paths.epochRegistryDb,
     config.runtime_sessions.session_id_prefix,
@@ -41,6 +57,8 @@ test("settled rollover closes the old epoch and activates a fresh linked epoch",
   const active = store.getActive();
   assert.equal(active?.epochId, rolled.newEpochId);
   assert.equal(active?.previousEpochId, rolled.previousEpochId);
+  const previous = store.getByEpochId(rolled.previousEpochId);
+  assert.equal(previous.status, "closed");
   store.close();
 });
 
@@ -97,4 +115,61 @@ test("rollover does not create synthetic repair artifacts", async () => {
 
   assert.ok(!existsSync(join(dataRoot, "invocation.db")));
   assert.ok(!existsSync(join(dataRoot, "result.db")));
+});
+
+test("startup recovers a stale creating epoch after a mid-rollover crash", async () => {
+  // Crash window between beginRollover and activateRollover: the new epoch is
+  // 'creating' and the old epoch is still 'active'. Startup recovery discards
+  // the stale 'creating' row so the single-active invariant holds again.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-rollover-recover-"));
+  const config = defaultAgentConfig();
+  const now = "2026-08-01T12:00:00.000Z";
+  const paths = resolveDataRootPaths(dataRoot, config);
+  initializeDataRoot(dataRoot, config);
+
+  const store = new RuntimeEpochStore(
+    paths.epochRegistryDb,
+    config.runtime_sessions.session_id_prefix,
+    config.runtime_sessions.timezone,
+  );
+  store.ensureActive(now);
+  const pending = store.beginRollover(now);
+  assert.equal(pending.status, "creating");
+  assert.equal(store.getActive()?.epochId, "iris-runtime-2026-08-01-1");
+  store.close();
+
+  // A fresh store (restart) runs recovery: stale creating row removed, the
+  // original epoch remains active.
+  const restarted = new RuntimeEpochStore(
+    paths.epochRegistryDb,
+    config.runtime_sessions.session_id_prefix,
+    config.runtime_sessions.timezone,
+  );
+  const recovered = restarted.recoverCreating();
+  assert.equal(recovered, 1);
+  assert.equal(restarted.countAll(), 1);
+  assert.equal(restarted.getActive()?.epochId, "iris-runtime-2026-08-01-1");
+  restarted.close();
+});
+
+test("two-phase rollover never exposes a zero-active window", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-rollover-nogap-"));
+  const config = defaultAgentConfig();
+  const now = "2026-08-01T12:00:00.000Z";
+  const paths = resolveDataRootPaths(dataRoot, config);
+  initializeDataRoot(dataRoot, config);
+
+  const store = new RuntimeEpochStore(
+    paths.epochRegistryDb,
+    config.runtime_sessions.session_id_prefix,
+    config.runtime_sessions.timezone,
+  );
+  store.ensureActive(now);
+  store.beginRollover(now);
+  // Between phases the old epoch is still active — never zero active.
+  assert.ok(store.getActive() !== null);
+  store.activateRollover(now);
+  assert.ok(store.getActive() !== null);
+  assert.equal(store.countAll(), 2);
+  store.close();
 });

@@ -4,6 +4,7 @@
   "major": 0,
   "publishStatus": "artifact_ready_pending_release",
   "consumptionRule": "iris_agent must consume this exact major.minor version and must not copy or hand-write memory DTOs.",
+  "manifestSha256": "23657ae76e3adb5c55d3a7d68b5d820f34900e96cb923a19eb157e246e887b9f",
   "schemas": [
     "acceptance-receipt-v1.schema.json",
     "capability-handshake-v1.schema.json",

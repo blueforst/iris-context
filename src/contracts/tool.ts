@@ -111,3 +111,22 @@ export function computeToolExecutionKey(input: {
   });
   return createHash("sha256").update(canonical).digest("hex");
 }
+
+/**
+ * Canonical stable JSON serialization for tool arguments: recursively sorts
+ * object keys so two calls with the same arguments in different key orders
+ * produce the same canonicalArgsHash (review blocker: key order must not
+ * change a tool execution's identity).
+ */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    const parts = keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`);
+    return `{${parts.join(",")}}`;
+  }
+  return JSON.stringify(value);
+}

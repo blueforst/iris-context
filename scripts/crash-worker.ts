@@ -50,9 +50,12 @@ function park(): Promise<never> {
   });
 }
 
-// settled/tool_result boundaries run the full slice, which manages its own
-// data-root lock; do not hold the outer lock concurrently.
-if (boundary === "after_settled" || boundary === "after_tool_result_commit") {
+// settled boundary runs the full slice (which manages its own data-root
+// lock); tool_result_commit parks INSIDE the slice, immediately after the
+// tool result is committed to the Session but BEFORE the follow-up provider
+// call (final assistant) happens — the exact crash window the Exit Gate
+// requires. Do not hold the outer lock concurrently.
+if (boundary === "after_settled") {
   await runMinimalSlice({
     dataRoot,
     config,
@@ -60,6 +63,32 @@ if (boundary === "after_settled" || boundary === "after_tool_result_commit") {
     provider: "mock",
   });
   await park();
+}
+
+if (boundary === "after_tool_result_commit") {
+  await runMinimalSlice({
+    dataRoot,
+    config,
+    input: sampleAgentInput(),
+    provider: "mock",
+    callbacks: {
+      onAfterToolResultProviderCall: () => {
+        // Fired after Pi flushed the tool-result Session writes and is about
+        // to make the follow-up provider call. Write the marker, then park
+        // (never resolve) so the slice stops here: the ToolResult is durably
+        // committed, the final assistant turn has NOT started — the exact
+        // Exit Gate crash window. The parent SIGKILLs this live process.
+        writeFileSync(
+          marker,
+          JSON.stringify({ boundary, reachedAt: new Date().toISOString() }),
+          "utf8",
+        );
+        return new Promise<void>(() => {
+          setInterval(() => undefined, 60_000);
+        });
+      },
+    },
+  });
 }
 
 const lock = await acquireDataRootLock(dataRoot, paths.lockFile);

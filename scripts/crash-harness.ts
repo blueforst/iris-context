@@ -28,6 +28,7 @@ import { nodeSqliteRepoEnv } from "../src/runtime/pi-env.js";
 interface CrashWindowResult {
   boundary: string;
   status: "ok";
+  recoveredCreating: number;
   epochCount: number;
   activeEpoch: string | null;
   activeEpochStatus: string | null;
@@ -93,7 +94,8 @@ async function main(): Promise<void> {
   await waitForMarker(30_000);
   await killHard(child);
 
-  // Reopen the data root as a fresh process would.
+  // Reopen the data root as a fresh process would: run startup recovery
+  // (discards any stale 'creating' epoch row) then read state.
   initializeDataRoot(dataRoot, config);
 
   // Epoch registry: readable, single active epoch.
@@ -102,6 +104,7 @@ async function main(): Promise<void> {
     config.runtime_sessions.session_id_prefix,
     config.runtime_sessions.timezone,
   );
+  const recoveredCreating = epochStore.recoverCreating();
   const active = epochStore.getActive();
   const epochCount = epochStore.countAll();
   const activeEpoch = active?.epochId ?? null;
@@ -163,6 +166,7 @@ async function main(): Promise<void> {
   const result: CrashWindowResult = {
     boundary: boundary ?? "before_any_write",
     status: "ok",
+    recoveredCreating,
     epochCount,
     activeEpoch,
     activeEpochStatus,
@@ -202,15 +206,24 @@ async function main(): Promise<void> {
   if (boundary === "after_epoch_created") {
     if (active === null) failures.push("expected an active epoch after epoch creation");
   }
-  if (boundary === "after_settled" || boundary === "after_tool_result_commit") {
+  if (boundary === "after_settled") {
     if (active === null) failures.push("expected an active epoch after settled slice");
     if (userCount !== 1) failures.push(`expected 1 user entry, got ${userCount}`);
     if (companionCount !== 1) failures.push(`expected 1 companion, got ${companionCount}`);
     if (entryCount < 3) failures.push(`expected >=3 entries after settled, got ${entryCount}`);
   }
   if (boundary === "after_tool_result_commit") {
+    // The kill lands between ToolResult commit and the follow-up provider
+    // call: the tool result must be durably committed, the tool-call
+    // assistant turn must exist, and there must be NO settled marker (the
+    // final assistant turn never happened).
+    if (active === null) failures.push("expected an active epoch after tool result commit");
+    if (userCount !== 1) failures.push(`expected 1 user entry, got ${userCount}`);
+    if (companionCount !== 1) failures.push(`expected 1 companion, got ${companionCount}`);
     if (toolResultCount < 1)
       failures.push(`expected >=1 committed tool result, got ${toolResultCount}`);
+    if (assistantCount < 1)
+      failures.push(`expected >=1 tool-call assistant turn, got ${assistantCount}`);
   }
   if (invocationDb || resultDb) {
     failures.push("synthetic repair DB artifacts must not exist");

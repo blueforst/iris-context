@@ -7,6 +7,9 @@
   "engines": {
     "node": "22.19.0"
   },
+  "bin": {
+    "iris": "./dist/bin.js"
+  },
   "scripts": {
     "format": "prettier --write .",
     "format:check": "prettier --check .",
