@@ -214,6 +214,124 @@ test("IrisHost: shutdown rejects new inputs and releases the lock", async () => 
   await second.shutdown();
 });
 
+test("IrisHost: M1 — a retry while the input is in-flight is not double-prompted", async () => {
+  // A client retry (same identity + same payload) during an active turn must
+  // return the duplicate result WITHOUT re-enqueuing — the input is already
+  // being prompted (in-flight). Only one settled per input.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-inflight-"));
+  const config = defaultAgentConfig();
+  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  const events: string[] = [];
+  const unsubscribe = host.onEvent((event) => events.push(event.type));
+  try {
+    const pumpPromise = host.run();
+    host.acceptInput(makeInput("inflight-0001"), "inflight-0001");
+    await waitFor(() => events.includes("turn_start"));
+    // While the turn is active, the client retries the same input.
+    const retry = host.acceptInput(makeInput("inflight-0001"), "inflight-0001");
+    assert.equal(retry.outcome, "duplicate");
+    // Exactly one settled — the retry never triggered a second prompt.
+    await waitFor(() => events.filter((e) => e === "settled").length >= 1);
+    const settledCount = events.filter((e) => e === "settled").length;
+    assert.equal(settledCount, 1, `expected exactly 1 settled, got ${settledCount}`);
+    assert.equal(host.getIngress().queuedCount(), 0);
+    await host.shutdown();
+    await pumpPromise;
+  } finally {
+    unsubscribe();
+    await host.shutdown().catch(() => undefined);
+  }
+});
+
+test("IrisHost: M2 — a failed invocation flips not-ready and recover() resumes the pump", async () => {
+  // Simulate a provider failure by feeding an input whose frames cannot be
+  // encoded (invalid content mode poisons encodeInputFrames) — the turn fails,
+  // the Host flips not-ready, and recover() clears it so the pump resumes.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-failed-"));
+  const config = defaultAgentConfig();
+  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  const events: string[] = [];
+  const unsubscribe = host.onEvent((event) => events.push(event.type));
+  try {
+    const pumpPromise = host.run();
+    // A well-formed input that the mock provider settles normally.
+    host.acceptInput(makeInput("ok-0001"), "ok-0001");
+    await waitFor(() => events.filter((e) => e === "settled").length >= 1);
+    assert.equal(host.health().ready, true);
+
+    // Feed a malformed input: blocks with an unsupported content mode.
+    const badInput = {
+      inputId: "bad-0001",
+      triggerOrigin: directUserRequest(),
+      blocks: [
+        {
+          blockId: "bad-block",
+          sourceOrigin: directUserRequest(),
+          content: { mode: "unsupported_mode" as never, text: "x" },
+          contentHash: "",
+        },
+      ],
+    };
+    host.acceptInput(badInput, "bad-0001");
+    await waitFor(() => events.some((e) => e === "failed") || !host.health().ready);
+    assert.equal(host.health().ready, false, "failed invocation must flip not-ready");
+    assert.equal(host.isFailed(), true);
+
+    // Operator recovery resumes the pump without restart. The failed input
+    // stays durably `accepted` (dropped from in-flight, not requeued), so the
+    // queue now carries only the fresh input.
+    host.recover();
+    assert.equal(host.isFailed(), false);
+    host.acceptInput(makeInput("ok-0002"), "ok-0002");
+    const settledAfter = events.filter((e) => e === "settled").length;
+    await waitFor(() => events.filter((e) => e === "settled").length > settledAfter);
+    assert.equal(host.health().ready, true);
+    await host.shutdown();
+    await pumpPromise;
+  } finally {
+    unsubscribe();
+    await host.shutdown().catch(() => undefined);
+  }
+});
+
+test("IrisHost: C1 — shutdown during an active turn still commits the input", async () => {
+  // The worst crash-window: shutdown while an invocation is mid-turn. The
+  // input must reach session_committed (the turn finishes, the ledger is only
+  // closed after the pump exits) — no accepted-but-uncommitted leftover.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-c1-"));
+  const config = defaultAgentConfig();
+  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  const events: string[] = [];
+  const unsubscribe = host.onEvent((event) => events.push(event.type));
+  try {
+    const pumpPromise = host.run();
+    host.acceptInput(makeInput("c1-0001"), "c1-0001");
+    // Wait until the turn is actually active, then shutdown mid-turn.
+    await waitFor(() => events.includes("turn_start"));
+    const shutdownPromise = host.shutdown();
+    await shutdownPromise;
+    await pumpPromise;
+  } finally {
+    unsubscribe();
+    await host.shutdown().catch(() => undefined);
+  }
+  // After shutdown the ledger is closed; re-open it to verify the durable
+  // state (as a fresh process would after a crash/restart).
+  const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
+  const paths = resolveDataRootPaths(dataRoot, config);
+  const reopened = new InputAcceptanceLedger(paths.ingressDb, paths.blobsIngress, 20, 1);
+  try {
+    const record = reopened.getRecord("c1-0001", 1);
+    assert.equal(
+      record?.state,
+      "session_committed",
+      "C1: input must be committed, not left accepted",
+    );
+  } finally {
+    reopened.close();
+  }
+});
+
 test("IrisHost: rollover recovery — window 1 (requested, old Session not yet settled)", async () => {
   // Crash state: rollover was REQUESTED but the old Session never settled, so
   // no creating Epoch exists. Startup must keep the old active Epoch (the
