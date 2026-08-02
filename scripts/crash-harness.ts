@@ -95,8 +95,9 @@ async function main(): Promise<void> {
   await waitForMarker(30_000);
   await killHard(child);
 
-  // Reopen the data root as a fresh process would: run startup recovery
-  // (discards any stale 'creating' epoch row) then read state.
+  // Reopen the data root as a fresh process would: run the re-entrant
+  // startup recovery (read stale creating Epochs -> delete orphan Pi Session
+  // rows -> then delete the Epoch rows), then read state.
   initializeDataRoot(dataRoot, config);
 
   // Epoch registry: readable, single active epoch.
@@ -105,12 +106,8 @@ async function main(): Promise<void> {
     config.runtime_sessions.session_id_prefix,
     config.runtime_sessions.timezone,
   );
-  const recoveredCreating = epochStore.recoverCreating();
-  const active = epochStore.getActive();
-  const epochCount = epochStore.countAll();
-  const activeEpoch = active?.epochId ?? null;
-  const activeEpochStatus = active?.status ?? null;
-  epochStore.close();
+  const staleCreating = epochStore.listCreating();
+  let orphanSessionsDeleted = 0;
 
   // Session history: head readable via the repo.
   const repo = new SqliteSessionRepo({
@@ -118,19 +115,26 @@ async function main(): Promise<void> {
     sqlite: createNodeSqliteFactory(),
     databasePath: paths.sessionDb,
   });
-  const list = await repo.list({ cwd: dataRoot });
-  // Startup recovery also deletes the orphan Pi Session rows referenced by
-  // recovered creating Epochs (review blocker #3, third pass).
-  let orphanSessionsDeleted = 0;
-  for (const orphan of recoveredCreating) {
-    const metadata = list.find((candidate) => candidate.id === orphan);
+  let list = await repo.list({ cwd: dataRoot });
+  const cleanedSessions: string[] = [];
+  for (const stale of staleCreating) {
+    const metadata = list.find((candidate) => candidate.id === stale.runtimeSessionId);
     if (metadata !== undefined) {
       await repo.delete?.(metadata);
       orphanSessionsDeleted += 1;
     }
+    cleanedSessions.push(stale.runtimeSessionId);
   }
+  const recoveredCreating = epochStore.recoverCreating(cleanedSessions);
+  const active = epochStore.getActive();
+  const epochCount = epochStore.countAll();
+  const activeEpoch = active?.epochId ?? null;
+  const activeEpochStatus = active?.status ?? null;
+  epochStore.close();
+
   // Re-list after deletion: the previous snapshot may reference orphan rows.
-  const remainingSessions = await repo.list({ cwd: dataRoot });
+  list = await repo.list({ cwd: dataRoot });
+  const remainingSessions = list;
   let entryCount = 0;
   let userCount = 0;
   let companionCount = 0;
@@ -179,7 +183,7 @@ async function main(): Promise<void> {
   const result: CrashWindowResult = {
     boundary: boundary ?? "before_any_write",
     status: "ok",
-    recoveredCreating: recoveredCreating.length,
+    recoveredCreating: recoveredCreating,
     orphanSessionsDeleted,
     epochCount,
     activeEpoch,
@@ -225,11 +229,11 @@ async function main(): Promise<void> {
     // the stale creating Epoch AND its orphan Pi Session row, leaving the
     // original epoch active.
     if (active === null) failures.push("expected an active epoch after creating-epoch crash");
-    if (recoveredCreating.length !== 1)
-      failures.push(`expected 1 recovered creating epoch, got ${recoveredCreating.length}`);
+    if (recoveredCreating !== 1)
+      failures.push(`expected 1 recovered creating epoch, got ${recoveredCreating}`);
     if (orphanSessionsDeleted !== 1)
       failures.push(`expected 1 orphan session deleted, got ${orphanSessionsDeleted}`);
-    if (remainingSessions.some((s) => s.id === recoveredCreating[0]))
+    if (remainingSessions.some((s) => s.id === staleCreating[0]?.runtimeSessionId))
       failures.push("orphan Pi Session row still present after recovery");
   }
   if (boundary === "after_settled") {

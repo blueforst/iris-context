@@ -158,16 +158,21 @@ test("startup recovers a stale creating epoch after a mid-rollover crash", async
   assert.equal(store.getActive()?.epochId, "iris-runtime-2026-08-01-1");
   store.close();
 
-  // A fresh store (restart) runs recovery: stale creating row removed, the
-  // original epoch remains active, and the orphaned Pi Session id is returned
-  // so the caller can delete the orphan Session row too (review blocker #3).
+  // A fresh store (restart) runs recovery: read stale creating rows, mark
+  // their orphan Pi Sessions as cleaned, then remove the Epoch rows — the
+  // original epoch remains active.
   const restarted = new RuntimeEpochStore(
     paths.epochRegistryDb,
     config.runtime_sessions.session_id_prefix,
     config.runtime_sessions.timezone,
   );
-  const recovered = restarted.recoverCreating();
-  assert.deepEqual(recovered, [pending.runtimeSessionId]);
+  const stale = restarted.listCreating();
+  assert.deepEqual(
+    stale.map((row) => row.runtimeSessionId),
+    [pending.runtimeSessionId],
+  );
+  const recovered = restarted.recoverCreating(stale.map((row) => row.runtimeSessionId));
+  assert.equal(recovered, 1);
   assert.equal(restarted.countAll(), 1);
   assert.equal(restarted.getActive()?.epochId, "iris-runtime-2026-08-01-1");
   restarted.close();

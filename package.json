@@ -17,7 +17,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.mjs",
     "dist:smoke": "node scripts/dist-smoke.mjs",
-    "test": "tsx --test test/companion.test.ts test/config.test.ts test/contracts.test.ts test/lock.test.ts test/migration.test.ts test/opencode-go-provider.test.ts test/rollover.test.ts test/runtime-coordinator.test.ts test/vertical-slice.test.ts",
+    "test": "tsx --test test/companion.test.ts test/composition.test.ts test/config.test.ts test/contracts.test.ts test/lock.test.ts test/migration.test.ts test/opencode-go-provider.test.ts test/rollover.test.ts test/runtime-coordinator.test.ts test/vertical-slice.test.ts",
     "test:cli": "tsx --test test/cli.test.ts",
     "test:contract": "tsx --test test/contracts.test.ts test/migration.test.ts",
     "migration:smoke": "tsx scripts/migration-smoke.ts",
