@@ -1166,3 +1166,84 @@ test("review-pass7 #1: construction failure rolls back Session + creating row re
     await second.shutdown();
   }
 });
+
+test("review-pass7-fix: rollover then accept then restart verifies the new session's pair", async () => {
+  // subagent-review fix regression: the new session's companion must bind the
+  // Host's STABLE instanceEpoch (1), NOT the Runtime Session Epoch ordinal
+  // (which is 2 after the first rollover). Otherwise restart recovery would
+  // see a companion instanceEpoch ≠ Host instanceEpoch and mark the input
+  // ambiguous (not-ready) instead of promoting it to session_committed.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-rp7fix-"));
+  const config = defaultAgentConfig();
+  const paths = resolveDataRootPaths(dataRoot, config);
+  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  const events: string[] = [];
+  const unsub = host.onEvent((e) => events.push(e.type));
+  try {
+    const pump = host.run();
+    // Settle input 1 (token produced) then rollover to the SECOND epoch.
+    host.acceptInput(makeInput("pre-0001"), "pre-0001");
+    await waitFor(() => events.filter((e) => e === "settled").length >= 1);
+    const epochIdBefore = host.getCurrentEpoch().epochId;
+    host.requestRollover("after_pre_settled");
+    await waitFor(() => events.includes("rollover_completed"));
+    assert.notEqual(host.getCurrentEpoch().epochId, epochIdBefore, "rollover must switch epoch");
+    // New epoch ordinal is 2 — the new session's companions must STILL carry
+    // Host instanceEpoch 1 (the fix under test).
+    const newEpoch = host.getCurrentEpoch();
+    assert.equal(newEpoch.ordinalWithinDate, 2, "second epoch ordinal must be 2");
+    await host.shutdown();
+    await pump;
+  } finally {
+    unsub();
+    await host.shutdown().catch(() => undefined);
+  }
+
+  // Accept an input whose companion will be appended to the ordinal-2
+  // session, then simulate the crash window (appended, not committed).
+  const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
+  const ledger = new InputAcceptanceLedger(paths.ingressDb, paths.blobsIngress, 20, 1);
+  ledger.accept(makeInput("post-0001", "post body"), "post-0001");
+  ledger.close();
+  // Append the user message + companion (as the harness would, with Host
+  // instanceEpoch 1) directly to the ordinal-2 session.
+  const store = new RuntimeEpochStore(
+    paths.epochRegistryDb,
+    config.runtime_sessions.session_id_prefix,
+    config.runtime_sessions.timezone,
+  );
+  const active = store.getActive();
+  store.close();
+  assert.ok(active !== null);
+  const sessionHandle = await openOrCreateSession(dataRoot, config, active.runtimeSessionId);
+  const session = sessionHandle.session;
+  const { createInputMetaCompanion, computeContentLayoutHash } =
+    await import("../src/runtime/companion.js");
+  const input = makeInput("post-0001", "post body");
+  const wire = "IRIS_INPUT_V1\ninline_text:9\npost body\n";
+  const layoutHash = computeContentLayoutHash(input, wire);
+  const companion = createInputMetaCompanion(
+    input,
+    layoutHash,
+    new Date().toISOString(),
+    1, // Host instanceEpoch — must match what the harness writes post-rollover
+  );
+  await session.appendMessage({ role: "user", content: wire, timestamp: Date.now() });
+  await session.appendMessage(companion);
+  const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
+  await storage.cleanup();
+
+  // Restart: the ordinal-2 session's pair (instanceEpoch 1) must be verified
+  // and promoted — NOT ambiguous/not-ready.
+  const restarted = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  const events2: string[] = [];
+  const unsub2 = restarted.onEvent((e) => events2.push(e.type));
+  try {
+    const rec = restarted.getIngress().getRecord("post-0001", 1);
+    assert.equal(rec?.state, "session_committed", "post-rollover pair must be promoted");
+    assert.equal(events2.includes("turn_start"), false, "committed pair must not re-prompt");
+  } finally {
+    unsub2();
+    await restarted.shutdown();
+  }
+});
