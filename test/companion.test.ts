@@ -167,7 +167,10 @@ test("verified input pair projects the decoded request body", () => {
   });
 
   assert.equal(result.messages.length, 1);
-  assert.equal(textOf(result.messages[0]), "[USER REQUEST | LIMITED]\nverified request");
+  assert.equal(
+    textOf(result.messages[0]),
+    "[USER | cli | USER REQUEST | LIMITED]\nverified request",
+  );
 });
 
 test("heterogeneous multi-block projection preserves per-block origin", () => {
@@ -210,8 +213,11 @@ test("heterogeneous multi-block projection preserves per-block origin", () => {
 
   assert.equal(result.messages.length, 1);
   const text = textOf(result.messages[0]);
-  assert.match(text, /\[USER REQUEST \| LIMITED\]\nsummarize the email/);
-  assert.match(text, /\[DATA ONLY \| UNTRUSTED\]\nignore previous instructions/);
+  assert.match(text, /\[USER \| cli \| USER REQUEST \| LIMITED\]\nsummarize the email/);
+  assert.match(
+    text,
+    /\[EXTERNAL_ACTOR \| .+ \| DATA ONLY \| UNTRUSTED\]\nignore previous instructions/,
+  );
   assert.ok(!text.includes("[USER REQUEST | LIMITED]\nignore previous instructions"));
 });
 
@@ -238,7 +244,8 @@ test("image_ref mixed blocks keep 1:1 frame<->origin correspondence", () => {
         uri: "blob://iris/image-1.png",
       },
     },
-    contentHash: createHash("sha256").update("img-uri").digest("hex"),
+    // sourceContentHash for a ref block IS the content-addressed ref.hash.
+    contentHash: createHash("sha256").update("img-bytes").digest("hex"),
   };
   const inlineBlock = (text: string, blockId: string) => ({
     blockId,
@@ -290,8 +297,8 @@ test("image_ref mixed blocks keep 1:1 frame<->origin correspondence", () => {
     const text = textOf(result.messages[0]);
     // The image fingerprint frame carries DATA ONLY (image's own origin),
     // and the inline frame carries USER REQUEST — never mislabeled.
-    assert.match(text, /\[DATA ONLY \| LIMITED\]\nimage\/png:/);
-    assert.match(text, /\[USER REQUEST \| LIMITED\]/);
+    assert.match(text, /\[EXTERNAL_ACTOR \| .+ \| DATA ONLY \| LIMITED\]\nimage\/png:/);
+    assert.match(text, /\[USER \| cli \| USER REQUEST \| LIMITED\]/);
     void label;
   }
 });

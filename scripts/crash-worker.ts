@@ -13,6 +13,8 @@
  *  - after_settled             : full mock slice reached settled
  *  - after_epoch_created       : active Epoch row exists
  *  - after_tool_result_commit  : slice finished (tool result committed)
+ *  - after_creating_epoch      : rollover began (creating Epoch + new Pi
+ *                                Session row exist) but CAS not yet done
  */
 
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -106,6 +108,28 @@ try {
       config.runtime_sessions.timezone,
     );
     epochStore.ensureActive("2026-08-01T00:00:00.000Z");
+    epochStore.close();
+    await park();
+  }
+
+  if (boundary === "after_creating_epoch") {
+    // Rollover began (creating Epoch row) AND the new Pi Session row was
+    // created, but the active CAS has NOT happened. A kill here must leave
+    // the old epoch active; startup recovery must remove the stale creating
+    // Epoch AND the orphan Pi Session row.
+    const epochStore = new RuntimeEpochStore(
+      paths.epochRegistryDb,
+      config.runtime_sessions.session_id_prefix,
+      config.runtime_sessions.timezone,
+    );
+    epochStore.ensureActive("2026-08-01T00:00:00.000Z");
+    const pending = epochStore.beginRollover("2026-08-01T00:00:00.000Z");
+    const repo = new SqliteSessionRepo({
+      env: nodeSqliteRepoEnv(dataRoot),
+      sqlite: createNodeSqliteFactory(),
+      databasePath: paths.sessionDb,
+    });
+    await repo.create({ id: pending.runtimeSessionId, cwd: dataRoot });
     epochStore.close();
     await park();
   }

@@ -29,6 +29,7 @@ interface CrashWindowResult {
   boundary: string;
   status: "ok";
   recoveredCreating: number;
+  orphanSessionsDeleted: number;
   epochCount: number;
   activeEpoch: string | null;
   activeEpochStatus: string | null;
@@ -118,13 +119,25 @@ async function main(): Promise<void> {
     databasePath: paths.sessionDb,
   });
   const list = await repo.list({ cwd: dataRoot });
+  // Startup recovery also deletes the orphan Pi Session rows referenced by
+  // recovered creating Epochs (review blocker #3, third pass).
+  let orphanSessionsDeleted = 0;
+  for (const orphan of recoveredCreating) {
+    const metadata = list.find((candidate) => candidate.id === orphan);
+    if (metadata !== undefined) {
+      await repo.delete?.(metadata);
+      orphanSessionsDeleted += 1;
+    }
+  }
+  // Re-list after deletion: the previous snapshot may reference orphan rows.
+  const remainingSessions = await repo.list({ cwd: dataRoot });
   let entryCount = 0;
   let userCount = 0;
   let companionCount = 0;
   let assistantCount = 0;
   let toolResultCount = 0;
-  if (list.length > 0) {
-    const metadata = list[0];
+  if (remainingSessions.length > 0) {
+    const metadata = remainingSessions[0];
     if (metadata === undefined) {
       throw new Error("session list returned undefined entry");
     }
@@ -167,10 +180,11 @@ async function main(): Promise<void> {
     boundary: boundary ?? "before_any_write",
     status: "ok",
     recoveredCreating: recoveredCreating.length,
+    orphanSessionsDeleted,
     epochCount,
     activeEpoch,
     activeEpochStatus,
-    sessionCount: list.length,
+    sessionCount: remainingSessions.length,
     entryCount,
     userCount,
     companionCount,
@@ -205,6 +219,18 @@ async function main(): Promise<void> {
   }
   if (boundary === "after_epoch_created") {
     if (active === null) failures.push("expected an active epoch after epoch creation");
+  }
+  if (boundary === "after_creating_epoch") {
+    // Rollover began but CAS never happened: startup recovery must remove
+    // the stale creating Epoch AND its orphan Pi Session row, leaving the
+    // original epoch active.
+    if (active === null) failures.push("expected an active epoch after creating-epoch crash");
+    if (recoveredCreating.length !== 1)
+      failures.push(`expected 1 recovered creating epoch, got ${recoveredCreating.length}`);
+    if (orphanSessionsDeleted !== 1)
+      failures.push(`expected 1 orphan session deleted, got ${orphanSessionsDeleted}`);
+    if (remainingSessions.some((s) => s.id === recoveredCreating[0]))
+      failures.push("orphan Pi Session row still present after recovery");
   }
   if (boundary === "after_settled") {
     if (active === null) failures.push("expected an active epoch after settled slice");

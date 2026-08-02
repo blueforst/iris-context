@@ -16,12 +16,15 @@ interface CliRunOutput {
   epochId: string;
   runtimeSessionId: string;
   toolCalls: Array<{ toolCallId: string; toolName: string }>;
-  entryCount: number;
+  eventCount: number;
 }
 
 interface CliServeOutput {
   status: string;
   lockAcquired: boolean;
+  epochId: string;
+  runtimeSessionId: string;
+  coordinatorPhase: string;
 }
 
 function runCli(args: string[]): { stdout: string; stderr: string; exitCode: number } {
@@ -92,7 +95,7 @@ test("iris run executes a real subprocess vertical slice to settled", () => {
   assert.ok(output.epochId.startsWith("iris-runtime-"));
   assert.ok(output.runtimeSessionId.startsWith("iris-runtime-"));
   assert.ok(output.toolCalls.length >= 1, "vertical slice must execute the read tool");
-  assert.ok(output.entryCount >= 3);
+  assert.ok(output.eventCount >= 3);
 });
 
 test("iris run rejects an input with a mismatched content hash", () => {
@@ -160,14 +163,17 @@ test("iris run rejects malformed input structure", () => {
   assert.match(stderr, /non-empty blocks/i);
 });
 
-test("iris serve bootstraps the data root in a subprocess", () => {
+test("iris serve composes the active Capsule and reports ready", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "iris-cli-serve-"));
   const { stdout, exitCode } = runCli(["serve", "--data-root", dataRoot]);
 
   assert.equal(exitCode, 0);
   const output = JSON.parse(stdout) as CliServeOutput;
-  assert.equal(output.status, "bootstrap");
+  assert.equal(output.status, "ready");
   assert.equal(output.lockAcquired, true);
+  assert.ok(output.epochId.startsWith("iris-runtime-"));
+  assert.ok(output.runtimeSessionId.startsWith("iris-runtime-"));
+  assert.equal(output.coordinatorPhase, "idle");
   assert.ok(existsSync(join(dataRoot, "runtime-epochs.db")));
 });
 
