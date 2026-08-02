@@ -610,3 +610,64 @@ test("issue-6: parent_chain linkage accepted when companion hangs directly off t
   assert.equal(pairs[0]?.linkage, "parent_chain");
   assert.equal(pairs[0]?.user.entryId, "user-1");
 });
+
+test("issue-6 settle path: resolveCommittedPair binds pi_user_entry_id to the REAL raw UserMessage entry id even with a non-message entry before the pair", async () => {
+  // The settle path (host.ts:468 resolveCommittedPair) is the SECOND writer
+  // of pi_user_entry_id. It must honor the same raw-identity invariant as
+  // reconcileUncommitted: a model_change (or any non-message entry) BEFORE
+  // the UserMessage must never shift the entry id binding.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-issue6-settle-"));
+  const config = defaultAgentConfig();
+  initializeDataRoot(dataRoot, config);
+
+  // Pre-create the active Epoch + Session and append a model_change entry so
+  // the raw array is [model_change, user, companion] when the settle path runs.
+  const handle = await openSessionFor(dataRoot, config);
+  const session = handle.session;
+  await session.appendModelChange("mock", "model-v1");
+  await closeSession(session);
+
+  // Open the Host over the SAME data root (active Epoch + Session exist).
+  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  const events: string[] = [];
+  const unsub = host.onEvent((e) => events.push(e.type));
+  try {
+    const pump = host.run();
+    host.acceptInput(makeInput("settle-0001"), "settle-0001");
+    await waitFor(() => events.includes("settled"));
+    const record = host.getIngress().getRecord("settle-0001", 1);
+    assert.equal(record?.state, "session_committed");
+
+    // The recorded pi_user_entry_id must be the REAL UserMessage raw entry,
+    // NOT the model_change entry that precedes it in the raw array.
+    const paths = resolveDataRootPaths(dataRoot, config);
+    const { SqliteSessionRepo, createNodeSqliteFactory } =
+      await import("@earendil-works/pi-storage-sqlite-node");
+    const { nodeSqliteRepoEnv } = await import("../src/runtime/pi-env.js");
+    const repo = new SqliteSessionRepo({
+      env: nodeSqliteRepoEnv(dataRoot),
+      sqlite: createNodeSqliteFactory(),
+      databasePath: paths.sessionDb,
+    });
+    const list = await repo.list({ cwd: dataRoot });
+    const runtimeSessionId = host.getCurrentEpoch().runtimeSessionId;
+    const metadata = list.find((candidate) => candidate.id === runtimeSessionId);
+    assert.ok(metadata);
+    const reopened = await repo.open(metadata);
+    const entries = await reopened.getEntries();
+    await closeSession(reopened);
+    const modelChangeId = entries.find((entry) => entry.type === "model_change")?.id;
+    const userEntry = entries.find(
+      (entry) => entry.type === "message" && entry.message?.role === "user",
+    );
+    assert.ok(modelChangeId, "model_change entry must be present");
+    assert.ok(userEntry, "real user message entry must be present");
+    assert.notEqual(record.userEntryId, modelChangeId, "must never bind to model_change");
+    assert.equal(record.userEntryId, userEntry.id, "settle path binds the REAL raw entry id");
+    await host.shutdown();
+    await pump;
+  } finally {
+    unsub();
+    await host.shutdown().catch(() => undefined);
+  }
+});
