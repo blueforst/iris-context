@@ -771,28 +771,28 @@ test("review-pass3 #2: two inputs with identical body under different inputIds a
   ledger.close();
 
   // The orphan UserMessage wire matches BOTH envelopes -> ambiguous recovery:
-  // neither is silently committed, neither is blindly re-prompted as "no
-  // append". Both become rejected ambiguous_wire_recovery (safe: no second
-  // logical input can be appended, and no wrong identity is guessed).
-  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
-  const events: string[] = [];
-  const unsub = host.onEvent((e) => events.push(e.type));
-  const pump = host.run();
-  await new Promise((resolve) => setTimeout(resolve, 800));
-  const recA = host.getIngress().getRecord("a-0001", 1);
-  const recB = host.getIngress().getRecord("b-0001", 1);
-  assert.equal(recA?.rejectionCode, "ambiguous_wire_recovery");
-  assert.equal(recB?.rejectionCode, "ambiguous_wire_recovery");
-  assert.equal(events.includes("turn_start"), false, "ambiguous recovery must not re-prompt");
-  unsub();
-  await host.shutdown();
-  await pump;
+  // the Host must NOT guess or batch-reject 202-accepted inputs. It fails
+  // closed into not-ready/corrupt so an operator reviews the data root.
+  await assert.rejects(
+    IrisHost.open({ dataRoot, config, provider: "mock" }),
+    /ambiguous ingress recovery for inputs: a-0001, b-0001/,
+  );
+  // The lock was released by the failed startup. Repair: the operator removes
+  // the ambiguous accepted records (or resolves the Session), then the data
+  // root reopens normally.
+  const { DatabaseSync } = await import("node:sqlite");
+  const repairDb = new DatabaseSync(paths.ingressDb);
+  repairDb.prepare("DELETE FROM ingress_acceptances WHERE input_id IN ('a-0001', 'b-0001')").run();
+  repairDb.close();
+  const second = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  await second.shutdown();
 });
 
-test("review-pass3 #3: rollover post-construction fault flips not-ready and releases resources", async () => {
-  // Fault injection on each post-construction window (dispose_old,
-  // activate_rollover, cas_swap): the rollover must throw deterministically,
-  // the pump must flip not-ready, and shutdown must still release the lock.
+test("review-pass4 #2: rollover post-construction fault => fail-stop, recover forbidden, state consistent", async () => {
+  // Fail-stop strategy (review-pass-4 #2): after a rollover post-construction
+  // fault the Host is deterministically not-ready, recover() is FORBIDDEN
+  // (registry/runtime may be inconsistent), and shutdown releases the lock so
+  // restart recovery can rebuild from the durable DB.
   for (const fault of ["dispose_old", "activate_rollover", "cas_swap"] as const) {
     const dataRoot = mkdtempSync(join(tmpdir(), `iris-host-fault-${fault}-`));
     const config = defaultAgentConfig();
@@ -816,13 +816,130 @@ test("review-pass3 #3: rollover post-construction fault flips not-ready and rele
       } as const;
       await assert.rejects(pump, new RegExp(messages[fault]));
       assert.equal(host.health().ready, false, "rollover fault must flip not-ready");
+      // Fail-stop: recover() must be FORBIDDEN (runtime/registry may be
+      // inconsistent — never resume on a possibly-disposed Capsule).
+      assert.equal(host.isFailStop(), true);
+      assert.throws(() => {
+        host.recover();
+      }, /cannot recover a fail-stop host/);
     } finally {
       unsub();
       // Shutdown must still release the lock (no leak).
       await host.shutdown().catch(() => undefined);
-      // Lock is re-acquirable: a fresh host opens immediately.
+      // The durable DB state (whatever the fault left) must be re-openable —
+      // restart recovery rebuilds the Capsule from the DB.
       const second = await IrisHost.open({ dataRoot, config, provider: "mock" });
       await second.shutdown();
     }
+  }
+});
+
+test("review-pass4 #1a: historical committed A (body W) does not make pending B (same body W) partial", async () => {
+  // A(inputId=A, body=W) is FULLY committed (verified pair in Session).
+  // B(inputId=B, body=W) was durably accepted but crashed BEFORE its Pi
+  // append. On restart B must be re-delivered normally (no Pi append for B) —
+  // A's UserMessage is consumed by A's verified pair and is NOT an orphan, so
+  // it must not be mistaken for B's partial.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-rp4a-"));
+  const config = defaultAgentConfig();
+  const paths = resolveDataRootPaths(dataRoot, config);
+  initializeDataRoot(dataRoot, config);
+
+  // First run: accept + fully settle A (body W) -> verified pair in Session.
+  const first = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  const pump1 = first.run();
+  const ev1: string[] = [];
+  const un1 = first.onEvent((e) => ev1.push(e.type));
+  first.acceptInput(makeInput("a-0001", "same body"), "a-0001");
+  await waitFor(() => ev1.filter((e) => e === "settled").length >= 1);
+  const recA = first.getIngress().getRecord("a-0001", 1);
+  assert.equal(recA?.state, "session_committed");
+  un1();
+  await first.shutdown();
+  await pump1;
+
+  // Accept B with the SAME body, rewind it to the crash window (accepted,
+  // never appended).
+  const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
+  const ledger = new InputAcceptanceLedger(paths.ingressDb, paths.blobsIngress, 20, 1);
+  ledger.accept(makeInput("b-0001", "same body"), "b-0001");
+  ledger.close();
+
+  // Restart: B must be delivered (settled), NOT rejected as partial.
+  const restarted = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  const ev2: string[] = [];
+  const un2 = restarted.onEvent((e) => ev2.push(e.type));
+  const pump2 = restarted.run();
+  await waitFor(() => ev2.filter((e) => e === "settled").length >= 1);
+  const recB = restarted.getIngress().getRecord("b-0001", 1);
+  assert.equal(
+    recB?.state,
+    "session_committed",
+    "B (same body as committed A, never appended) must be delivered, not rejected",
+  );
+  un2();
+  await restarted.shutdown();
+  await pump2;
+});
+
+test("review-pass4 #1b: same-body A and B both with verified pairs are both promoted", async () => {
+  // A and B have IDENTICAL body W and BOTH have a legal verified pair in the
+  // Session; B's ingress record was not yet marked session_committed when the
+  // process crashed (window 4). Both must be promoted by their OWN identity
+  // (pairKey embeds inputId) — wire equality must NOT conflate them.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-rp4b-"));
+  const config = defaultAgentConfig();
+  const paths = resolveDataRootPaths(dataRoot, config);
+  initializeDataRoot(dataRoot, config);
+
+  const store = new RuntimeEpochStore(
+    paths.epochRegistryDb,
+    config.runtime_sessions.session_id_prefix,
+    config.runtime_sessions.timezone,
+  );
+  const active = store.ensureActive("2026-08-01T12:00:00.000Z");
+  store.close();
+  const sessionHandle = await openOrCreateSession(dataRoot, config, active.runtimeSessionId);
+  const session = sessionHandle.session;
+
+  // Append verified pairs for BOTH a-0001 and b-0001 (identical body W) using
+  // the REAL companion generator (correct pairKey + layout hash + blocks).
+  const { createInputMetaCompanion, computeContentLayoutHash } =
+    await import("../src/runtime/companion.js");
+  const wire = "IRIS_INPUT_V1\ninline_text:9\nsame body\n";
+  for (const inputId of ["a-0001", "b-0001"]) {
+    const input = makeInput(inputId, "same body");
+    const layoutHash = computeContentLayoutHash(input, wire);
+    const companion = createInputMetaCompanion(input, layoutHash, new Date().toISOString());
+    await session.appendMessage({ role: "user", content: wire, timestamp: Date.now() });
+    await session.appendMessage(companion);
+  }
+  const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
+  await storage.cleanup();
+
+  // Both accepted durably.
+  const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
+  const ledger = new InputAcceptanceLedger(paths.ingressDb, paths.blobsIngress, 20, 1);
+  ledger.accept(makeInput("a-0001", "same body"), "a-0001");
+  ledger.accept(makeInput("b-0001", "same body"), "b-0001");
+  ledger.close();
+
+  // Restart: BOTH must be promoted (session_committed), not conflated.
+  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  try {
+    const recA = host.getIngress().getRecord("a-0001", 1);
+    const recB = host.getIngress().getRecord("b-0001", 1);
+    assert.equal(
+      recA?.state,
+      "session_committed",
+      "A with verified pair must be promoted despite same body as B",
+    );
+    assert.equal(
+      recB?.state,
+      "session_committed",
+      "B with verified pair must be promoted despite same body as A",
+    );
+  } finally {
+    await host.shutdown();
   }
 });
