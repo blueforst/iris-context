@@ -917,7 +917,12 @@ test("review-pass4 #1b: same-body A and B both with verified pairs are both prom
   for (const inputId of ["a-0001", "b-0001"]) {
     const input = makeInput(inputId, "same body");
     const layoutHash = computeContentLayoutHash(input, wire);
-    const companion = createInputMetaCompanion(input, layoutHash, new Date().toISOString());
+    const companion = createInputMetaCompanion(
+      input,
+      layoutHash,
+      new Date().toISOString(),
+      1, // instanceEpoch: Host default (pair identity includes instanceEpoch)
+    );
     await session.appendMessage({ role: "user", content: wire, timestamp: Date.now() });
     await session.appendMessage(companion);
   }
@@ -1082,4 +1087,82 @@ test("review-pass6 #1: same-identity pair with envelope mismatch is ambiguous, n
   repairDb.close();
   const second = await IrisHost.open({ dataRoot, config, provider: "mock" });
   await second.shutdown();
+});
+
+test("review-pass7 #2: a pair created under a DIFFERENT instanceEpoch is not verified for this epoch", async () => {
+  // A verified pair for input X (body W) exists in the Session but was
+  // created under instanceEpoch=1. A NEW Host instance (instanceEpoch=2)
+  // accepts the same inputId X with the same wire and crashes before append.
+  // Restart with instanceEpoch=2 must NOT promote the epoch-1 pair (pairKey
+  // embeds instanceEpoch) — the record enters ambiguous, not session_committed.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-rp72-"));
+  const config = defaultAgentConfig();
+  const paths = resolveDataRootPaths(dataRoot, config);
+  initializeDataRoot(dataRoot, config);
+
+  const store = new RuntimeEpochStore(
+    paths.epochRegistryDb,
+    config.runtime_sessions.session_id_prefix,
+    config.runtime_sessions.timezone,
+  );
+  const active = store.ensureActive("2026-08-01T12:00:00.000Z");
+  store.close();
+  const sessionHandle = await openOrCreateSession(dataRoot, config, active.runtimeSessionId);
+  const session = sessionHandle.session;
+  const { createInputMetaCompanion, computeContentLayoutHash } =
+    await import("../src/runtime/companion.js");
+  const wire = "IRIS_INPUT_V1\ninline_text:9\nsame body\n";
+  const input = makeInput("x-0001", "same body");
+  const layoutHash = computeContentLayoutHash(input, wire);
+  // Pair created under instanceEpoch=1.
+  const companion = createInputMetaCompanion(input, layoutHash, new Date().toISOString(), 1);
+  await session.appendMessage({ role: "user", content: wire, timestamp: Date.now() });
+  await session.appendMessage(companion);
+  const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
+  await storage.cleanup();
+
+  // instanceEpoch=2 accepts the same inputId + wire, never appended.
+  const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
+  const ledger = new InputAcceptanceLedger(paths.ingressDb, paths.blobsIngress, 20, 2);
+  ledger.accept(makeInput("x-0001", "same body"), "x-0001");
+  ledger.close();
+
+  // Restart with instanceEpoch=2: the epoch-1 pair is NOT verified — the
+  // orphan wire match makes it ambiguous (never falsely session_committed).
+  await assert.rejects(
+    IrisHost.open({ dataRoot, config, provider: "mock", instanceEpoch: 2 }),
+    /ambiguous ingress recovery for inputs: x-0001/,
+  );
+  const second = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  await second.shutdown();
+});
+
+test("review-pass7 #1: construction failure rolls back Session + creating row re-entrant-safely", async () => {
+  // A failure DURING new-Capsule construction (after the new Session row was
+  // created) must: set fail-stop, clean the provisional Session storage AND
+  // its metadata row, and only then delete the creating Epoch row — so no
+  // stale creating row or orphan Session survives for the next startup.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-rp71-"));
+  const config = defaultAgentConfig();
+  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  host._setFaultPoint("construct_new");
+  const events: string[] = [];
+  const unsub = host.onEvent((e) => events.push(e.type));
+  let pump: Promise<void>;
+  try {
+    pump = host.run();
+    host.acceptInput(makeInput("c-0001"), "c-0001");
+    await waitFor(() => events.filter((e) => e === "settled").length >= 1);
+    host.requestRollover("construct_fault");
+    await assert.rejects(pump, /new Capsule construction failure/);
+    assert.equal(host.isFailStop(), true);
+    // No stale creating row survives.
+    assert.equal(host.getEpochStore().listCreating().length, 0, "creating row must be cleaned up");
+  } finally {
+    unsub();
+    await host.shutdown().catch(() => undefined);
+    // Restart recovery is clean (no stale creating row / orphan Session).
+    const second = await IrisHost.open({ dataRoot, config, provider: "mock" });
+    await second.shutdown();
+  }
 });

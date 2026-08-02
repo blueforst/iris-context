@@ -11,8 +11,9 @@ import { defaultAgentConfig } from "../src/config/load.js";
 import { IRIS_INPUT_META_CONTENT, IRIS_INPUT_META_CUSTOM_TYPE } from "../src/contracts/context.js";
 import {
   computeContentLayoutHash,
+  decodeInputFrames,
+  derivePairKey,
   encodeInputFrames,
-  inputPairKey,
 } from "../src/runtime/companion.js";
 import {
   reopenActiveSession,
@@ -87,7 +88,10 @@ test("R1-P0 mock vertical slice reaches settled with one sequential tool", async
     iris: { inputId: string; pairKey: string; contentLayoutHash: string };
   }>;
   assert.equal(companion.details?.iris.inputId, input.inputId);
-  assert.equal(companion.details?.iris.pairKey, inputPairKey(input));
+  // pairKey now binds (instanceEpoch, inputId, wire); a fresh data root's
+  // first Runtime Session Epoch has ordinalWithinDate = 1 (review-pass-7 #2).
+  const frames = decodeInputFrames(encodeInputFrames(input.blocks));
+  assert.equal(companion.details?.iris.pairKey, derivePairKey(input.inputId, frames, 1));
   assert.equal(
     companion.details?.iris.contentLayoutHash,
     computeContentLayoutHash(input, encodeInputFrames(input.blocks)),
