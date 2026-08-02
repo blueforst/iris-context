@@ -26,7 +26,12 @@ test("settled rollover closes the old epoch and activates a fresh linked epoch",
   const first = await runMinimalSlice({ dataRoot, config, input: sampleAgentInput(), now });
   assert.equal(first.epochId, "iris-runtime-2026-08-01-1");
 
-  const rolled = await rolloverActiveSession({ dataRoot, config, now });
+  const rolled = await rolloverActiveSession({
+    dataRoot,
+    config,
+    now,
+    settledEpochId: first.epochId,
+  });
   assert.notEqual(rolled.newEpochId, rolled.previousEpochId);
   assert.notEqual(rolled.newSessionId, rolled.previousSessionId);
   // previousStatus reflects the state at rollover time (active, before the
@@ -110,11 +115,26 @@ test("rollover does not create synthetic repair artifacts", async () => {
   const config = defaultAgentConfig();
   const now = "2026-08-01T12:00:00.000Z";
 
-  await runMinimalSlice({ dataRoot, config, input: sampleAgentInput(), now });
-  await rolloverActiveSession({ dataRoot, config, now });
+  const first = await runMinimalSlice({ dataRoot, config, input: sampleAgentInput(), now });
+  await rolloverActiveSession({ dataRoot, config, now, settledEpochId: first.epochId });
 
   assert.ok(!existsSync(join(dataRoot, "invocation.db")));
   assert.ok(!existsSync(join(dataRoot, "result.db")));
+});
+
+test("rollover refuses without settled authorization", async () => {
+  // Review blocker #3: an arbitrary caller cannot roll over — the settled
+  // epoch must match the currently active one.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-rollover-refuse-"));
+  const config = defaultAgentConfig();
+  const now = "2026-08-01T12:00:00.000Z";
+
+  const first = await runMinimalSlice({ dataRoot, config, input: sampleAgentInput(), now });
+  await assert.rejects(
+    rolloverActiveSession({ dataRoot, config, now, settledEpochId: "some-other-epoch" }),
+    /not the settled epoch/,
+  );
+  void first;
 });
 
 test("startup recovers a stale creating epoch after a mid-rollover crash", async () => {
@@ -139,17 +159,38 @@ test("startup recovers a stale creating epoch after a mid-rollover crash", async
   store.close();
 
   // A fresh store (restart) runs recovery: stale creating row removed, the
-  // original epoch remains active.
+  // original epoch remains active, and the orphaned Pi Session id is returned
+  // so the caller can delete the orphan Session row too (review blocker #3).
   const restarted = new RuntimeEpochStore(
     paths.epochRegistryDb,
     config.runtime_sessions.session_id_prefix,
     config.runtime_sessions.timezone,
   );
   const recovered = restarted.recoverCreating();
-  assert.equal(recovered, 1);
+  assert.deepEqual(recovered, [pending.runtimeSessionId]);
   assert.equal(restarted.countAll(), 1);
   assert.equal(restarted.getActive()?.epochId, "iris-runtime-2026-08-01-1");
   restarted.close();
+});
+
+test("beginRollover rejects a second pending creating epoch", async () => {
+  // Review blocker #3: only one pending rollover at a time — a second
+  // beginRollover while one is outstanding must be rejected, not orphaned.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-rollover-double-"));
+  const config = defaultAgentConfig();
+  const now = "2026-08-01T12:00:00.000Z";
+  const paths = resolveDataRootPaths(dataRoot, config);
+  initializeDataRoot(dataRoot, config);
+
+  const store = new RuntimeEpochStore(
+    paths.epochRegistryDb,
+    config.runtime_sessions.session_id_prefix,
+    config.runtime_sessions.timezone,
+  );
+  store.ensureActive(now);
+  store.beginRollover(now);
+  assert.throws(() => store.beginRollover(now), /already in progress/);
+  store.close();
 });
 
 test("two-phase rollover never exposes a zero-active window", async () => {

@@ -50,6 +50,7 @@ test("iris run executes a real subprocess vertical slice to settled", () => {
       inputId: "cli-input-0001",
       triggerOrigin: {
         schemaVersion: 1,
+        channel: "cli",
         principalKind: "user",
         authority: "user_request",
         trust: "trusted",
@@ -59,6 +60,7 @@ test("iris run executes a real subprocess vertical slice to settled", () => {
           blockId: "cli-block-0001",
           sourceOrigin: {
             schemaVersion: 1,
+            channel: "cli",
             principalKind: "user",
             authority: "user_request",
             trust: "trusted",
@@ -100,11 +102,19 @@ test("iris run rejects an input with a mismatched content hash", () => {
     inputFile,
     JSON.stringify({
       inputId: "cli-input-bad",
+      triggerOrigin: {
+        schemaVersion: 1,
+        channel: "cli",
+        principalKind: "user",
+        authority: "user_request",
+        trust: "trusted",
+      },
       blocks: [
         {
           blockId: "block-1",
           sourceOrigin: {
             schemaVersion: 1,
+            channel: "cli",
             principalKind: "user",
             authority: "user_request",
             trust: "trusted",
@@ -159,4 +169,45 @@ test("iris serve bootstraps the data root in a subprocess", () => {
   assert.equal(output.status, "bootstrap");
   assert.equal(output.lockAcquired, true);
   assert.ok(existsSync(join(dataRoot, "runtime-epochs.db")));
+});
+
+test("iris run fails closed on a missing or invalid triggerOrigin", () => {
+  // Review blocker #4: provenance must fail closed — a missing triggerOrigin
+  // is an error, never a silent fallback to a block origin.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-cli-noorigin-"));
+  const inputFile = join(dataRoot, "input.json");
+  writeFileSync(
+    inputFile,
+    JSON.stringify({
+      inputId: "cli-input-noorigin",
+      blocks: [
+        {
+          blockId: "block-1",
+          sourceOrigin: {
+            schemaVersion: 1,
+            channel: "cli",
+            principalKind: "user",
+            authority: "user_request",
+            trust: "trusted",
+          },
+          content: { mode: "inline_text", text: "hello" },
+          contentHash: "",
+        },
+      ],
+    }),
+    "utf8",
+  );
+
+  const { stderr, exitCode } = runCli([
+    "run",
+    "--data-root",
+    dataRoot,
+    "--input-file",
+    inputFile,
+    "--provider",
+    "mock",
+  ]);
+
+  assert.equal(exitCode, 1);
+  assert.match(stderr, /triggerOrigin/);
 });

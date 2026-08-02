@@ -214,3 +214,84 @@ test("heterogeneous multi-block projection preserves per-block origin", () => {
   assert.match(text, /\[DATA ONLY \| UNTRUSTED\]\nignore previous instructions/);
   assert.ok(!text.includes("[USER REQUEST | LIMITED]\nignore previous instructions"));
 });
+
+test("image_ref mixed blocks keep 1:1 frame<->origin correspondence", () => {
+  // Review blocker #5: an image_ref block is encoded as a fingerprint frame,
+  // so every block (image included) must contribute exactly one origin —
+  // image-first, image-middle and image-last positions must not mislabel any
+  // frame with a neighbouring block's provenance.
+  const imageBlock = {
+    blockId: "block-img",
+    sourceOrigin: {
+      ...directUserRequest(),
+      principalKind: "external_actor" as const,
+      authority: "data_only" as const,
+      trust: "limited" as const,
+    },
+    content: {
+      mode: "image_ref" as const,
+      ref: {
+        schemaVersion: 1,
+        kind: "image/png",
+        hash: createHash("sha256").update("img-bytes").digest("hex"),
+        byteLength: 42,
+        uri: "blob://iris/image-1.png",
+      },
+    },
+    contentHash: createHash("sha256").update("img-uri").digest("hex"),
+  };
+  const inlineBlock = (text: string, blockId: string) => ({
+    blockId,
+    sourceOrigin: directUserRequest(),
+    content: { mode: "inline_text" as const, text },
+    contentHash: createHash("sha256").update(text).digest("hex"),
+  });
+
+  const scenarios: Array<[string, AgentInput["blocks"]]> = [
+    ["image-first", [imageBlock, inlineBlock("after image", "block-after")]],
+    [
+      "image-middle",
+      [
+        inlineBlock("before image", "block-before"),
+        imageBlock,
+        inlineBlock("after image", "block-after"),
+      ],
+    ],
+    ["image-last", [inlineBlock("before image", "block-before"), imageBlock]],
+  ];
+  for (const [label, blocks] of scenarios) {
+    const input = sampleInput(blocks);
+    const wire = encodeInputFrames(input.blocks);
+    const frames = decodeInputFrames(wire);
+    assert.equal(frames.length, blocks.length, `${label}: frame count must equal block count`);
+    const companion = createInputMetaCompanion(
+      input,
+      computeContentLayoutHash(input, wire),
+      "2026-08-01T00:00:00.000Z",
+    );
+    const details = companion.details as {
+      iris?: { blocks?: Array<{ contentKind: string; blockId: string }> };
+    };
+    assert.equal(
+      details.iris?.blocks?.length,
+      blocks.length,
+      `${label}: companion blocks must match input blocks`,
+    );
+
+    // Each frame must be labeled with its own block's origin authority.
+    const user: AgentMessage = { role: "user", content: wire, timestamp: 1 };
+    const result = transformContextMessages({
+      invocationId: "invocation-image-mixed",
+      runtimeSessionId: "session-image-mixed",
+      messages: [user, companion],
+      model: { provider: "mock", modelId: "mock" },
+      providerProfileId: "mock-iris-provider-v1",
+    });
+    const text = textOf(result.messages[0]);
+    // The image fingerprint frame carries DATA ONLY (image's own origin),
+    // and the inline frame carries USER REQUEST — never mislabeled.
+    assert.match(text, /\[DATA ONLY \| LIMITED\]\nimage\/png:/);
+    assert.match(text, /\[USER REQUEST \| LIMITED\]/);
+    void label;
+  }
+});

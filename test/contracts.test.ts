@@ -26,21 +26,39 @@ test("memory contract pin is exact and does not copy memory DTOs", () => {
 });
 
 test("memory contract pin schema set matches the published v1 manifest", () => {
-  // The pin declares the authoritative schema list as its own artifact, plus
-  // a manifestSha256 anchor of the published iris-memory v0.1.0
-  // contracts/assets/manifest.json. The test re-derives the expected set
-  // from the pin's own manifestSha256 anchor and schema list rather than
-  // hand-copying the list, so a drift between the agent pin and the memory
-  // artifact is caught when the anchor is bumped.
-  assert.match(MEMORY_CONTRACTS_PIN.manifestSha256, /^[0-9a-f]{64}$/);
-  const declared = [...MEMORY_CONTRACTS_PIN.schemas].sort();
-  assert.equal(declared.length, 13);
-  // Every schema name is a v1 schema file (no accidental cross-version mix).
-  for (const name of declared) {
-    assert.match(name, /-v1\.schema\.json$/);
-  }
-  // The full declared set (no duplicates, no omissions).
-  assert.equal(new Set(declared).size, declared.length);
+  // The pin declares a manifestSha256 anchor (SHA-256 of the published
+  // iris-memory v0.1.0 contracts/assets/manifest.json) plus the authoritative
+  // schema list. The expected set below is the schema surface published by
+  // that manifest (verified by re-running `sha256sum manifest.json` in the
+  // iris-memory repo); a drift on either side (hash or list) fails here, so
+  // the two cannot silently diverge from each other.
+  assert.equal(
+    MEMORY_CONTRACTS_PIN.manifestSha256,
+    "23657ae76e3adb5c55d3a7d68b5d820f34900e96cb923a19eb157e246e887b9f",
+    "manifestSha256 must equal the published iris-memory v0.1.0 manifest hash",
+  );
+  const publishedSchemas = [
+    "acceptance-receipt-v1.schema.json",
+    "capability-handshake-v1.schema.json",
+    "duplicate-replay-receipt-v1.schema.json",
+    "expansion-request-v1.schema.json",
+    "expansion-response-v1.schema.json",
+    "health-response-v1.schema.json",
+    "historian-publication-v1.schema.json",
+    "idempotency-conflict-error-v1.schema.json",
+    "memory-recall-card-v1.schema.json",
+    "publication-acceptance-request-v1.schema.json",
+    "recall-request-v1.schema.json",
+    "sequence-conflict-error-v1.schema.json",
+    "unsupported-version-error-v1.schema.json",
+  ];
+  assert.deepEqual(
+    [...MEMORY_CONTRACTS_PIN.schemas].sort(),
+    publishedSchemas.sort(),
+    "pin schema list must exactly match the published manifest schema surface",
+  );
+  // No duplicates, no omissions.
+  assert.equal(new Set(MEMORY_CONTRACTS_PIN.schemas).size, publishedSchemas.length);
 });
 
 test("memory contract pin version is a strict 0.1.x semver", () => {

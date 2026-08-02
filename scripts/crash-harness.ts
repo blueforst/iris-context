@@ -166,7 +166,7 @@ async function main(): Promise<void> {
   const result: CrashWindowResult = {
     boundary: boundary ?? "before_any_write",
     status: "ok",
-    recoveredCreating,
+    recoveredCreating: recoveredCreating.length,
     epochCount,
     activeEpoch,
     activeEpochStatus,

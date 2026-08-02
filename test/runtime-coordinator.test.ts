@@ -277,3 +277,106 @@ test("coordinator forwards abort to the Pi harness and releases the latch", asyn
   // Abort with a wrong invocation id is rejected after the latch released.
   await assert.rejects(coordinator.abort("invocation-nonexistent"), /no active invocation/);
 });
+
+test("failed invocation holds the latch until reset (settled-gated)", async () => {
+  // Review blocker #2 (round 2): a harness that resolves WITHOUT emitting
+  // native settled must enter the explicit failed path and keep the
+  // single-writer latch held — a second prompt is rejected until reset().
+  const harness = {
+    async prompt(): Promise<{ role: "assistant"; content: [] }> {
+      return { role: "assistant", content: [] };
+    },
+    async abort(): Promise<void> {
+      return undefined;
+    },
+    subscribe(): () => void {
+      return () => undefined;
+    },
+  } as unknown as AgentHarness;
+
+  const currentInvocation = {
+    input: sampleAgentInput(),
+    prepared: {} as InvocationBinding["prepared"],
+    invocationId: "invocation-input-0001",
+  };
+  const coordinator = new RuntimeCoordinator({
+    harness,
+    currentInvocation,
+    prepareInvocation: async (nextInput: AgentInput) => {
+      void nextInput;
+      return currentInvocation.prepared;
+    },
+  });
+
+  const events: string[] = [];
+  for await (const event of coordinator.prompt(sampleAgentInput())) {
+    events.push(event.type);
+  }
+  assert.ok(events.includes("failed"), "no-settled run must emit failed");
+  assert.equal(coordinator.getPhase(), "failed");
+
+  // Latch still held: a new prompt is rejected until reset().
+  await assert.rejects(
+    (async () => {
+      for await (const event of coordinator.prompt(sampleAgentInput())) {
+        void event;
+      }
+    })(),
+    /already active|failed state/,
+  );
+
+  coordinator.reset();
+  assert.equal(coordinator.getPhase(), "idle");
+});
+
+test("harness throw marks failed and rejects the next prompt until reset", async () => {
+  // Review blocker #2 (round 2): when the harness throws (provider failure),
+  // the run fails and the latch stays held; reset() recovers.
+  const harness = {
+    async prompt(): Promise<never> {
+      throw new Error("provider exploded");
+    },
+    async abort(): Promise<void> {
+      return undefined;
+    },
+    subscribe(): () => void {
+      return () => undefined;
+    },
+  } as unknown as AgentHarness;
+
+  const currentInvocation = {
+    input: sampleAgentInput(),
+    prepared: {} as InvocationBinding["prepared"],
+    invocationId: "invocation-input-0001",
+  };
+  const coordinator = new RuntimeCoordinator({
+    harness,
+    currentInvocation,
+    prepareInvocation: async (nextInput: AgentInput) => {
+      void nextInput;
+      return currentInvocation.prepared;
+    },
+  });
+
+  await assert.rejects(
+    (async () => {
+      for await (const event of coordinator.prompt(sampleAgentInput())) {
+        void event;
+      }
+    })(),
+    /provider exploded/,
+  );
+  assert.equal(coordinator.getPhase(), "failed");
+
+  await assert.rejects(
+    (async () => {
+      for await (const event of coordinator.prompt(sampleAgentInput())) {
+        void event;
+      }
+    })(),
+    /already active|failed state/,
+  );
+
+  coordinator.reset();
+  assert.equal(coordinator.getPhase(), "idle");
+});
