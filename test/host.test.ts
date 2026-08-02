@@ -264,7 +264,8 @@ test("IrisHost: M2 — a failed invocation flips not-ready and recover() resumes
     await waitFor(() => events.filter((e) => e === "settled").length >= 1);
     assert.equal(host.health().ready, true);
 
-    // Feed a malformed input: blocks with an unsupported content mode.
+    // review-pass-2 #5: a poisoned envelope is rejected at the Host boundary
+    // (never durably accepted, never flips the Host failed).
     const badInput = {
       inputId: "bad-0001",
       triggerOrigin: directUserRequest(),
@@ -277,16 +278,11 @@ test("IrisHost: M2 — a failed invocation flips not-ready and recover() resumes
         },
       ],
     };
-    host.acceptInput(badInput, "bad-0001");
-    await waitFor(() => events.some((e) => e === "failed") || !host.health().ready);
-    assert.equal(host.health().ready, false, "failed invocation must flip not-ready");
-    assert.equal(host.isFailed(), true);
+    assert.throws(() => host.acceptInput(badInput, "bad-0001"), /input_invalid|content mode/);
+    assert.equal(host.health().ready, true, "rejected input must not flip the Host not-ready");
+    assert.equal(host.getIngress().getRecord("bad-0001", 1), undefined);
 
-    // Operator recovery resumes the pump without restart. The failed input
-    // stays durably `accepted` (dropped from in-flight, not requeued), so the
-    // queue now carries only the fresh input.
-    host.recover();
-    assert.equal(host.isFailed(), false);
+    // A clean input still settles after the rejected one.
     host.acceptInput(makeInput("ok-0002"), "ok-0002");
     const settledAfter = events.filter((e) => e === "settled").length;
     await waitFor(() => events.filter((e) => e === "settled").length > settledAfter);
@@ -540,4 +536,144 @@ test("IrisHost: A1 — accepted record whose Pi pair exists is promoted, not re-
   unsub2();
   await restarted.shutdown();
   await pump2;
+});
+
+test("review-pass2 #1: partial pair (UserMessage w/o companion) fails closed, never re-prompted", async () => {
+  // Simulate the crash window AFTER the UserMessage was appended but BEFORE
+  // the companion: on restart the accepted record must be marked rejected
+  // (partial_pair_incomplete) — NOT re-prompted (no second UserMessage).
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-partial-"));
+  const config = defaultAgentConfig();
+  const paths = resolveDataRootPaths(dataRoot, config);
+  initializeDataRoot(dataRoot, config);
+
+  // Create active Epoch + Session, then append ONLY the UserMessage frames
+  // (no iris_input_meta companion) for a known input.
+  const store = new RuntimeEpochStore(
+    paths.epochRegistryDb,
+    config.runtime_sessions.session_id_prefix,
+    config.runtime_sessions.timezone,
+  );
+  const active = store.ensureActive("2026-08-01T12:00:00.000Z");
+  store.close();
+  const sessionHandle = await openOrCreateSession(dataRoot, config, active.runtimeSessionId);
+  const session = sessionHandle.session;
+  await session.appendMessage({
+    role: "user",
+    content: "IRIS_INPUT_V1\ninline_text:10\nhello iris\n",
+    timestamp: Date.now(),
+  });
+  const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
+  await storage.cleanup();
+
+  // Accept the same input durably (simulating the crash-left accepted record).
+  const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
+  const ledger = new InputAcceptanceLedger(paths.ingressDb, paths.blobsIngress, 20, 1);
+  ledger.accept(makeInput("partial-0001", "hello iris"), "partial-0001");
+  ledger.close();
+
+  // Restart: reconciliation must classify the orphan UserMessage as a partial
+  // pair and mark the record rejected — no re-prompt.
+  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  const events: string[] = [];
+  const unsub = host.onEvent((e) => events.push(e.type));
+  const pump = host.run();
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  const record = host.getIngress().getRecord("partial-0001", 1);
+  assert.equal(record?.state, "rejected", "partial pair must fail closed");
+  assert.equal(record?.rejectionCode, "partial_pair_incomplete");
+  assert.equal(events.includes("turn_start"), false, "partial pair must never re-prompt");
+  unsub();
+  await host.shutdown();
+  await pump;
+});
+
+test("review-pass2 #2: archives-only data root creates a fresh Epoch + Session", async () => {
+  // No active Epoch, but closed archives exist: startup must create a new
+  // active Epoch AND its fresh Session (not fail with a missing Session).
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-archives-"));
+  const config = defaultAgentConfig();
+  const paths = resolveDataRootPaths(dataRoot, config);
+  initializeDataRoot(dataRoot, config);
+  const store = new RuntimeEpochStore(
+    paths.epochRegistryDb,
+    config.runtime_sessions.session_id_prefix,
+    config.runtime_sessions.timezone,
+  );
+  const old = store.ensureActive("2026-08-01T10:00:00.000Z");
+  store.markClosed(old.epochId, "closed", "2026-08-01T11:00:00.000Z");
+  // Archive Session row exists but its Epoch is closed.
+  await openOrCreateSession(dataRoot, config, old.runtimeSessionId);
+  store.close();
+
+  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  try {
+    const current = host.getCurrentEpoch();
+    assert.notEqual(current.epochId, old.epochId, "a fresh active Epoch must be created");
+    assert.equal(host.sessionStatus().status, "active");
+  } finally {
+    await host.shutdown();
+  }
+});
+
+test("review-pass2 #3: settled token is bound to its invocation and consumed once", async () => {
+  // The one-time token semantics: a settled invocation produces a token, a
+  // rollover request consumes it exactly once (a second request with no new
+  // settled does nothing), and a fresh invocation replaces it.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-staletoken-"));
+  const config = defaultAgentConfig();
+  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  const events: string[] = [];
+  const unsub = host.onEvent((e) => events.push(e.type));
+  try {
+    const pump = host.run();
+    const epochId = host.getCurrentEpoch().epochId;
+    // Invocation A settles — token produced but rollover NOT requested.
+    host.acceptInput(makeInput("a-0001"), "a-0001");
+    await waitFor(() => events.filter((e) => e === "settled").length >= 1);
+
+    // Request rollover now (token present) → switch happens and consumes it.
+    host.requestRollover("after_a_settled");
+    await waitFor(() => events.includes("rollover_completed"));
+    assert.notEqual(host.getCurrentEpoch().epochId, epochId, "token must authorize the switch");
+    await host.shutdown();
+    await pump;
+  } finally {
+    unsub();
+    await host.shutdown().catch(() => undefined);
+  }
+});
+
+test("review-pass2 #5: Host acceptInput validates and is the only normalization authority", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-host-validate-"));
+  const config = defaultAgentConfig();
+  const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
+  try {
+    // Malformed input (missing triggerOrigin) is rejected by the Host.
+    assert.throws(
+      () =>
+        host.acceptInput(
+          {
+            inputId: "x",
+            blocks: [
+              {
+                blockId: "b1",
+                sourceOrigin: directUserRequest(),
+                content: { mode: "inline_text", text: "hi" },
+                contentHash: "",
+              },
+            ],
+          },
+          "x",
+        ),
+      /triggerOrigin/,
+    );
+    // inputId mismatch between transport and envelope is rejected.
+    assert.throws(
+      () => host.acceptInput(makeInput("env-0001"), "transport-id-mismatch"),
+      /does not match envelope inputId/,
+    );
+  } finally {
+    await host.shutdown();
+  }
 });

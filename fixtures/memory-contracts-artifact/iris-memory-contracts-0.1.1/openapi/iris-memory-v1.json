@@ -116,7 +116,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CapabilityHandshakeV1"
+                  "$ref": "#/components/schemas/CapabilityHandshakeV2"
                 }
               }
             }

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -35,7 +35,7 @@ function readJson(relative: string): Record<string, unknown> {
 test("cross-repo: agent reads the manifest from the REAL artifact", () => {
   const manifest = readJson("manifest.json");
   assert.equal(manifest["package"], "iris-memory-contracts");
-  assert.equal(manifest["version"], "0.1.0");
+  assert.equal(manifest["version"], "0.1.1");
   assert.equal(manifest["majorVersion"], 0);
   assert.ok(Array.isArray(manifest["schemas"]));
   assert.ok(Array.isArray(manifest["fixtures"]));
@@ -158,13 +158,25 @@ test("cross-repo: committed artifact carries provenance and matches its pin", ()
   // The checked-in artifact must record its producer source (repository +
   // commit) and its manifest hash must equal the agent's pin, so the gate
   // input cannot silently diverge from the producer repository.
-  const provenance = readJson("provenance.json");
+  // review-pass-2 #6: provenance lives OUTSIDE the artifact directory (the
+  // artifact is exactly its manifest surface), so read it one level up.
+  const provenance = JSON.parse(
+    readFileSync(join(ARTIFACT_ROOT, "..", "provenance.json"), "utf8"),
+  ) as Record<string, unknown>;
   assert.equal(provenance["producer"], "blueforst/iris_memory");
   const producerCommit = provenance["producerCommit"];
   assert.equal(typeof producerCommit, "string");
   assert.ok((producerCommit as string).length >= 7);
+  assert.equal(provenance["contractVersion"], "0.1.1");
   const pin = readContractPin();
   assert.equal(pin.manifestSha256, provenance["manifestSha256"]);
   const manifest = readJson("manifest.json");
   assert.equal(manifest["manifestSha256"], provenance["manifestSha256"]);
+  // The artifact root must contain ONLY manifest.json as a FILE, plus the
+  // three declared content directories (review-pass-2 #6: no extra files).
+  const rootEntries = readdirSync(ARTIFACT_ROOT, { withFileTypes: true });
+  const rootFiles = rootEntries.filter((e) => e.isFile()).map((e) => e.name);
+  const rootDirs = rootEntries.filter((e) => e.isDirectory()).map((e) => e.name);
+  assert.deepEqual(rootFiles, ["manifest.json"]);
+  assert.deepEqual(rootDirs.sort(), ["fixtures", "openapi", "schemas"]);
 });

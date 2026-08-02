@@ -4,9 +4,9 @@
     "fixtures": {
       "fixtures/acceptance-receipt-v1.invalid.json": "fccd60d439a2422a365a83624d8a40801f03921096ae21af50063e9f12b8ee09",
       "fixtures/acceptance-receipt-v1.valid.json": "85095cd391c4f1b9dd9f4774c1536b7b2260a34668158e8f1f6bd87f0e3cfabb",
-      "fixtures/capability-handshake-v1.invalid-semver.json": "25d1eec519cc13027d803108581c8abc49ca344fe3677ce22a22680984ae76fd",
-      "fixtures/capability-handshake-v1.invalid.json": "430236c0d626222372527eed707387c4b7c56c647fc988f1a3debedcab750fbf",
-      "fixtures/capability-handshake-v1.valid.json": "bd814acd12f7e5da630182bcecd378baa1d4c42a24a9079b0b62f95c0faa9ba0",
+      "fixtures/capability-handshake-v2.invalid-semver.json": "663823833a0255ffd396bf394eafc93ee8806b199b9cfcacfd2b1225bc1cdd24",
+      "fixtures/capability-handshake-v2.invalid.json": "2fb156daca016c2c841efb3055ac0a90b4931e415bfc4a6e6a1cdb80d1bbb9a9",
+      "fixtures/capability-handshake-v2.valid.json": "cd68877d22540a00784cb2f238be18ec57673c7b6e152d37df53ff437ab7d879",
       "fixtures/duplicate-replay-receipt-v1.invalid.json": "7c8e6705de869886d1c523fe4d893bfdfe85dd8aee48568c27ec4c5ff586eb1a",
       "fixtures/duplicate-replay-receipt-v1.valid.json": "f1335760afd1049357edebd5c369173f7420a545d32746913cb56ebf66587f79",
       "fixtures/expansion-request-v1.invalid.json": "a7fadae474c4800bd94fc635e0bd35fc537f1779dc02b98dbf4369da49b77d60",
@@ -34,11 +34,11 @@
       "fixtures/unsupported-version-error-v1.valid.json": "2a8c507f1e1cd6cba2bd0a545f0cdd2c7f61dbf97c89519e048efbe21d732629"
     },
     "openapi": {
-      "openapi/iris-memory-v1.json": "eee1532029b2b5997054470e0a4f276c51444c296e24bcedf9e793c25131001f"
+      "openapi/iris-memory-v1.json": "42478509888087b96d3b6d64eee832c4dffcc321aa5bcd6a1a9c15e0d810bb1c"
     },
     "schemas": {
       "schemas/acceptance-receipt-v1.schema.json": "1c35399685177b1ee904c728df2365c8f4d15c38484316d09dac159dc1f5312f",
-      "schemas/capability-handshake-v1.schema.json": "a2164cf55a69c0be57ef4fe5b5899a845a8165e20934ad01f28a8f4d51eba880",
+      "schemas/capability-handshake-v2.schema.json": "3eb8e214b75518646929a694c0b524884ccef5c94cdd8f9685aac2f6d66d51a6",
       "schemas/duplicate-replay-receipt-v1.schema.json": "e4ce0d5b443f8ad9ed647be07da2f802ef175c1f536d9468743aa6ab61182566",
       "schemas/expansion-request-v1.schema.json": "689f6e11217267ea0069784f264c1229553190d6410651db445d5b7bacabde35",
       "schemas/expansion-response-v1.schema.json": "e707e4820407dcd86171e8d37fb4b5c795ef56d212b54f02d9b9740b2bae067c",
@@ -57,9 +57,9 @@
   "fixtures": [
     "fixtures/acceptance-receipt-v1.invalid.json",
     "fixtures/acceptance-receipt-v1.valid.json",
-    "fixtures/capability-handshake-v1.invalid-semver.json",
-    "fixtures/capability-handshake-v1.invalid.json",
-    "fixtures/capability-handshake-v1.valid.json",
+    "fixtures/capability-handshake-v2.invalid-semver.json",
+    "fixtures/capability-handshake-v2.invalid.json",
+    "fixtures/capability-handshake-v2.valid.json",
     "fixtures/duplicate-replay-receipt-v1.invalid.json",
     "fixtures/duplicate-replay-receipt-v1.valid.json",
     "fixtures/expansion-request-v1.invalid.json",
@@ -87,13 +87,13 @@
     "fixtures/unsupported-version-error-v1.valid.json"
   ],
   "majorVersion": 0,
-  "manifestSha256": "7a6426d73345ebe9ff2fad4e489c4d4f51b3312bd76e1110b416ed5ee04278ce",
+  "manifestSha256": "2cb22deb5efded5a112dbb38c19506e6185ad328a973f7a96d9e66faf59a761b",
   "openapi": ["openapi/iris-memory-v1.json"],
   "package": "iris-memory-contracts",
   "schemaCount": 14,
   "schemas": [
     "schemas/acceptance-receipt-v1.schema.json",
-    "schemas/capability-handshake-v1.schema.json",
+    "schemas/capability-handshake-v2.schema.json",
     "schemas/duplicate-replay-receipt-v1.schema.json",
     "schemas/expansion-request-v1.schema.json",
     "schemas/expansion-response-v1.schema.json",
@@ -108,5 +108,5 @@
     "schemas/unsupported-version-error-v1.schema.json"
   ],
   "status": "candidate_v1",
-  "version": "0.1.0"
+  "version": "0.1.1"
 }

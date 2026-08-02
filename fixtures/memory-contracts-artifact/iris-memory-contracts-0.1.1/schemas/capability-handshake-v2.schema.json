@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:iris:memory:capability-handshake:v1",
-  "title": "MemoryCapabilityHandshakeV1",
+  "$id": "urn:iris:memory:capability-handshake:v2",
+  "title": "MemoryCapabilityHandshakeV2",
   "description": "Capability and contract-version handshake returned by GET /v1/capabilities. The authoritative wire contract for service readiness and the exact set of available/unavailable capabilities.",
   "type": "object",
   "additionalProperties": false,
@@ -23,7 +23,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "capability-handshake-v1"
+      "const": "capability-handshake-v2"
     },
     "serviceName": {
       "const": "iris-memory"
