@@ -1,0 +1,13 @@
+{
+  "artifact": "iris-memory-contracts-0.1.1",
+  "producer": "blueforst/iris_memory",
+  "producerCommit": "057eae5",
+  "producerBranch": "memory/r0-service-contract-baseline",
+  "builtBy": "iris_memory.contracts.artifact.write_contract_artifact (deterministic, byte-reproducible)",
+  "manifestSha256": "2cb22deb5efded5a112dbb38c19506e6185ad328a973f7a96d9e66faf59a761b",
+  "contractVersion": "0.1.1",
+  "schemaCount": 14,
+  "fixtureCount": 30,
+  "verification": "iris-agent re-computes the manifest SHA-256 from this directory's own manifest.json (canonical compact JSON, sha256), validates every listed schema/fixture, and recomputes each file's checksum. A byte-reproducible rebuild from producerCommit yields the identical artifact.",
+  "note": "Stored OUTSIDE the artifact directory (the artifact is exactly its manifest surface; only manifest.json may live at the artifact root). The authoritative source of truth is the producer repository at producerCommit."
+}

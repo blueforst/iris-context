@@ -1,0 +1,450 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Iris Memory Contract v1",
+    "version": "0.1.0",
+    "description": "Candidate descriptive OpenAPI surface for iris-memory contracts v0.1.0. The authoritative wire contract is the JSON Schema set declared in manifest.json; this document may drift and must not be treated as a second authoritative source."
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Health response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponseV1"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/historian/publications": {
+      "post": {
+        "operationId": "acceptPublication",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicationAcceptanceRequestV1"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted or duplicate replay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/AcceptanceReceiptV1"
+                    },
+                    {
+                      "$ref": "#/components/schemas/DuplicateReplayReceiptV1"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Schema validation failure"
+          },
+          "409": {
+            "description": "Idempotency or source-sequence conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/IdempotencyConflictErrorV1"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SequenceConflictErrorV1"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unsupported contract version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnsupportedVersionErrorV1"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/memory/recall": {
+      "post": {
+        "operationId": "recallMemory",
+        "responses": {
+          "501": {
+            "description": "Not implemented in this vertical slice"
+          }
+        }
+      }
+    },
+    "/memory/expand": {
+      "post": {
+        "operationId": "expandMemory",
+        "responses": {
+          "501": {
+            "description": "Not implemented in this vertical slice"
+          }
+        }
+      }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "operationId": "getCapabilities",
+        "responses": {
+          "200": {
+            "description": "Capability/version handshake",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilityHandshakeV2"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memory/recall": {
+      "post": {
+        "operationId": "recallNotImplemented",
+        "responses": {
+          "501": {
+            "description": "recall is not implemented in the R0 baseline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotImplementedErrorV1"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memory/expand": {
+      "post": {
+        "operationId": "expandNotImplemented",
+        "responses": {
+          "501": {
+            "description": "expand is not implemented in the R0 baseline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotImplementedErrorV1"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HealthResponseV1": {
+        "type": "object",
+        "required": [
+          "schemaVersion",
+          "service",
+          "status",
+          "contractVersion",
+          "databaseExists",
+          "graphitiStatus",
+          "capabilities"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["bootstrap", "not_ready", "ready", "degraded"]
+          },
+          "contractVersion": {
+            "type": "string"
+          },
+          "databaseExists": {
+            "type": "boolean"
+          },
+          "graphitiStatus": {
+            "type": "string",
+            "enum": ["not_configured"]
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "PublicationAcceptanceRequestV1": {
+        "type": "object",
+        "required": ["schemaVersion", "contractVersion", "idempotencyKey", "publication"],
+        "properties": {
+          "schemaVersion": {
+            "type": "string"
+          },
+          "contractVersion": {
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "publication": {
+            "$ref": "#/components/schemas/HistorianPublicationV1"
+          }
+        }
+      },
+      "HistorianPublicationV1": {
+        "type": "object",
+        "required": [
+          "schemaVersion",
+          "publicationId",
+          "sourceSequence",
+          "publishedAt",
+          "payloadHash",
+          "compartmentCount",
+          "segmentCount",
+          "evidenceCount",
+          "summary"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "string"
+          },
+          "publicationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceSequence": {
+            "type": "integer"
+          },
+          "publishedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "payloadHash": {
+            "type": "string"
+          },
+          "compartmentCount": {
+            "type": "integer"
+          },
+          "segmentCount": {
+            "type": "integer"
+          },
+          "evidenceCount": {
+            "type": "integer"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      },
+      "AcceptanceReceiptV1": {
+        "type": "object",
+        "required": [
+          "schemaVersion",
+          "status",
+          "receiptId",
+          "publicationId",
+          "canonicalPayloadHash",
+          "contractVersion",
+          "acceptedAt"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "receiptId": {
+            "type": "string"
+          },
+          "publicationId": {
+            "type": "string"
+          },
+          "canonicalPayloadHash": {
+            "type": "string"
+          },
+          "contractVersion": {
+            "type": "string"
+          },
+          "acceptedAt": {
+            "type": "string"
+          }
+        }
+      },
+      "DuplicateReplayReceiptV1": {
+        "type": "object",
+        "required": [
+          "schemaVersion",
+          "status",
+          "receiptId",
+          "publicationId",
+          "canonicalPayloadHash",
+          "contractVersion",
+          "originalAcceptedAt"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "receiptId": {
+            "type": "string"
+          },
+          "publicationId": {
+            "type": "string"
+          },
+          "canonicalPayloadHash": {
+            "type": "string"
+          },
+          "contractVersion": {
+            "type": "string"
+          },
+          "originalAcceptedAt": {
+            "type": "string"
+          }
+        }
+      },
+      "IdempotencyConflictErrorV1": {
+        "type": "object",
+        "required": [
+          "schemaVersion",
+          "error",
+          "idempotencyKey",
+          "publicationId",
+          "expectedCanonicalPayloadHash",
+          "receivedCanonicalPayloadHash"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "publicationId": {
+            "type": "string"
+          },
+          "expectedCanonicalPayloadHash": {
+            "type": "string"
+          },
+          "receivedCanonicalPayloadHash": {
+            "type": "string"
+          }
+        }
+      },
+      "SequenceConflictErrorV1": {
+        "type": "object",
+        "required": [
+          "schemaVersion",
+          "error",
+          "publicationId",
+          "sourceSequence",
+          "expectedCanonicalPayloadHash",
+          "receivedCanonicalPayloadHash"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "publicationId": {
+            "type": "string"
+          },
+          "sourceSequence": {
+            "type": "integer"
+          },
+          "expectedCanonicalPayloadHash": {
+            "type": "string"
+          },
+          "receivedCanonicalPayloadHash": {
+            "type": "string"
+          }
+        }
+      },
+      "UnsupportedVersionErrorV1": {
+        "type": "object",
+        "required": [
+          "schemaVersion",
+          "error",
+          "contractVersion",
+          "supportedMajor",
+          "supportedMinor"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "contractVersion": {
+            "type": "string"
+          },
+          "supportedMajor": {
+            "type": "integer"
+          },
+          "supportedMinor": {
+            "type": "integer"
+          }
+        }
+      },
+      "NotImplementedErrorV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "error", "code", "capability"],
+        "properties": {
+          "schemaVersion": {
+            "const": "not-implemented-error-v1"
+          },
+          "error": {
+            "const": "not_implemented"
+          },
+          "code": {
+            "const": "not_implemented"
+          },
+          "capability": {
+            "enum": ["recall", "expand", "graphiti.ingest", "reindex", "stableMemoryRef"]
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

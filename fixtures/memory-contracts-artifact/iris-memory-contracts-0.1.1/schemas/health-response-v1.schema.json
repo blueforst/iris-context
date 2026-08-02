@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:health-response:v1",
+  "title": "HealthResponseV1",
+  "description": "Explicit service health state; degraded/not-ready is never disguised as ready.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "service",
+    "status",
+    "contractVersion",
+    "databaseExists",
+    "graphitiStatus",
+    "capabilities"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "health-response-v1"
+    },
+    "service": {
+      "const": "iris-memory"
+    },
+    "status": {
+      "enum": ["bootstrap", "not_ready", "ready", "degraded"]
+    },
+    "contractVersion": {
+      "type": "string"
+    },
+    "databaseExists": {
+      "type": "boolean"
+    },
+    "graphitiStatus": {
+      "enum": ["not_configured"]
+    },
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": ["health.read", "publication.accept", "recall.query", "recall.expand"]
+      }
+    }
+  }
+}

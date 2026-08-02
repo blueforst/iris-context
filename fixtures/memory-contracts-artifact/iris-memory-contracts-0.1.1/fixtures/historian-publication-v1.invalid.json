@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "historian-publication-v1",
+  "publicationId": "not-a-uuid",
+  "sourceSequence": 0,
+  "publishedAt": "2026-08-01T00:00:00Z",
+  "payloadHash": "not-a-hash",
+  "compartmentCount": 2,
+  "segmentCount": 3,
+  "evidenceCount": 4,
+  "summary": "Invalid publication fixture"
+}

@@ -302,3 +302,36 @@ test("image_ref mixed blocks keep 1:1 frame<->origin correspondence", () => {
     void label;
   }
 });
+
+test("review-pass7-fix: epoch-bound companion still verifies in transformContextMessages", () => {
+  // subagent-review fix regression: the runtime context transform must recompute
+  // the pairKey with the companion's recorded instanceEpoch — otherwise every
+  // epoch-bound pair (all production companions) would project as UNVERIFIED.
+  const input = sampleInput([
+    {
+      blockId: "block-epoch",
+      sourceOrigin: directUserRequest(),
+      content: { mode: "inline_text", text: "epoch verified" },
+      contentHash: createHash("sha256").update("epoch").digest("hex"),
+    },
+  ]);
+  const wire = encodeInputFrames(input.blocks);
+  const companion = createInputMetaCompanion(
+    input,
+    computeContentLayoutHash(input, wire),
+    "2026-08-01T00:00:00.000Z",
+    1, // instanceEpoch: Host default — pairKey is epoch-bound
+  );
+  const user: AgentMessage = { role: "user", content: wire, timestamp: 1 };
+
+  const result = transformContextMessages({
+    invocationId: "invocation-epoch",
+    runtimeSessionId: "session-epoch",
+    messages: [user, companion],
+    model: { provider: "mock", modelId: "mock" },
+    providerProfileId: "mock-iris-provider-v1",
+  });
+
+  assert.equal(result.messages.length, 1);
+  assert.equal(textOf(result.messages[0]), "[USER | cli | USER REQUEST | LIMITED]\nepoch verified");
+});

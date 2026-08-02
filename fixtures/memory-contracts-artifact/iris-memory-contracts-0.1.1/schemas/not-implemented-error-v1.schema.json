@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:not-implemented-error:v1",
+  "title": "NotImplementedErrorV1",
+  "description": "Versioned error returned when a routed capability is explicitly not implemented (e.g. recall/expand in the R0 baseline). Never an empty success.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "error", "code", "capability"],
+  "properties": {
+    "schemaVersion": {
+      "const": "not-implemented-error-v1"
+    },
+    "error": {
+      "const": "not_implemented"
+    },
+    "code": {
+      "const": "not_implemented"
+    },
+    "capability": {
+      "enum": ["recall", "expand", "graphiti.ingest", "reindex", "stableMemoryRef"]
+    },
+    "message": {
+      "type": "string"
+    }
+  }
+}

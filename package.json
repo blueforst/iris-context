@@ -17,14 +17,15 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.mjs",
     "dist:smoke": "node scripts/dist-smoke.mjs",
-    "test": "tsx --test test/companion.test.ts test/composition.test.ts test/config.test.ts test/contracts.test.ts test/lock.test.ts test/migration.test.ts test/opencode-go-provider.test.ts test/rollover.test.ts test/runtime-coordinator.test.ts test/vertical-slice.test.ts",
+    "test": "tsx --test test/companion.test.ts test/composition.test.ts test/config.test.ts test/contracts.test.ts test/host.test.ts test/ingress.test.ts test/lock.test.ts test/memory-contract-gate.test.ts test/migration.test.ts test/opencode-go-provider.test.ts test/rollover.test.ts test/runtime-coordinator.test.ts test/vertical-slice.test.ts",
+    "test:subprocess": "tsx --test test/subprocess.test.ts",
     "test:cli": "tsx --test test/cli.test.ts",
     "test:contract": "tsx --test test/contracts.test.ts test/migration.test.ts",
     "migration:smoke": "tsx scripts/migration-smoke.ts",
     "bench": "tsx scripts/bench-smoke.ts",
     "crash:harness": "tsx scripts/crash-harness.ts",
     "crash:check": "tsx scripts/crash-check.ts",
-    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run migration:smoke && npm run crash:check && npm run build && npm run test:cli && npm run dist:smoke"
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run migration:smoke && npm run crash:check && npm run build && npm run test:subprocess && npm run test:cli && npm run dist:smoke"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.82.1",

@@ -12,7 +12,7 @@ import {
 
 test("memory contract pin is exact and does not copy memory DTOs", () => {
   assert.equal(MEMORY_CONTRACTS_PIN.package, "iris-memory-contracts");
-  assert.equal(MEMORY_CONTRACTS_PIN.version, "0.1.0");
+  assert.equal(MEMORY_CONTRACTS_PIN.version, "0.1.1");
   assert.ok(memoryContractsVersion().includes("artifact_ready_pending_release"));
   const contractFiles = readdirSync(join(process.cwd(), "src", "contracts"));
   assert.ok(
@@ -25,21 +25,21 @@ test("memory contract pin is exact and does not copy memory DTOs", () => {
   );
 });
 
-test("memory contract pin schema set matches the published v1 manifest", () => {
+test("memory contract pin schema set matches the published 0.1.1 manifest", () => {
   // The pin declares a manifestSha256 anchor (SHA-256 of the published
-  // iris-memory v0.1.0 contracts/assets/manifest.json) plus the authoritative
+  // iris-memory v0.1.1 contracts/assets/manifest.json) plus the authoritative
   // schema list. The expected set below is the schema surface published by
   // that manifest (verified by re-running `sha256sum manifest.json` in the
   // iris-memory repo); a drift on either side (hash or list) fails here, so
   // the two cannot silently diverge from each other.
   assert.equal(
     MEMORY_CONTRACTS_PIN.manifestSha256,
-    "23657ae76e3adb5c55d3a7d68b5d820f34900e96cb923a19eb157e246e887b9f",
-    "manifestSha256 must equal the published iris-memory v0.1.0 manifest hash",
+    "2cb22deb5efded5a112dbb38c19506e6185ad328a973f7a96d9e66faf59a761b",
+    "manifestSha256 must equal the published iris-memory v0.1.1 artifact manifest hash",
   );
   const publishedSchemas = [
     "acceptance-receipt-v1.schema.json",
-    "capability-handshake-v1.schema.json",
+    "capability-handshake-v2.schema.json",
     "duplicate-replay-receipt-v1.schema.json",
     "expansion-request-v1.schema.json",
     "expansion-response-v1.schema.json",
@@ -49,6 +49,7 @@ test("memory contract pin schema set matches the published v1 manifest", () => {
     "memory-recall-card-v1.schema.json",
     "publication-acceptance-request-v1.schema.json",
     "recall-request-v1.schema.json",
+    "not-implemented-error-v1.schema.json",
     "sequence-conflict-error-v1.schema.json",
     "unsupported-version-error-v1.schema.json",
   ];
