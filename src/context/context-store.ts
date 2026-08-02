@@ -213,6 +213,11 @@ export class ContextStore {
     }
     const db = new DatabaseSync(contextDbPath);
     try {
+      // Busy timeout before WAL so a transient writer (e.g. a diagnostic tool
+      // opening context.db concurrently) waits instead of failing SQLITE_BUSY
+      // (reviewer F2). The Host's data-root lock still guarantees a single
+      // writer in production; this is defense-in-depth.
+      db.exec("PRAGMA busy_timeout = 5000");
       db.exec("PRAGMA journal_mode = WAL");
       db.exec("PRAGMA foreign_keys = ON");
       migrateDatabase(contextDbPath, migrationsDirFor(contextDbPath));
