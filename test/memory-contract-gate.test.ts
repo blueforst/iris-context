@@ -25,7 +25,7 @@ const ARTIFACT_ROOT = join(
   "..",
   "fixtures",
   "memory-contracts-artifact",
-  "iris-memory-contracts-0.1.0",
+  "iris-memory-contracts-0.1.1",
 );
 
 function readJson(relative: string): Record<string, unknown> {
@@ -40,7 +40,7 @@ test("cross-repo: agent reads the manifest from the REAL artifact", () => {
   assert.ok(Array.isArray(manifest["schemas"]));
   assert.ok(Array.isArray(manifest["fixtures"]));
   const schemas = manifest["schemas"] as string[];
-  assert.equal(schemas.length, 13);
+  assert.equal(schemas.length, 14);
 });
 
 test("cross-repo: pinned manifestSha256 equals the REAL artifact manifest hash", () => {
@@ -111,7 +111,7 @@ test("cross-repo: agent validates valid/invalid fixtures against the artifact sc
   const formatsPlugin = formatsModule.default as unknown as (validator: unknown) => void;
 
   const fixtures = manifest["fixtures"] as string[];
-  assert.ok(fixtures.length >= 28, `expected >=28 fixtures, got ${fixtures.length}`);
+  assert.ok(fixtures.length >= 30, `expected >=28 fixtures, got ${fixtures.length}`);
   for (const relative of fixtures) {
     const parts = relative.split("/");
     const name = parts[parts.length - 1] ?? "";
@@ -151,5 +151,20 @@ test("cross-repo: agent does not depend on the Memory Python implementation", ()
   // no Python import anywhere in the agent repo.
   const pin = readContractPin();
   assert.equal(typeof pin.schemaSet, "object");
-  assert.equal(pin.schemaSet.length, 13);
+  assert.equal(pin.schemaSet.length, 14);
+});
+
+test("cross-repo: committed artifact carries provenance and matches its pin", () => {
+  // The checked-in artifact must record its producer source (repository +
+  // commit) and its manifest hash must equal the agent's pin, so the gate
+  // input cannot silently diverge from the producer repository.
+  const provenance = readJson("provenance.json");
+  assert.equal(provenance["producer"], "blueforst/iris_memory");
+  const producerCommit = provenance["producerCommit"];
+  assert.equal(typeof producerCommit, "string");
+  assert.ok((producerCommit as string).length >= 7);
+  const pin = readContractPin();
+  assert.equal(pin.manifestSha256, provenance["manifestSha256"]);
+  const manifest = readJson("manifest.json");
+  assert.equal(manifest["manifestSha256"], provenance["manifestSha256"]);
 });

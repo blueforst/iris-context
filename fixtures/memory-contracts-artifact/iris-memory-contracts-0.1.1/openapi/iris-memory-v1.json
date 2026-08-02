@@ -106,6 +106,57 @@
           }
         }
       }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "operationId": "getCapabilities",
+        "responses": {
+          "200": {
+            "description": "Capability/version handshake",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilityHandshakeV1"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memory/recall": {
+      "post": {
+        "operationId": "recallNotImplemented",
+        "responses": {
+          "501": {
+            "description": "recall is not implemented in the R0 baseline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotImplementedErrorV1"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memory/expand": {
+      "post": {
+        "operationId": "expandNotImplemented",
+        "responses": {
+          "501": {
+            "description": "expand is not implemented in the R0 baseline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotImplementedErrorV1"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -369,6 +420,28 @@
           },
           "supportedMinor": {
             "type": "integer"
+          }
+        }
+      },
+      "NotImplementedErrorV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "error", "code", "capability"],
+        "properties": {
+          "schemaVersion": {
+            "const": "not-implemented-error-v1"
+          },
+          "error": {
+            "const": "not_implemented"
+          },
+          "code": {
+            "const": "not_implemented"
+          },
+          "capability": {
+            "enum": ["recall", "expand", "graphiti.ingest", "reindex", "stableMemoryRef"]
+          },
+          "message": {
+            "type": "string"
           }
         }
       }

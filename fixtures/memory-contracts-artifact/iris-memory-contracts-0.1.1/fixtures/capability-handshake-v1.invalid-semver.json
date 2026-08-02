@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "capability-handshake-v1",
+  "serviceName": "iris-memory",
+  "serviceVersion": "0.01.0",
+  "contractPackage": "iris-memory-contracts",
+  "contractVersion": "0.1.0",
+  "contractVersions": { "major": 0, "minor": 1 },
+  "supportedMajor": 0,
+  "supportedMinor": 1,
+  "manifestSha256": "e0a0983958d75a755b0c717e0e2ea38280829ceb3c961b6b6865d4afb631594f",
+  "capabilities": ["publication.accept"],
+  "unavailableCapabilities": ["graphiti.ingest"],
+  "graphitiStatus": "not_configured",
+  "readiness": "ready",
+  "degradedReasons": []
+}
