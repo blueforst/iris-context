@@ -54,5 +54,9 @@ export interface IrisContextCarrierDetails {
     surface: "m0" | "m1";
     materializationId: string;
     contentHash: string;
+    /** Fixed carrier schema version; bump only on an explicit review. */
+    carrierSchemaVersion: string;
+    /** Provider profile the carrier was materialized under (invalidation). */
+    providerProfileId: string;
   };
 }
