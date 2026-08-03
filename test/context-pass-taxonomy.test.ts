@@ -241,14 +241,18 @@ test("pass-taxonomy: golden fixture matrix aligns with authority assertions", ()
   assert.equal(h.advancesMaterialization, true);
   assert.equal(hard.expected.rematerialized, true);
 
-  // Empty HARD signal: no fold.
+  // Empty HARD signal: no fold. The authority fixture records SOFT because
+  // its scenario is an exec pass (isCacheBustingPass=true → m1 re-renders);
+  // drive wouldAdvanceLive=true so the Iris decision matches the recorded
+  // classification and parity is asserted, not just read (reviewer F3).
   const e = decidePass(
     lineage,
     { systemHash: "", modelKey: "", cacheExpired: false, lastResponseTime: 0 },
-    { wouldAdvanceLive: false },
+    { wouldAdvanceLive: true },
   );
-  assert.equal(e.classification, "SOFT+");
-  assert.equal(e.advancesMaterialization, false);
+  assert.equal(e.classification, "SOFT");
+  assert.equal(e.advancesMaterialization, true);
   assert.equal(empty.expected.passClassification, "SOFT");
+  assert.equal(e.classification, empty.expected.passClassification);
   assert.equal(empty.expected.rematerialized, false);
 });

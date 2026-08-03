@@ -33,11 +33,9 @@ export type HardReason =
   | "carrier_schema_change"
   | "persona_change"
   | "declaration_change"
-  | "cache_epoch"
   | "ttl_idle"
   | "context_pressure"
-  | "manual_maintenance"
-  | "baseline_structural_change";
+  | "manual_maintenance";
 
 export interface HardSignals {
   systemHash?: string;
@@ -140,10 +138,14 @@ export function decidePass(
       };
     }
   }
+  // Authority semantics (inject-compartments.ts mustMaterialize): ttl_idle
+  // folds ONLY on a genuine current-flight signal — lastResponseTime present
+  // AND > 0 AND > m0MaterializedAt. An absent current signal is never a
+  // change, so lineage.lastResponseTime is NOT consulted (reviewer F2).
   if (hard.cacheExpired === true) {
-    const lastResponse = hard.lastResponseTime ?? lineage.lastResponseTime ?? 0;
+    const lastResponse = hard.lastResponseTime;
     const materializedAt = lineage.m0MaterializedAt ?? 0;
-    if (lastResponse > materializedAt) {
+    if (lastResponse !== undefined && lastResponse > 0 && lastResponse > materializedAt) {
       return { classification: "HARD", reason: "ttl_idle", advancesMaterialization: true };
     }
   }
