@@ -189,16 +189,6 @@ function unitEntrySeq(unit: HistoryProjectionUnit): number {
   }
 }
 
-function unitEndEntrySeq(unit: HistoryProjectionUnit): number {
-  switch (unit.kind) {
-    case "input":
-    case "tool_arc":
-      return unit.entryRange.endEntrySeq;
-    default:
-      return unit.entrySeq;
-  }
-}
-
 /** An OPEN (incomplete) tool arc — an assistant with toolCallIds whose callId
  * never resolves to a ToolResult. Detected by callId set difference (the
  * projection only emits sealed tool_arc units; unresolved calls remain as
@@ -238,14 +228,32 @@ export interface EstimateTokensArgs {
  * @param opts.unitTokenCounts optional per-unit token estimates
  * @param opts.previousPlan protectedTailStartEntrySeq from the previous pass
  *   for hysteresis (authority NORMAL_HYSTERESIS_TOKENS)
+ * @param opts.usagePercentage context usage 0-100 (authority usagePercentage)
+ * @param opts.emergencyTailScale emergency tail scale factor (authority
+ *   emergencyTailScale). When set (emergency path) the routine live-user
+ *   anchor floor is LIFTED so a sparse session stays compactable under
+ *   genuine pressure (authority #132; protected-tail-boundary.ts "Live-prompt
+ *   floor" comment).
  */
 export function resolveProtectedTail(
   projection: ProjectedLogicalUnits,
   tokenTarget: number,
-  opts: { unitTokenCounts?: number[]; previousPlan?: ProtectedTailPlan } = {},
+  opts: {
+    unitTokenCounts?: number[];
+    previousPlan?: ProtectedTailPlan;
+    usagePercentage?: number;
+    emergencyTailScale?: number;
+  } = {},
 ): ProtectedTailPlan {
   const { units } = projection;
   const counts = opts.unitTokenCounts ?? units.map(() => 512); // conservative per-unit default
+  const usagePercentage = opts.usagePercentage ?? 0;
+  const isEmergency = opts.emergencyTailScale !== undefined;
+  // Authority live-prompt floor exemption: on routine (non-emergency) passes
+  // with usage < 80 the floor is enforced; at force pressure (>=80%) or on
+  // the emergency-scaled path the floor is lifted so the eligible head can be
+  // reclaimed (sparse #132 session stays compactable).
+  const anchorFloorActive = !isEmergency && usagePercentage < 80;
   if (units.length === 0) {
     return {
       lastSafeUserAnchorEntrySeq: null,
@@ -277,54 +285,57 @@ export function resolveProtectedTail(
     units.length,
     Math.max(1, findSuffixStartForTokens(counts, tokenTarget)),
   );
-  // 3. Routine live-user floor: the tail always covers the last safe real-user
-  //    anchor AND everything after it (newest todo/tool state is protected).
-  //    The anchor input pair itself is included — never folded by an ordinary
-  //    pass. Clamp so the tail spans [anchorUnitIndex..end].
-  if (anchorUnitIndex !== null) {
+  // 3. Routine live-user floor (authority "Live-prompt floor"): on routine
+  //    non-emergency passes with usage < 80 the tail always covers the last
+  //    safe real-user anchor AND everything after it (newest todo/tool state
+  //    is protected; the anchor input pair itself is included). The floor is
+  //    LIFTED at force pressure (>=80%) or on the emergency-scaled path so a
+  //    sparse session stays compactable (authority #132).
+  if (anchorUnitIndex !== null && anchorFloorActive) {
     tailStartUnitIndex = Math.min(tailStartUnitIndex, anchorUnitIndex + 1);
   }
 
-  // 4. Fence: the boundary must land exactly on a UNIT START. Unit spans are
-  //    [startEntrySeq, endEntrySeq]; walk backward from the chosen unit so
-  //    the boundary never cuts an atomic unit (input pair, tool arc,
-  //    reasoning, boundary) in half — pull back to the unit start.
+  // 4. Fence — authority fenceBoundaryForToolArcs semantics, in entrySeq
+  //    space:
+  //    - SEALED arc: when the boundary falls INSIDE [arcStart, arcEnd] the
+  //      arc is pushed wholly into the head (boundary = arcEnd + 1). Its
+  //      ToolResult is already persisted, so folding the whole range is safe
+  //      (no wire-dangling tool_use); a boundary at/before arcStart or
+  //      after arcEnd needs no move.
+  //    - OPEN arc (in-flight invocation): a boundary at/after the invocation
+  //      is pulled back to the invocation start so the current call is
+  //      protected (authority: an open arc inside the live window fences).
+  const boundaryUnit = units[tailStartUnitIndex - 1] ?? units[0];
+  let boundary = boundaryUnit === undefined ? 1 : unitEntrySeq(boundaryUnit);
   let fenced = false;
-  let boundaryUnitIndex = tailStartUnitIndex;
-  while (boundaryUnitIndex > 1) {
-    const prev = units[boundaryUnitIndex - 2];
-    const cur = units[boundaryUnitIndex - 1];
-    if (prev === undefined || cur === undefined) break;
-    // If the previous unit's span overlaps the current boundary position
-    // (multi-entry units like input pairs / sealed arcs), the boundary must
-    // move to the previous unit's START so that unit is wholly in the head.
-    if (unitEndEntrySeq(prev) >= unitEntrySeq(cur)) {
-      boundaryUnitIndex -= 1;
+
+  // 4a. Sealed arcs: push the boundary forward (into the head) when it lands
+  //     inside a sealed arc's raw span.
+  for (const unit of units) {
+    if (unit.kind !== "tool_arc" || unit.sealed !== true) continue;
+    const start = unit.entryRange.startEntrySeq;
+    const end = unit.entryRange.endEntrySeq;
+    if (start < boundary && boundary <= end) {
+      boundary = end + 1;
       fenced = true;
-    } else {
-      break;
     }
   }
 
-  // 5. An OPEN tool arc at/after the boundary forces the boundary before it:
-  //    incomplete invocations are never folded away (authority "incomplete
-  //    tool arc fence").
+  // 4b. Open arcs: pull the boundary back to the invocation start when the
+  //     in-flight call sits at/after the current boundary.
   for (const open of openToolCallIds(units)) {
-    const openIndex = units.findIndex(
-      (u) => u.kind === "assistant" && u.entrySeq === open.assistantEntrySeq,
-    );
-    if (openIndex >= 0 && openIndex + 1 >= boundaryUnitIndex) {
-      boundaryUnitIndex = openIndex + 1;
+    if (open.assistantEntrySeq >= boundary) {
+      boundary = open.assistantEntrySeq;
       fenced = true;
     }
   }
 
-  // 6. Hysteresis: hold the previous boundary when the move is smaller than
-  //    NORMAL_HYSTERESIS_TOKENS (authority NORMAL_HYSTERESIS_TOKENS=256).
-  //    Compared in entrySeq space via the boundary unit's start entry seq.
-  const boundaryUnit = units[boundaryUnitIndex - 1] ?? units[0];
-  const boundaryEntrySeq = boundaryUnit === undefined ? 1 : unitEntrySeq(boundaryUnit);
-  let boundary = boundaryEntrySeq;
+  // 5. Hysteresis (authority NORMAL_HYSTERESIS_TOKENS=256): hold the previous
+  //    boundary when the boundary move is a small churn. Note: the authority
+  //    measures the eligible head's TOKEN total against 256; Iris compares the
+  //    boundary ENTRY-SEQ delta as its per-unit token budget proxy (reviewer
+  //    F3 — acknowledged deviation, kept simple; token-accurate hysteresis is
+  //    deferred to the fold-path integration in R3).
   let hysteresisHeld = false;
   if (opts.previousPlan !== undefined && opts.previousPlan.protectedTailStartEntrySeq > 0) {
     const prev = opts.previousPlan.protectedTailStartEntrySeq;
@@ -337,11 +348,15 @@ export function resolveProtectedTail(
   const headEnd = boundary - 1;
   // Oversize atomic unit: the first unit of the tail (at the boundary) alone
   // exceeds the fold budget — the fold cannot satisfy the token target
-  // without cutting an atomic unit (authority oversizeAtomicUnit).
+  // without cutting an atomic unit (authority oversizeAtomicUnit, adapted:
+  // authority compares the first ELIGIBLE HEAD message against the per-run
+  // cap; Iris compares the first tail unit against the token target N —
+  // reviewer F4, acknowledged difference).
   let oversizeAtomicUnit = false;
-  const firstTailUnit = units[boundaryUnitIndex - 1];
+  const firstTailUnit = units.find((u) => unitEntrySeq(u) >= boundary);
   if (firstTailUnit !== undefined) {
-    const tokens = counts[boundaryUnitIndex - 1] ?? 0;
+    const index = units.indexOf(firstTailUnit);
+    const tokens = index >= 0 ? (counts[index] ?? 0) : 0;
     if (tokens > tokenTarget) {
       oversizeAtomicUnit = true;
     }

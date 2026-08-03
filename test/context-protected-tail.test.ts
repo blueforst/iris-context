@@ -263,10 +263,59 @@ test("protected-tail: newest verified anchor and following units are always prot
   assert.equal(plan.headEndEntrySeq, plan.protectedTailStartEntrySeq - 1);
 });
 
+test("protected-tail: anchor floor is lifted at force pressure (authority #132)", () => {
+  // Sparse session: one verified input turn + a huge assistant/tool tail.
+  // On a ROUTINE pass (usage < 80) the anchor floor protects everything from
+  // the anchor forward (no eligible head). At force pressure (usage >= 80) or
+  // on the emergency-scaled path the floor is LIFTED so the head stays
+  // compactable (authority protected-tail-boundary.ts live-prompt floor
+  // exemption; sparse #132 session must stay compactable under pressure).
+  const entries: SessionTreeEntry[] = [
+    ...inputPairEntries(1, "in-1", "k1"), // anchor
+    assistantEntry("a-1", "c-1", [{ type: "text", text: "huge reply" }]),
+    toolResultEntry("tr-1", "a-1", "call-x", "exec-1"),
+    assistantEntry("a-2", "tr-1", [{ type: "text", text: "more" }]),
+  ];
+  const projection = projectLogicalUnits("iris-runtime-2026-08-01-1", entries);
+
+  const routine = resolveProtectedTail(projection, 500, {
+    unitTokenCounts: [100, 1_000, 100, 1_000],
+    usagePercentage: 30,
+  });
+  assert.equal(routine.lastSafeUserAnchorEntrySeq, 1);
+  assert.equal(
+    routine.protectedTailStartEntrySeq,
+    1,
+    "routine pass: anchor floor keeps whole session protected",
+  );
+
+  const forced = resolveProtectedTail(projection, 500, {
+    unitTokenCounts: [100, 1_000, 100, 1_000],
+    usagePercentage: 95,
+  });
+  assert.ok(
+    forced.protectedTailStartEntrySeq > 1,
+    `force path lifts anchor floor: tail starts at ${forced.protectedTailStartEntrySeq}, not 1`,
+  );
+
+  const emergency = resolveProtectedTail(projection, 500, {
+    unitTokenCounts: [100, 1_000, 100, 1_000],
+    usagePercentage: 30,
+    emergencyTailScale: 0.5,
+  });
+  assert.ok(
+    emergency.protectedTailStartEntrySeq > 1,
+    `emergency path lifts anchor floor: tail starts at ${emergency.protectedTailStartEntrySeq}, not 1`,
+  );
+});
+
 test("protected-tail: sealed tool arc is never cut in half", () => {
-  // Two input turns; the first turn contains a sealed tool arc that falls in
-  // the fold HEAD when the suffix walk targets the second turn. The boundary
-  // must pull back so the arc is wholly in the head (never cut mid-arc).
+  // Two input turns; the first turn contains a sealed tool arc. Authority
+  // fenceBoundaryForToolArcs semantics: when the size-walk boundary lands
+  // INSIDE a sealed arc's raw span, the arc is pushed wholly into the head
+  // (boundary = arcEnd + 1) — its ToolResult is already persisted, so folding
+  // the whole range is safe (no wire-dangling tool_use). The arc is NEVER cut
+  // mid-span: the boundary must land outside [arcStart, arcEnd].
   const entries: SessionTreeEntry[] = [
     ...inputPairEntries(1, "in-1", "k1"), // u-1(1) c-1(2)
     assistantEntry("a-1", "c-1", [
@@ -282,13 +331,18 @@ test("protected-tail: sealed tool arc is never cut in half", () => {
   const arc = projection.units.find((u) => u.kind === "tool_arc");
   assert.ok(arc?.kind === "tool_arc");
   assert.equal(arc.sealed, true);
-  // Suffix walk would start at the arc (unit 3) → fence pulls back to arc start.
-  const plan = resolveProtectedTail(projection, 1_000, {
+  // Suffix walk (target 700: 100+500+100 accumulates to exactly 700 at the
+  // tool_result unit) lands INSIDE the arc span [3,4] → the arc is pushed
+  // wholly into the head: boundary >= arcEnd + 1.
+  const plan = resolveProtectedTail(projection, 700, {
     unitTokenCounts: [500, 500, 1_000, 100, 500, 100],
   });
+  const outsideArc =
+    plan.protectedTailStartEntrySeq <= arc.entryRange.startEntrySeq ||
+    plan.protectedTailStartEntrySeq > arc.entryRange.endEntrySeq;
   assert.ok(
-    plan.protectedTailStartEntrySeq <= arc.entryRange.startEntrySeq,
-    `boundary ${plan.protectedTailStartEntrySeq} must be at/before arc start ${arc.entryRange.startEntrySeq}`,
+    outsideArc,
+    `boundary ${plan.protectedTailStartEntrySeq} must not fall inside [${arc.entryRange.startEntrySeq}, ${arc.entryRange.endEntrySeq}]`,
   );
   assert.equal(plan.fenced, true);
 });
