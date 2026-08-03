@@ -362,3 +362,55 @@ test("pipeline: defer pass never commits watermarks (SOFT+ → reuse, no nextWat
     rmSync(dirname(path), { recursive: true, force: true });
   }
 });
+
+test("pipeline: end-to-end round trip — pass 2 on identical materialized state is SOFT+ (reviewer F1/F2)", () => {
+  // The Host flow: pass 1 (HARD) materializes m0 and records the CURRENT
+  // identity + representedThrough = projection.toEntrySeq. Pass 2 with the
+  // SAME entries and the persisted lineage must resolve SOFT+ (byte-identical
+  // replay) — the authority's isCacheBustingPass:false semantics. This test
+  // would fail before the F1/F2 fix (cached identity lost → HARD; or
+  // representedThrough = headEnd → SOFT forever).
+  const { store, path } = storeFixture();
+  try {
+    seedLineage(store);
+    const entries: SessionTreeEntry[] = [
+      userEntry("u-1", null, "hello"),
+      customCompanion("c-1", "u-1", "in-1"),
+      assistantEntry("a-1", "c-1", "hi back"),
+    ];
+
+    // Pass 1: HARD first_render, materialize.
+    const pass1 = runContextPass(baseInput(entries));
+    assert.equal(pass1.classification, "HARD");
+    applyContextPass(store, "iris-runtime-2026-08-01-1", pass1, 1000);
+
+    // Pass 2: identical entries + persisted lineage.
+    const lineage = store.getLineage("iris-runtime-2026-08-01-1");
+    assert.ok(lineage);
+    assert.equal(lineage.cachedM0ModelKey, "opencode:model-a", "current identity recorded (F1)");
+    assert.equal(
+      lineage.representedThroughEntrySeq,
+      pass1.projection.toEntrySeq,
+      "representedThrough covers the whole projection (F2)",
+    );
+    const pass2 = runContextPass({
+      ...baseInput(entries),
+      lineage,
+    });
+    assert.equal(pass2.classification, "SOFT+", "identical second pass must be SOFT+");
+    assert.equal(pass2.action.kind, "reuse");
+
+    // Pass 3: a model change on the same state → HARD again.
+    const lineageAfterSoft = store.getLineage("iris-runtime-2026-08-01-1");
+    assert.ok(lineageAfterSoft);
+    const pass3 = runContextPass({
+      ...baseInput(entries),
+      lineage: lineageAfterSoft,
+      model: { provider: "opencode", modelId: "model-NEW" },
+    });
+    assert.equal(pass3.classification, "HARD", "model change after SOFT+ still forces HARD");
+  } finally {
+    store.close();
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
+});

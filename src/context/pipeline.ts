@@ -6,7 +6,11 @@ import type { ContextStore, ContextLineage } from "./context-store.js";
 import { projectLogicalUnits, type ProjectedLogicalUnits } from "./projection.js";
 import { buildCarriers, type BuiltCarrier } from "./carriers.js";
 import { decidePass, type PassClassification } from "./pass-taxonomy.js";
-import { resolveProtectedTail, type ProtectedTailPlan } from "./protected-tail.js";
+import {
+  resolveProtectedTail,
+  deriveProtectedTailTokenTarget,
+  type ProtectedTailPlan,
+} from "./protected-tail.js";
 import { runReplay, type ReplayResult, type ReplayWatermarks } from "./replay.js";
 
 /**
@@ -73,6 +77,12 @@ export interface ContextPassDecision {
         protectedTailStartEntrySeq: number;
         lastSafeUserAnchorEntrySeq: number | null;
         representedThroughEntrySeq: number;
+        /** Current-pass identity recorded into cachedM0* on materialization
+         * (the pass that materialized under these is the cache authority;
+         * a later pass compares against them — reviewer F1). */
+        cachedM0SystemHash: string;
+        cachedM0ModelKey: string;
+        cachedM0ProviderProfileId: string;
       };
   /** Provider-visible carriers (m0 + m1) to inject when materializing. */
   carriers: BuiltCarrier | undefined;
@@ -205,7 +215,14 @@ export function runContextPass(input: ContextPassInput): ContextPassDecision {
       m1Body,
       protectedTailStartEntrySeq: protectedTail.protectedTailStartEntrySeq,
       lastSafeUserAnchorEntrySeq: protectedTail.lastSafeUserAnchorEntrySeq,
-      representedThroughEntrySeq: protectedTail.headEndEntrySeq,
+      // representedThrough = the projection's LAST entry seq: the pass
+      // materialized m0/m1 covering the entire current projection, so an
+      // identical second pass has no live delta → SOFT+ (authority
+      // isCacheBustingPass:false semantics — reviewer F2).
+      representedThroughEntrySeq: projection.toEntrySeq,
+      cachedM0SystemHash: input.source.systemProjectionHash,
+      cachedM0ModelKey: `${input.model.provider}:${input.model.modelId}`,
+      cachedM0ProviderProfileId: input.source.providerProfileId,
     },
     carriers,
     nextWatermarks,
@@ -223,13 +240,20 @@ function classifyAction(
     case "SOFT":
       return { kind: "materialize_m1", m1Body: "" };
     case "HARD":
+      // The HARD full action (with m0Body + cached identity) is constructed by
+      // runContextPass after renderM0Head; this placeholder only satisfies the
+      // union type before the branch is replaced. representedThrough uses the
+      // projection's last entry seq so an identical pass resolves SOFT+.
       return {
         kind: "materialize_m0",
         m0Body: "",
         m1Body: "",
         protectedTailStartEntrySeq: protectedTail.protectedTailStartEntrySeq,
         lastSafeUserAnchorEntrySeq: protectedTail.lastSafeUserAnchorEntrySeq,
-        representedThroughEntrySeq: protectedTail.headEndEntrySeq,
+        representedThroughEntrySeq: 0,
+        cachedM0SystemHash: "",
+        cachedM0ModelKey: "",
+        cachedM0ProviderProfileId: "",
       };
   }
 }
@@ -291,27 +315,14 @@ function unitEndSeq(unit: ProjectedLogicalUnits["units"][number]): number {
 }
 
 function deriveTokenTarget(input: ContextPassInput): number {
-  const safeLimit =
-    typeof input.contextLimit === "number" &&
-    Number.isFinite(input.contextLimit) &&
-    input.contextLimit > 0
-      ? input.contextLimit
-      : 128_000;
-  const safeThreshold =
-    typeof input.executeThresholdPercentage === "number" &&
-    Number.isFinite(input.executeThresholdPercentage)
-      ? Math.max(0, input.executeThresholdPercentage)
-      : 65;
-  const usable = Math.max(1, Math.round((safeLimit * safeThreshold) / 100));
-  const usage = clampPercentage(input.usagePercentage ?? 0);
-  const rawN = Math.round(usable * 0.3 * (1 - usage / 100));
-  const floorN = Math.min(12_000, Math.max(2_000, Math.round(usable * 0.08)));
-  return Math.max(1, Math.min(Math.floor(usable * 0.4), Math.max(floorN, rawN)));
-}
-
-function clampPercentage(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  return Math.min(100, Math.max(0, value));
+  // Reuse the authority-locked protected-tail token target (single source of
+  // truth for N; includes ABS_CAP/FLOOR/headroom clamps — reviewer F1). The
+  // usage percentage defaults to 0 when unknown (authority clampPercentage).
+  return deriveProtectedTailTokenTarget({
+    contextLimit: input.contextLimit ?? 0,
+    executeThresholdPercentage: input.executeThresholdPercentage ?? 0,
+    usagePercentage: input.usagePercentage ?? 0,
+  }).N;
 }
 
 /**
@@ -353,7 +364,9 @@ export function applyContextPass(
         runtimeSessionId,
         m1Body,
         m1ContentHash: sha256(m1Body),
-        representedThroughEntrySeq: decision.protectedTail.headEndEntrySeq,
+        // representedThrough = the projection's last entry seq (F2): m0/m1 now
+        // cover the whole projection, so an identical pass is SOFT+.
+        representedThroughEntrySeq: decision.projection.toEntrySeq,
         atMs: nowMs,
       });
       break;
@@ -378,9 +391,12 @@ export function applyContextPass(
         m0ContentHash: sha256(m0Body),
         m1ContentHash: sha256(m1Body),
         atMs: nowMs,
-        cachedM0SystemHash: lineage.cachedM0SystemHash ?? "",
-        cachedM0ModelKey: lineage.cachedM0ModelKey ?? "",
-        cachedM0ProviderProfileId: lineage.cachedM0ProviderProfileId ?? "",
+        // F1: record the CURRENT pass identity as the cache authority —
+        // the m0 cache was built under these; a later pass compares against
+        // them (model/system/provider change → HARD).
+        cachedM0SystemHash: decision.action.cachedM0SystemHash,
+        cachedM0ModelKey: decision.action.cachedM0ModelKey,
+        cachedM0ProviderProfileId: decision.action.cachedM0ProviderProfileId,
         representedThroughEntrySeq: decision.action.representedThroughEntrySeq,
         protectedTailStartEntrySeq: decision.action.protectedTailStartEntrySeq,
         lastSafeUserAnchorEntrySeq: decision.action.lastSafeUserAnchorEntrySeq ?? 0,
