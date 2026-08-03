@@ -335,6 +335,58 @@ test("lkg: safe seam passes when prefix ends with a completed assistant", () => 
   assert.equal(validateLkgSeam(projectSessionMessages(prefix), projectSessionMessages(tail)), true);
 });
 
+test("lkg: unsafe seam — prefix ends with an incomplete tool call with no result anywhere in tail (reviewer F3)", () => {
+  const prefix: SessionTreeEntry[] = [
+    userEntry("u-1", null, "hello"),
+    companionEntry("c-1", "u-1", "in-1"),
+    assistantMessage(
+      "a-1",
+      "c-1",
+      [{ type: "toolCall", id: "call-1", name: "run", arguments: {} }],
+      3,
+      "toolUse",
+    ),
+  ];
+  // Tail starts with a user message; the call-1 result never appears anywhere
+  // in the tail → a dangling tool_use would reach the wire → unsafe.
+  const tail: SessionTreeEntry[] = [
+    userEntry("u-2", "a-1", "continue"),
+    companionEntry("c-2", "u-2", "in-2"),
+  ];
+  assert.equal(
+    validateLkgSeamBoundary(projectSessionMessages(prefix), projectSessionMessages(tail)),
+    false,
+  );
+});
+
+test("lkg: reasoning part on a non-assistant message is rejected (reviewer F2)", () => {
+  // A user message whose content carries a reasoning part is a corrupt seam.
+  const prefix: SessionTreeEntry[] = [
+    userEntry("u-1", null, "hello"),
+    companionEntry("c-1", "u-1", "in-1"),
+    assistantMessage("a-1", "c-1", [{ type: "text", text: "done" }]),
+  ];
+  const tail: SessionTreeEntry[] = [
+    {
+      type: "message",
+      id: "u-2",
+      parentId: "a-1",
+      timestamp: "2026-08-01T00:00:00.000Z",
+      // Deliberately corrupt: a "reasoning" part in a user message would
+      // break the seam (non-assistant messages must not carry reasoning).
+      message: {
+        role: "user",
+        content: [{ type: "reasoning", text: "leaked" }],
+        timestamp: 5,
+      } as unknown as import("@earendil-works/pi-agent-core").AgentMessage,
+    },
+  ];
+  assert.equal(
+    validateLkgSeam(projectSessionMessages(prefix), projectSessionMessages(tail)),
+    false,
+  );
+});
+
 test("lkg: anthropic reasoning runs — multiple thinking blocks in one merged run are rejected", () => {
   const bad: SessionTreeEntry[] = [
     assistantMessage("a-1", null, [

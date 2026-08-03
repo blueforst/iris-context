@@ -216,13 +216,10 @@ function partIsAnthropicThinkingPart(part: unknown): boolean {
   return type === "thinking" || type === "reasoning" || type === "redacted_thinking";
 }
 
-function partIsReasoning(message: ProjectedSessionMessage): boolean {
-  const m = message.message;
-  if (m.role !== "assistant") return false;
-  const content = Array.isArray((m as { content?: unknown }).content)
-    ? ((m as { content: unknown[] }).content as Array<Record<string, unknown>>)
-    : [];
-  return content.some((part) => part?.["type"] === "reasoning");
+function partIsReasoningPart(part: unknown): boolean {
+  return Boolean(
+    part && typeof part === "object" && (part as Record<string, unknown>)["type"] === "reasoning",
+  );
 }
 
 function isIrisCompanion(message: ProjectedSessionMessage): boolean {
@@ -508,7 +505,15 @@ export function validateLkgSeamBoundary(
   if (first.message.role === "toolResult" || lastCalls.some((callId) => firstCalls.has(callId))) {
     return false;
   }
-  return true;
+  // Authority: the prefix must not end with an assistant whose tool calls
+  // never completed — a dangling tool_use would reach the wire. Every open
+  // call id of the last message must have a matching result somewhere in the
+  // tail; otherwise the seam is unsafe.
+  const tailResultIds = new Set<string>();
+  for (const message of tail) {
+    for (const callId of partResultIds(message)) tailResultIds.add(callId);
+  }
+  return lastCalls.every((callId) => tailResultIds.has(callId));
 }
 
 export function validateLkgSeam(
@@ -533,7 +538,13 @@ export function validateLkgSeam(
       if (results.has(callId)) return false;
       results.add(callId);
     }
-    if (message.message.role !== "assistant" && partIsReasoning(message)) return false;
+    if (message.message.role !== "assistant") {
+      const m = message.message;
+      const content = Array.isArray((m as { content?: unknown }).content)
+        ? ((m as { content: unknown[] }).content as unknown[])
+        : [];
+      if (content.some(partIsReasoningPart)) return false;
+    }
   }
   if (!validateLkgSeamBoundary(prefix, tail)) return false;
   return true;
