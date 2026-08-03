@@ -460,6 +460,39 @@ export class ContextStore {
     }
   }
 
+  /**
+   * Persist advanced replay watermarks (monotonic single-row update). The
+   * caller commits detect results ONLY on a cache-busting pass — a defer pass
+   * must never advance these (byte-identical replay contract).
+   */
+  persistWatermarks(
+    runtimeSessionId: string,
+    watermarks: {
+      clearedReasoningThroughTag: number;
+      toolReclaimWatermark: number;
+      mutationReplayWatermark: number;
+    },
+  ): void {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE context_lineages SET
+           cleared_reasoning_through_tag = ?, tool_reclaim_watermark = ?,
+           mutation_replay_watermark = ?, updated_at = ?
+         WHERE runtime_session_id = ?`,
+      )
+      .run(
+        watermarks.clearedReasoningThroughTag,
+        watermarks.toolReclaimWatermark,
+        watermarks.mutationReplayWatermark,
+        now,
+        runtimeSessionId,
+      );
+    if (result.changes !== 1) {
+      throw new Error(`context persistWatermarks failed: no lineage for ${runtimeSessionId}`);
+    }
+  }
+
   enqueueDeferredOperation(
     runtimeSessionId: string,
     opKind: string,
