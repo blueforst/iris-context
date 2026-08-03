@@ -600,6 +600,18 @@ export function replayLkg(store: ContextStore, args: ReplayLkgArgs): ReplayLkgRe
   } catch {
     return { ok: false, reason: "lkg_seam_invalid" };
   }
+  // Shape validation: a corrupt/partial slot must fail closed with a typed
+  // reason instead of throwing a TypeError mid-validation (reviewer F5).
+  if (
+    typeof payload.jsonPrefix !== "string" ||
+    !Array.isArray(payload.inputIdSeq) ||
+    !payload.inputIdSeq.every((id) => typeof id === "string") ||
+    !Array.isArray(payload.inputContentDigests) ||
+    !payload.inputContentDigests.every((digest) => typeof digest === "string") ||
+    typeof payload.lastInputMessageId !== "string"
+  ) {
+    return { ok: false, reason: "lkg_seam_invalid" };
+  }
   if (payload.modelKey !== args.modelKey || payload.providerKey !== args.providerKey) {
     return { ok: false, reason: "lkg_model_mismatch" };
   }

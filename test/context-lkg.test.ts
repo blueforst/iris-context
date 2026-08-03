@@ -487,3 +487,35 @@ test("lkg: replay without a stored slot fails closed with lkg_invalidated_reshap
     rmSync(dirname(path), { recursive: true, force: true });
   }
 });
+
+test("lkg: corrupt payload shape fails closed with a typed reason, not a throw (reviewer F5)", () => {
+  const { store, path } = storeFixture();
+  try {
+    // Manually write a parseable-but-shape-corrupt slot (missing inputIdSeq).
+    store.captureLkgSlot({
+      runtimeSessionId: "s-corrupt",
+      slotKey: LKG_SLOT_KEY,
+      lkgJson: JSON.stringify({ jsonPrefix: "[]", modelKey: "model-a", providerKey: "opencode" }),
+      capturedAt: "2026-08-01T00:00:00.000Z",
+    });
+    const entries: SessionTreeEntry[] = [
+      userEntry("u-1", null, "hello"),
+      companionEntry("c-1", "u-1", "in-1"),
+    ];
+    const projected = projectSessionMessages(entries);
+    let result: ReturnType<typeof replayLkg> | undefined;
+    assert.doesNotThrow(() => {
+      result = replayLkg(store, {
+        runtimeSessionId: "s-corrupt",
+        messages: projected,
+        modelKey: "model-a",
+        providerKey: "opencode",
+      });
+    });
+    assert.ok(result, "replayLkg must return a result");
+    assert.deepEqual(result, { ok: false, reason: "lkg_seam_invalid" });
+  } finally {
+    store.close();
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
+});
