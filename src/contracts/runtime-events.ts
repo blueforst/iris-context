@@ -58,6 +58,7 @@ export interface PiSeamEvent {
   piSessionId?: string;
   /** message_finalized 携带的 commit receipt 字段。 */
   entryId?: string;
+  entrySeq?: number;
   contentHash?: string;
   /** turn_committed 携带。 */
   toolResultCount?: number;

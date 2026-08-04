@@ -128,6 +128,26 @@ test("r1: empty database initializes cleanly; schema version recorded", () => {
   }
 });
 
+test("r1: afterEventId anchor from another session does not leak rows", () => {
+  const dir = tempDir();
+  try {
+    const ledger = RuntimeEventLedger.open(join(dir, "runtime-ledger.db"));
+    const s1 = ledger.ingest(
+      sampleMessageFinalized({ runtimeSessionId: "session-1", entryId: "entry-1" }),
+    );
+    ledger.ingest(sampleMessageFinalized({ runtimeSessionId: "session-2", entryId: "entry-2" }));
+    // session-1 的锚点不能在 session-2 查询中越界。
+    const s2After = ledger.listBySession("session-2", { afterEventId: s1.eventId });
+    assert.equal(s2After.length, 0);
+    // 未知锚点返回空而非报错。
+    const unknown = ledger.listBySession("session-1", { afterEventId: "no-such-event" });
+    assert.deepEqual(unknown, []);
+    ledger.close();
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 test("r1: ingest after close fails closed", () => {
   const dir = tempDir();
   try {
