@@ -15,13 +15,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # R1-P1d (fork file: adoption): iris_agent consumes the adjacent
-      # blueforst/pi checkout (production lock seamCommit). Build Pi first so
-      # the file: deps resolve to built packages.
+      # blueforst/pi checkout (production lock seamCommit). actions/checkout
+      # refuses paths outside the workspace, so check out inside then move to
+      # the adjacent ../pi location the file: deps expect.
       - uses: actions/checkout@v4
         with:
           repository: blueforst/pi
-          path: ../pi
+          path: pi-fork
           ref: b7c5f40c3040f179fe644e0ffad1970a14563b15
+      - name: Move Pi fork checkout to adjacent path
+        run: mv pi-fork ../pi
       - uses: actions/setup-node@v4
         with:
           node-version: 22.19.0
