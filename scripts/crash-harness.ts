@@ -170,11 +170,11 @@ async function main(): Promise<void> {
         companionCount += 1;
       }
     }
-    // 0.83.0+: Session connection lifecycle is owned by the repository.
-    // Dispose unconditionally (also when no sessions remain) so the Windows
-    // db handle is released before the temp dir is removed.
-    await repo[Symbol.asyncDispose]();
   }
+  // 0.83.0+: Session connection lifecycle is owned by the repository.
+  // Dispose unconditionally (also when no sessions remain) so the Windows
+  // db handle is released before the temp dir is removed.
+  await repo[Symbol.asyncDispose]();
 
   const invocationDb = existsSync(join(dataRoot, "invocation.db"));
   const resultDb = existsSync(join(dataRoot, "result.db"));
