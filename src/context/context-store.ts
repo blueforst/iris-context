@@ -34,7 +34,7 @@ interface UnitRow {
  * if the on-disk schema_migrations.max(version) is NEWER than this constant
  * (a newer binary wrote state this binary cannot read).
  */
-export const LATEST_MIGRATION_VERSION = "0002_units";
+export const LATEST_MIGRATION_VERSION = "0003_represented_through";
 
 export interface ContextLineage {
   runtimeSessionId: string;
@@ -63,6 +63,10 @@ export interface ContextLineage {
   cachedM0ProviderProfileId: string | null;
   lastResponseTime: number | null;
   representedThroughEntrySeq: number;
+  /** R2-P1：Provider Renderer 的 context_seq 空间 watermark（ContextMessageUnit
+   * 序号，非 Session entrySeq）。m0 物化前缀覆盖到该 seq；其后的单元是 live
+   * tail（p5Tail）。 */
+  representedThroughContextSeq: number;
   protectedTailStartEntrySeq: number | null;
   lastSafeUserAnchorEntrySeq: number | null;
   clearedReasoningThroughTag: number;
@@ -113,6 +117,34 @@ export interface MaterializeM1Input {
   atMs: number;
 }
 
+/**
+ * R2-P1：HARD 物化（context_seq 语义）。与 v12 materializeM0 的唯一区别是
+ * watermark 为 represented_through_context_seq（ContextMessageUnit 序号），
+ * 绝不回写 v12 的 represented_through_entry_seq —— 两者空间不同，不得混用。
+ */
+export interface MaterializeM0ByContextSeqInput {
+  runtimeSessionId: string;
+  m0Body: string;
+  m1Body: string;
+  m0ContentHash: string;
+  m1ContentHash: string;
+  cachedM0SystemHash: string;
+  cachedM0ModelKey: string;
+  cachedM0ProviderProfileId: string;
+  representedThroughContextSeq: number;
+  atMs: number;
+}
+
+/** R2-P1：SOFT 物化（context_seq 语义），仅更新 m1，不推进物化 watermark
+ * （watermark 只在 HARD fold 时推进；SOFT 的 m1 从物化水位后累积渲染，
+ * 保证未进 m0 的单元始终在 provider 视图内，内容不丢失）。 */
+export interface MaterializeM1ByContextSeqInput {
+  runtimeSessionId: string;
+  m1Body: string;
+  m1ContentHash: string;
+  atMs: number;
+}
+
 interface LineageRow {
   runtime_session_id: string;
   context_source_snapshot_id: string;
@@ -140,6 +172,7 @@ interface LineageRow {
   cached_m0_provider_profile_id: string | null;
   last_response_time: number | null;
   represented_through_entry_seq: number;
+  represented_through_context_seq: number;
   protected_tail_start_entry_seq: number | null;
   last_safe_user_anchor_entry_seq: number | null;
   cleared_reasoning_through_tag: number;
@@ -177,6 +210,7 @@ function rowToLineage(row: LineageRow): ContextLineage {
     cachedM0ProviderProfileId: row.cached_m0_provider_profile_id,
     lastResponseTime: row.last_response_time,
     representedThroughEntrySeq: row.represented_through_entry_seq,
+    representedThroughContextSeq: row.represented_through_context_seq,
     protectedTailStartEntrySeq: row.protected_tail_start_entry_seq,
     lastSafeUserAnchorEntrySeq: row.last_safe_user_anchor_entry_seq,
     clearedReasoningThroughTag: row.cleared_reasoning_through_tag,
@@ -447,6 +481,7 @@ export class ContextStore implements ContextUnitStorePort {
       cached_m0_provider_profile_id: null,
       last_response_time: null,
       represented_through_entry_seq: 0,
+      represented_through_context_seq: 0,
       protected_tail_start_entry_seq: null,
       last_safe_user_anchor_entry_seq: null,
       cleared_reasoning_through_tag: 0,
@@ -470,11 +505,12 @@ export class ContextStore implements ContextUnitStorePort {
           m0_materialized_at, m1_updated_at,
           cached_m0_system_hash, cached_m0_model_key, cached_m0_provider_profile_id,
           last_response_time, represented_through_entry_seq,
+          represented_through_context_seq,
           protected_tail_start_entry_seq, last_safe_user_anchor_entry_seq,
           cleared_reasoning_through_tag, tool_reclaim_watermark,
           mutation_replay_watermark, deferred_signal_cursor,
           emergency_state, last_transform_error, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.runtime_session_id,
@@ -503,6 +539,7 @@ export class ContextStore implements ContextUnitStorePort {
         row.cached_m0_provider_profile_id,
         row.last_response_time,
         row.represented_through_entry_seq,
+        row.represented_through_context_seq,
         row.protected_tail_start_entry_seq,
         row.last_safe_user_anchor_entry_seq,
         row.cleared_reasoning_through_tag,
@@ -588,6 +625,89 @@ export class ContextStore implements ContextUnitStorePort {
     if (result.changes !== 1) {
       throw new Error(
         `context materializeM1 failed: no lineage for ${input.runtimeSessionId} (fail closed)`,
+      );
+    }
+  }
+
+  /**
+   * R2-P1 HARD materialization（context_seq 语义）：重建 m0 + 重置/渲染 m1，
+   * 并推进 represented_through_context_seq。单行事务：失败绝不留下 m0 已推进、
+   * watermark 未推进的中间态。cached_m0_* 记录本次 fold 的 cache 身份
+   * （provider-side cache 是在这个身份下构建的；后续 pass 与之比对 → 变化即
+   * HARD）。v12 的 represented_through_entry_seq 保持不动（不同空间）。
+   */
+  materializeM0ByContextSeq(input: MaterializeM0ByContextSeqInput): void {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE context_lineages SET
+           m0_body = ?, m1_body = ?, m0_content_hash = ?, m1_content_hash = ?,
+           m0_materialized_at = ?, m1_updated_at = ?,
+           cached_m0_system_hash = ?, cached_m0_model_key = ?,
+           cached_m0_provider_profile_id = ?,
+           represented_through_context_seq = ?,
+           updated_at = ?
+         WHERE runtime_session_id = ?`,
+      )
+      .run(
+        input.m0Body,
+        input.m1Body,
+        input.m0ContentHash,
+        input.m1ContentHash,
+        input.atMs,
+        input.atMs,
+        input.cachedM0SystemHash,
+        input.cachedM0ModelKey,
+        input.cachedM0ProviderProfileId,
+        input.representedThroughContextSeq,
+        now,
+        input.runtimeSessionId,
+      );
+    if (result.changes !== 1) {
+      throw new Error(
+        `context materializeM0ByContextSeq failed: no lineage for ${input.runtimeSessionId} (fail closed)`,
+      );
+    }
+  }
+
+  /**
+   * R2-P1 SOFT materialization（context_seq 语义）：只更新 m1（m0 保持
+   * byte-identical）。不推进 represented_through_context_seq（watermark
+   * 只在 HARD fold 时推进，见 B1 parity 修复：SOFT 累积渲染 m1）。
+   */
+  materializeM1ByContextSeq(input: MaterializeM1ByContextSeqInput): void {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE context_lineages SET
+           m1_body = ?, m1_content_hash = ?, m1_updated_at = ?,
+           updated_at = ?
+         WHERE runtime_session_id = ?`,
+      )
+      .run(input.m1Body, input.m1ContentHash, input.atMs, now, input.runtimeSessionId);
+    if (result.changes !== 1) {
+      throw new Error(
+        `context materializeM1ByContextSeq failed: no lineage for ${input.runtimeSessionId} (fail closed)`,
+      );
+    }
+  }
+
+  /**
+   * R2-P1：仅推进 represented_through_context_seq watermark（SOFT+ 字节不变
+   * 通过后用于幂等对齐；也供测试直接驱动）。
+   */
+  updateRepresentedThrough(runtimeSessionId: string, representedThroughContextSeq: number): void {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE context_lineages SET
+           represented_through_context_seq = ?, updated_at = ?
+         WHERE runtime_session_id = ?`,
+      )
+      .run(representedThroughContextSeq, now, runtimeSessionId);
+    if (result.changes !== 1) {
+      throw new Error(
+        `context updateRepresentedThrough failed: no lineage for ${runtimeSessionId}`,
       );
     }
   }
