@@ -315,13 +315,20 @@ export class ContextRenderer {
     messages: AgentMessage[];
     record: RenderRecord;
   } {
+    // R2-P3：provider 视图防御性过滤——只渲染 disposition="include" 的单元。
+    // 正常路径 store.listUnits 已默认只返回 include（store 级过滤，覆盖
+    // renderForProviderCall / renderProviderMessages / rebuildM0Body /
+    // renderHistorySince 的整条消费链）；此处兜底保证任何调用方传入的原始
+    // units（含 excluded / reference_only，如直传测试）都不会泄漏进 provider
+    // 数组或 m0/m1 内容。渲染保持 PURE（不改写 store）。
+    const visibleUnits = args.units.filter((unit) => unit.disposition === "include");
     const lineage = this.store.getLineage(args.runtimeSessionId);
     const representedThrough = lineage?.representedThroughContextSeq ?? 0;
     const lineageHasM0 = lineage?.m0Body !== null && lineage?.m0Body !== undefined;
     const classified = classifyAndAdvance({
       lineage,
       hardSignals: args.hardSignals,
-      units: args.units,
+      units: visibleUnits,
       representedThroughContextSeq: representedThrough,
     });
     const isHard = classified.classification === "HARD";
@@ -331,7 +338,7 @@ export class ContextRenderer {
       m0Body: string;
       m1Body: string;
     } => {
-      const foldThrough = maxContextSeqOr(args.units, representedThrough);
+      const foldThrough = maxContextSeqOr(visibleUnits, representedThrough);
       if (!lineageHasM0) {
         // first_render / cached_m1_missing：空基线（M0_EMPTY_BODY），当前单元
         // 保持 live tail（与 magic-context 一致：新 session 的 m0 是空的历史
@@ -346,7 +353,7 @@ export class ContextRenderer {
       // 已物化后的重建（model_change 等）：fold 全部已表示单元进 m0，m1 重置。
       return {
         representedThroughContextSeq: foldThrough,
-        m0Body: rebuildM0Body(args.units, foldThrough),
+        m0Body: rebuildM0Body(visibleUnits, foldThrough),
         m1Body: M1_EMPTY_PLACEHOLDER,
       };
     };
@@ -371,7 +378,7 @@ export class ContextRenderer {
     }
 
     const render = renderProviderMessages({
-      units: args.units,
+      units: visibleUnits,
       representedThroughContextSeq: baseWatermark,
       m0Body: baseM0Body,
       m1Body: baseM1Body,

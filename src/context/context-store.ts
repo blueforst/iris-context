@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { migrateDatabase } from "../db/migrate.js";
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ContextMessageUnit } from "../contracts/context-units.js";
+import type { ContextMessageUnit, UnitDispositionFilter } from "../contracts/context-units.js";
 import type { ContextUnitStorePort } from "./context-ingest.js";
 
 interface UnitRow {
@@ -35,6 +35,46 @@ interface UnitRow {
  * (a newer binary wrote state this binary cannot read).
  */
 export const LATEST_MIGRATION_VERSION = "0003_represented_through";
+
+/**
+ * R2-P3：每 session 的 context_units 软 cap（语义 ledger 有界化的第一级）。
+ * 单元总数（含已排除行）达到该值时，新单元以 disposition="exclude" 写入：
+ * provider 视图不可见（listUnits 默认过滤），且作为 R3 Historian 的裁剪候选。
+ * append-only 不变量不变——行永不物理删除，只改 disposition 标记。
+ */
+export const MAX_UNITS_PER_SESSION = 10_000;
+
+/**
+ * R2-P3：每 session 的 context_units 硬 cap（= 2× 软 cap，安全阀）。
+ * 单元总数达到该值时 insertUnit 拒绝写入并抛 ContextBoundsExceededError →
+ * 记录 lineage 紧急态 emergency_fail_closed → 错误经 seam 传播使 slice 大声失败
+ * （fail-closed：绝不允许语义 ledger 无界增长，也不允许超限后继续正常渲染）。
+ */
+export const HARD_UNITS_CAP = 2 * MAX_UNITS_PER_SESSION;
+
+/**
+ * R2-P3：context_units 硬 cap 超限的 typed 失败（fail-closed）。insertUnit 检测到
+ * 该 session 单元总数 >= 硬 cap 时抛出；经 ingest → seam subscribe 回调（emitOwn
+ * rethrow）自然传播，使 harness.prompt / runMinimalSlice 大声失败。抛出前绝不
+ * 删除任何行（append-only 不变量绑定）。
+ */
+export class ContextBoundsExceededError extends Error {
+  constructor(
+    readonly runtimeSessionId: string,
+    readonly hardCap: number,
+  ) {
+    super(
+      `context_units hard cap exceeded: session ${runtimeSessionId} reached ${hardCap} units (fail closed)`,
+    );
+    this.name = "ContextBoundsExceededError";
+  }
+}
+
+/** ContextStore.open 的构造选项（R2-P3 cap 注入：测试用极小值在少量单元内触发 cap 路径）。 */
+export interface ContextStoreOpenOptions {
+  /** 每 session 软 cap（超限单元标记 disposition="exclude"）。缺省 = MAX_UNITS_PER_SESSION。 */
+  maxUnitsPerSession?: number;
+}
 
 export interface ContextLineage {
   runtimeSessionId: string;
@@ -255,13 +295,19 @@ export interface LkgSlot {
  */
 export class ContextStore implements ContextUnitStorePort {
   private readonly db: DatabaseSync;
+  /** R2-P3：每 session 软 cap（超限 → disposition="exclude"）。 */
+  private readonly maxUnitsPerSession: number;
+  /** R2-P3：每 session 硬 cap（超限 → 抛 ContextBoundsExceededError，fail-closed）。 */
+  private readonly hardUnitsCap: number;
   private closed = false;
 
-  private constructor(db: DatabaseSync) {
+  private constructor(db: DatabaseSync, options: ContextStoreOpenOptions) {
     this.db = db;
+    this.maxUnitsPerSession = options.maxUnitsPerSession ?? MAX_UNITS_PER_SESSION;
+    this.hardUnitsCap = 2 * this.maxUnitsPerSession;
   }
 
-  static open(contextDbPath: string): ContextStore {
+  static open(contextDbPath: string, options: ContextStoreOpenOptions = {}): ContextStore {
     try {
       mkdirSync(dirname(contextDbPath), { recursive: true });
     } catch {
@@ -301,7 +347,7 @@ export class ContextStore implements ContextUnitStorePort {
           );
         }
       }
-      return new ContextStore(db);
+      return new ContextStore(db, options);
     } catch (error) {
       try {
         db.close();
@@ -330,6 +376,27 @@ export class ContextStore implements ContextUnitStorePort {
   }
 
   insertUnit(unit: ContextMessageUnit): void {
+    // R2-P3：双级 cap 有界策略（append-only 不变量不变——绝不 DELETE）：
+    //  1) 硬 cap：count >= hardUnitsCap → 记录 lineage 紧急态 emergency_fail_closed
+    //     （best-effort：lineage 缺失时不掩盖 typed 错误）并抛
+    //     ContextBoundsExceededError，拒绝继续写入。错误经 ingest → seam 的
+    //     subscribe 回调（emitOwn rethrow）自然传播，使 harness.prompt /
+    //     runMinimalSlice 大声失败（fail-closed）。紧急态记录放在权威 owner
+    //     （ContextStore 同时拥有 context_units 与 context_lineages）而非 seam：
+    //     runtime-event-seam 受 R2-P3 边界约束不可修改。
+    //  2) 软 cap：count >= maxUnitsPerSession → 强制 disposition="exclude"
+    //     （行照写；provider 视图经 listUnits 默认过滤不可见；R3 Historian
+    //     以此为裁剪候选）。
+    const count = this.countUnits(unit.runtimeSessionId);
+    if (count >= this.hardUnitsCap) {
+      const error = new ContextBoundsExceededError(unit.runtimeSessionId, this.hardUnitsCap);
+      const lineage = this.getLineage(unit.runtimeSessionId);
+      if (lineage !== undefined) {
+        this.setEmergencyState(unit.runtimeSessionId, "emergency_fail_closed", error.message);
+      }
+      throw error;
+    }
+    const disposition = count >= this.maxUnitsPerSession ? "exclude" : unit.disposition;
     this.db
       .prepare(
         `INSERT INTO context_units (
@@ -344,7 +411,7 @@ export class ContextStore implements ContextUnitStorePort {
         unit.unitId,
         unit.sourceEventId,
         unit.unitType,
-        unit.disposition,
+        disposition,
         unit.entryId ?? null,
         unit.entrySeq ?? null,
         unit.contentHash,
@@ -385,19 +452,41 @@ export class ContextStore implements ContextUnitStorePort {
 
   listUnits(
     runtimeSessionId: string,
-    options: { afterContextSeq?: number; limit?: number } = {},
+    options: {
+      afterContextSeq?: number;
+      limit?: number;
+      disposition?: UnitDispositionFilter;
+    } = {},
   ): ContextMessageUnit[] {
-    const rows = (options.afterContextSeq === undefined
-      ? this.db
-          .prepare("SELECT * FROM context_units WHERE runtime_session_id = ? ORDER BY context_seq")
-          .all(runtimeSessionId)
-      : this.db
-          .prepare(
-            "SELECT * FROM context_units WHERE runtime_session_id = ? AND context_seq > ? ORDER BY context_seq",
-          )
-          .all(runtimeSessionId, options.afterContextSeq)) as unknown as UnitRow[];
+    // R2-P3：store 级默认过滤——只返回 disposition="include" 的单元（provider
+    // 视图），renderer（renderForProviderCall / renderProviderMessages /
+    // rebuildM0Body / renderHistorySince）与 harness 均消费本方法，因此 excluded
+    // / reference_only 单元在读取源头即不可见。需要读全部行（R3 Historian 裁剪
+    // 候选）时显式传 disposition: "all"。
+    const disposition = options.disposition ?? "include";
+    const afterContextSeq = options.afterContextSeq;
+    let sql = "SELECT * FROM context_units WHERE runtime_session_id = ?";
+    const params: Array<string | number> = [runtimeSessionId];
+    if (disposition !== "all") {
+      sql += " AND disposition = ?";
+      params.push(disposition);
+    }
+    if (afterContextSeq !== undefined) {
+      sql += " AND context_seq > ?";
+      params.push(afterContextSeq);
+    }
+    sql += " ORDER BY context_seq";
+    const rows = this.db.prepare(sql).all(...params) as unknown as UnitRow[];
     const limit = options.limit ?? rows.length;
     return rows.slice(0, limit).map((row) => this.rowToUnit(row));
+  }
+
+  /** R2-P3：该 session 的 context_units 行数（软/硬 cap 判定基准，含 excluded）。 */
+  private countUnits(runtimeSessionId: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS count FROM context_units WHERE runtime_session_id = ?")
+      .get(runtimeSessionId) as { count: number };
+    return row.count;
   }
 
   lastUnpairedInputSeq(runtimeSessionId: string): number | undefined {
