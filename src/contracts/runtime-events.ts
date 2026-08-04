@@ -37,6 +37,10 @@ export interface RuntimeEvent {
   entryId?: string;
   entrySeq?: number;
   contentHash?: string;
+  /** message_finalized 的模型可见 role（user/assistant/toolResult/custom）。 */
+  role?: string;
+  /** message_finalized 的消息内容（canonical JSON AgentMessage；语义单元的数据源）。 */
+  payload?: string;
   /** tool_execution_committed 的 attribution。 */
   toolCallId?: string;
   toolName?: string;
@@ -64,6 +68,10 @@ export interface PiSeamEvent {
   entryId?: string;
   entrySeq?: number;
   contentHash?: string;
+  /** message_finalized 的模型可见 role（user/assistant/toolResult/custom）。 */
+  role?: string;
+  /** message_finalized 的消息内容（canonical JSON AgentMessage）。 */
+  payload?: string;
   /** turn_committed 携带。 */
   toolResultCount?: number;
   hadPendingMutations?: boolean;
