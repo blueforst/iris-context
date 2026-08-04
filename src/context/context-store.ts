@@ -135,12 +135,13 @@ export interface MaterializeM0ByContextSeqInput {
   atMs: number;
 }
 
-/** R2-P1：SOFT 物化（context_seq 语义），仅更新 m1 + context_seq watermark。 */
+/** R2-P1：SOFT 物化（context_seq 语义），仅更新 m1，不推进物化 watermark
+ * （watermark 只在 HARD fold 时推进；SOFT 的 m1 从物化水位后累积渲染，
+ * 保证未进 m0 的单元始终在 provider 视图内，内容不丢失）。 */
 export interface MaterializeM1ByContextSeqInput {
   runtimeSessionId: string;
   m1Body: string;
   m1ContentHash: string;
-  representedThroughContextSeq: number;
   atMs: number;
 }
 
@@ -671,7 +672,8 @@ export class ContextStore implements ContextUnitStorePort {
 
   /**
    * R2-P1 SOFT materialization（context_seq 语义）：只更新 m1（m0 保持
-   * byte-identical）并推进 represented_through_context_seq。
+   * byte-identical）。不推进 represented_through_context_seq（watermark
+   * 只在 HARD fold 时推进，见 B1 parity 修复：SOFT 累积渲染 m1）。
    */
   materializeM1ByContextSeq(input: MaterializeM1ByContextSeqInput): void {
     const now = new Date().toISOString();
@@ -679,18 +681,10 @@ export class ContextStore implements ContextUnitStorePort {
       .prepare(
         `UPDATE context_lineages SET
            m1_body = ?, m1_content_hash = ?, m1_updated_at = ?,
-           represented_through_context_seq = ?,
            updated_at = ?
          WHERE runtime_session_id = ?`,
       )
-      .run(
-        input.m1Body,
-        input.m1ContentHash,
-        input.atMs,
-        input.representedThroughContextSeq,
-        now,
-        input.runtimeSessionId,
-      );
+      .run(input.m1Body, input.m1ContentHash, input.atMs, now, input.runtimeSessionId);
     if (result.changes !== 1) {
       throw new Error(
         `context materializeM1ByContextSeq failed: no lineage for ${input.runtimeSessionId} (fail closed)`,

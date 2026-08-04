@@ -352,21 +352,18 @@ export class ContextRenderer {
     };
 
     // 渲染基准：HARD 用 fold 状态（m0 重建 / 同 slice 复用），否则用 lineage。
+    // N1 parity 修复：activeFold 覆盖两个分支——persist 之前的任何 HARD
+    // （含 lineage 已有 m0 的 model_change mid-turn 双 HARD）都复用首次 fold，
+    // 保证 fold 之后的单元继续作为 p5Tail 下发（不丢失 assistant toolCall/
+    // toolResult 实消息）。
     let baseWatermark: number;
     let baseM0Body: string | null;
     let baseM1Body: string | null;
     if (isHard) {
-      if (lineageHasM0) {
-        const fold = buildFold();
-        baseWatermark = fold.representedThroughContextSeq;
-        baseM0Body = fold.m0Body;
-        baseM1Body = fold.m1Body;
-      } else {
-        this.activeFold ??= buildFold();
-        baseWatermark = this.activeFold.representedThroughContextSeq;
-        baseM0Body = this.activeFold.m0Body;
-        baseM1Body = this.activeFold.m1Body;
-      }
+      this.activeFold ??= buildFold();
+      baseWatermark = this.activeFold.representedThroughContextSeq;
+      baseM0Body = this.activeFold.m0Body;
+      baseM1Body = this.activeFold.m1Body;
     } else {
       baseWatermark = representedThrough;
       baseM0Body = lineage?.m0Body ?? null;
@@ -407,9 +404,10 @@ export class ContextRenderer {
   /**
    * 提交最近一次 render 的物化决策：
    *  - HARD  → materializeM0ByContextSeq（重建 m0、cached_m0_* bust、推进
-   *           representedThroughContextSeq）；
-   *  - SOFT  → materializeM1ByContextSeq（仅 m1 + watermark）；
-   *  - SOFT+ → 仅幂等对齐 watermark（m0/m1 字节不变）。
+   *           representedThroughContextSeq 到 fold 水位）；
+   *  - SOFT  → materializeM1ByContextSeq（仅 m1，watermark 不推进——m1 从
+   *           物化水位后累积渲染，未进 m0 的单元不丢失，B1 parity 修复）；
+   *  - SOFT+ → 幂等对齐 watermark（m0/m1 字节不变）。
    * 无 render 记录（例如无 provider call）→ no-op。单行事务，fail-closed。
    */
   persistRender(nowMs: number): RenderRecord | undefined {
@@ -437,7 +435,6 @@ export class ContextRenderer {
           runtimeSessionId: record.runtimeSessionId,
           m1Body: record.m1Body,
           m1ContentHash: sha256(record.m1Body),
-          representedThroughContextSeq: record.representedThroughContextSeq,
           atMs: nowMs,
         });
         break;
@@ -449,6 +446,10 @@ export class ContextRenderer {
         );
         break;
     }
+    // fold 状态已落库：重置 activeFold，保证下一个物化周期的首次 HARD 重新 fold
+    // （否则跨 pass 复用旧 fold 会把 m0 锁在错误字节上，如 turn4 复用了 first_render
+    // 的空 fold）。
+    this.activeFold = undefined;
     return record;
   }
 }

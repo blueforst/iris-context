@@ -323,7 +323,11 @@ test("r2-p1: golden — turn3 SOFT renders m1 as <session-history-since> and adv
     assert.equal(lineage?.m1Body, expectedM1);
     assert.equal(lineage?.m1ContentHash, sha256(expectedM1));
     assert.equal(lineage?.m0Body, M0_EMPTY_BODY, "SOFT must never touch m0");
-    assert.equal(lineage?.representedThroughContextSeq, 2, "watermark advances to max rendered");
+    assert.equal(
+      lineage?.representedThroughContextSeq,
+      0,
+      "SOFT never advances the materialization watermark (B1 parity: m1 accumulates so units not yet in m0 stay provider-visible)",
+    );
   } finally {
     closeFixture(fixture);
   }
@@ -580,5 +584,169 @@ test("r2-p1: runMinimalSlice persists m0/m1 and the provider snapshot starts wit
     assert.match(String(contentOf(head1)), /^<session-history-since>/);
   } finally {
     rmSync(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("r2-p1: B1 regression — multiple SOFT passes never drop units from the provider view (watermark stays until HARD)", () => {
+  const fixture = makeFixture();
+  try {
+    // Pass A：first_render HARD（空 session），m0 = M0_EMPTY_BODY，watermark 0。
+    fixture.renderer.renderForProviderCall({
+      runtimeSessionId: SESSION,
+      units: fixture.ingest.ensureUnitsUpTo(SESSION),
+      liveDelta: [],
+      hardSignals: HARD_SIGNALS_A,
+    });
+    fixture.renderer.persistRender(NOW_MS);
+
+    // turn2：u1（user 折叠）+ u2（assistant）→ SOFT。
+    fixture.ledger.ingest(
+      sampleEvent({ entryId: "user-2", role: "user", payload: userMessageWire() }),
+    );
+    fixture.ledger.ingest(
+      sampleEvent({ entryId: "comp-2", role: "custom", payload: realCompanionWire() }),
+    );
+    fixture.ledger.ingest(
+      sampleEvent({
+        entryId: "assistant-2",
+        role: "assistant",
+        payload: assistantWire("reply two"),
+      }),
+    );
+    const unitsTurn2 = fixture.ingest.ensureUnitsUpTo(SESSION);
+    fixture.renderer.renderForProviderCall({
+      runtimeSessionId: SESSION,
+      units: unitsTurn2,
+      liveDelta: [],
+      hardSignals: HARD_SIGNALS_A,
+    });
+    fixture.renderer.persistRender(NOW_MS);
+
+    // turn3：u3 + u4（assistant）→ 再次 SOFT。m1 从物化水位（0）后累积，
+    // 必须仍含 turn2 的 u1/u2——旧单元不得从 provider 视图消失。
+    fixture.ledger.ingest(
+      sampleEvent({ entryId: "user-3", role: "user", payload: userMessageWire() }),
+    );
+    fixture.ledger.ingest(
+      sampleEvent({ entryId: "comp-3", role: "custom", payload: realCompanionWire() }),
+    );
+    fixture.ledger.ingest(
+      sampleEvent({
+        entryId: "assistant-3",
+        role: "assistant",
+        payload: assistantWire("reply three"),
+      }),
+    );
+    const unitsTurn3 = fixture.ingest.ensureUnitsUpTo(SESSION);
+    const passC = fixture.renderer.renderForProviderCall({
+      runtimeSessionId: SESSION,
+      units: unitsTurn3,
+      liveDelta: [],
+      hardSignals: HARD_SIGNALS_A,
+    });
+    fixture.renderer.persistRender(NOW_MS);
+
+    assert.equal(passC.record.classification, "SOFT", "additive pass is SOFT, never HARD");
+    assert.equal(passC.record.m0Body, M0_EMPTY_BODY, "m0 untouched across SOFT passes");
+    // m1 累积：包含 turn2 的 [user 1] 与 [assistant 2]（旧内容保留）。
+    assert.match(String(passC.record.m1Body), /\[user 1\]/);
+    assert.match(String(passC.record.m1Body), /\[assistant 2\]/);
+    assert.match(String(passC.record.m1Body), /\[user 3\]/);
+    // p5Tail 携带全部 4 个单元（无丢失）。
+    assert.equal(passC.messages.length, 2 + unitsTurn3.length, "m0+m1 head + all units");
+    const lineage = fixture.store.getLineage(SESSION);
+    assert.equal(
+      lineage?.representedThroughContextSeq,
+      0,
+      "materialization watermark must never advance on SOFT (B1)",
+    );
+  } finally {
+    closeFixture(fixture);
+  }
+});
+
+test("r2-p1: N1 regression — materialized mid-turn double-HARD reuses the fold, toolResult stays in p5Tail", () => {
+  const fixture = makeFixture();
+  try {
+    // Pass A：first_render HARD（空 session）→ lineage 已有 m0（M0_EMPTY_BODY）。
+    fixture.renderer.renderForProviderCall({
+      runtimeSessionId: SESSION,
+      units: fixture.ingest.ensureUnitsUpTo(SESSION),
+      liveDelta: [],
+      hardSignals: HARD_SIGNALS_A,
+    });
+    fixture.renderer.persistRender(NOW_MS);
+
+    // 前一轮单元：u1（user 折叠）+ u2（assistant）。
+    fixture.ledger.ingest(
+      sampleEvent({ entryId: "user-9", role: "user", payload: userMessageWire() }),
+    );
+    fixture.ledger.ingest(
+      sampleEvent({ entryId: "comp-9", role: "custom", payload: realCompanionWire() }),
+    );
+    fixture.ledger.ingest(
+      sampleEvent({
+        entryId: "assistant-9",
+        role: "assistant",
+        payload: assistantWire("reply nine"),
+      }),
+    );
+    const unitsBase = fixture.ingest.ensureUnitsUpTo(SESSION);
+
+    // 第一 provider call：model_change → HARD（lineage 已有 m0）。activeFold 建立，
+    // fold 水位 = 当前 max seq，m0 重建。
+    const hardNewModel = { ...HARD_SIGNALS_A, modelKey: "mock-iris:model-swapped" };
+    const passB = fixture.renderer.renderForProviderCall({
+      runtimeSessionId: SESSION,
+      units: unitsBase,
+      liveDelta: [],
+      hardSignals: hardNewModel,
+    });
+    assert.equal(passB.record.classification, "HARD", "model_change busts to HARD");
+
+    // 工具结果 → 新单元 u3（toolResult）。
+    fixture.ledger.ingest(
+      sampleEvent({
+        entryId: "tool-result-9",
+        role: "toolResult",
+        payload: JSON.stringify({
+          type: "message",
+          role: "toolResult",
+          toolCallId: "toolcall-9",
+          toolName: "read_tool",
+          content: [{ type: "text", text: "read output nine" }],
+          isError: false,
+          timestamp: NOW_MS,
+        }),
+      }),
+    );
+    const unitsWithTool = fixture.ingest.ensureUnitsUpTo(SESSION);
+    assert.ok(
+      unitsWithTool.some((unit) => unit.unitType === "tool_result"),
+      "toolResult unit exists",
+    );
+
+    // 第二 provider call（同 slice）：lineage 未持久化 → 再次 HARD。activeFold 复用：
+    // m0 字节与 passB 相同，toolResult 单元在 fold 水位之后 → 留在 p5Tail（不丢失）。
+    const passC = fixture.renderer.renderForProviderCall({
+      runtimeSessionId: SESSION,
+      units: unitsWithTool,
+      liveDelta: [],
+      hardSignals: hardNewModel,
+    });
+    assert.equal(passC.record.classification, "HARD", "second call still HARD (not persisted yet)");
+    assert.equal(
+      passC.record.m0Body,
+      passB.record.m0Body,
+      "activeFold reuse: m0 bytes stable across mid-turn HARD",
+    );
+    const toolUnit = unitsWithTool.find((unit) => unit.unitType === "tool_result");
+    assert.ok(toolUnit, "tool result unit present");
+    assert.ok(
+      passC.messages.includes(toolUnit?.payload as AgentMessage),
+      "toolResult real message stays in the provider array (p5Tail, no loss)",
+    );
+  } finally {
+    closeFixture(fixture);
   }
 });
