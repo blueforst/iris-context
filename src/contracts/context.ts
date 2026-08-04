@@ -38,13 +38,14 @@ export interface TransformMessagesInput {
   providerProfileId: string;
 }
 
+/**
+ * v13：live-fold（transformContextMessages）的结果契约。v12 的
+ * representedBoundaryState（mock-m0m1-v1）已随 ContextRuntimePort 一起删除；
+ * 真实的 m0/m1 物化边界状态现在由 context_lineages（ContextRenderer +
+ * persistRender）持有，这里只保留 provider 可见的折叠后消息数组。
+ */
 export interface ContextTransformResult {
   messages: AgentMessage[];
-  representedBoundaryState: {
-    runtimeSessionId: string;
-    materializationIdentity: string;
-    providerProfileId: string;
-  };
 }
 
 export interface IrisContextCarrierDetails {
