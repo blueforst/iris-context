@@ -18,6 +18,7 @@ export interface ProductionLock {
       repository: string;
       baselineCommit: string;
       upstreamBaseCommit: string;
+      seamCommit: string;
       upstreamAuditBaselineCommit: string;
       adoptionStatus: string;
     };

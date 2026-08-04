@@ -92,9 +92,8 @@ async function acceptInput(
   ledger.close();
 }
 
-async function closeSession(session: Session): Promise<void> {
-  const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
-  await storage.cleanup();
+async function closeSession(repo: { [Symbol.asyncDispose](): Promise<void> }): Promise<void> {
+  await repo[Symbol.asyncDispose]();
 }
 
 test("issue-6 #1: model_change before the UserMessage — raw index preserved", async () => {
@@ -107,7 +106,7 @@ test("issue-6 #1: model_change before the UserMessage — raw index preserved", 
   await session.appendModelChange("mock", "model-v1");
   const input = makeInput("mc-0001");
   const { userEntryId } = await appendVerifiedPair(session, input);
-  await closeSession(session);
+  await closeSession(handle.repo);
 
   await acceptInput(dataRoot, config, input);
 
@@ -132,7 +131,7 @@ test("issue-6 #2: active_tools_change before the UserMessage — raw index prese
   await session.appendActiveToolsChange(["read_only_test_tool"]);
   const input = makeInput("atc-0001");
   const { userEntryId } = await appendVerifiedPair(session, input);
-  await closeSession(session);
+  await closeSession(handle.repo);
 
   await acceptInput(dataRoot, config, input);
 
@@ -156,7 +155,7 @@ test("issue-6 #3: compaction before the UserMessage — raw index preserved", as
   await session.appendCompaction("summarized earlier", "compaction-marker", 0);
   const input = makeInput("ct-0001");
   const { userEntryId } = await appendVerifiedPair(session, input);
-  await closeSession(session);
+  await closeSession(handle.repo);
 
   await acceptInput(dataRoot, config, input);
 
@@ -193,14 +192,14 @@ test("issue-6 #4: companion persisted as a real Pi custom_message entry", async 
     companion.display,
     companion.details,
   );
-  await closeSession(session);
+  await closeSession(handle.repo);
 
   // Sanity: the companion is a REAL custom_message raw entry.
   const paths = resolveDataRootPaths(dataRoot, config);
-  const { SqliteSessionRepo, createNodeSqliteFactory } =
+  const { SqliteSessionRepository, createNodeSqliteFactory } =
     await import("@earendil-works/pi-storage-sqlite-node");
   const { nodeSqliteRepoEnv } = await import("../src/runtime/pi-env.js");
-  const repo = new SqliteSessionRepo({
+  const repo = new SqliteSessionRepository({
     env: nodeSqliteRepoEnv(dataRoot),
     sqlite: createNodeSqliteFactory(),
     databasePath: paths.sessionDb,
@@ -213,7 +212,7 @@ test("issue-6 #4: companion persisted as a real Pi custom_message entry", async 
   const entries = await reopened.getEntries();
   const companionEntry = entries.find((entry) => entry.id === companionEntryId);
   assert.equal(companionEntry?.type, "custom_message");
-  await closeSession(reopened);
+  await closeSession(repo);
 
   await acceptInput(dataRoot, config, input);
 
@@ -252,7 +251,7 @@ test("issue-6 #5: non-message entry between UserMessage and companion breaks raw
   // UserMessage — raw adjacency is broken AND the parent chain is broken.
   await session.appendLabel(userEntryId, "interleaved");
   await session.appendMessage(companion);
-  await closeSession(session);
+  await closeSession(handle.repo);
 
   await acceptInput(dataRoot, config, input);
 
@@ -312,7 +311,7 @@ test("issue-6 #6: parent chain inconsistent — companion hangs off a different 
     timestamp: Date.now(),
   });
   await session.appendMessage(companionB);
-  await closeSession(session);
+  await closeSession(handle.repo);
 
   await acceptInput(dataRoot, config, inputA);
   await acceptInput(dataRoot, config, inputB);
@@ -353,7 +352,7 @@ test("issue-6 #7: identical body for two inputs — each pair keeps its own raw 
   const b = makeInput("sb-b-0001", "same body");
   const pairA = await appendVerifiedPair(session, a);
   const pairB = await appendVerifiedPair(session, b);
-  await closeSession(session);
+  await closeSession(handle.repo);
 
   await acceptInput(dataRoot, config, a);
   await acceptInput(dataRoot, config, b);
@@ -384,7 +383,7 @@ test("issue-6 #8: duplicate pair for the same inputId fails closed (ambiguous)",
   // delivery): two user+companion pairs with the same (inputId, pairKey).
   await appendVerifiedPair(session, input);
   await appendVerifiedPair(session, input);
-  await closeSession(session);
+  await closeSession(handle.repo);
 
   await acceptInput(dataRoot, config, input);
 
@@ -414,14 +413,14 @@ test("issue-6 #9: pi_user_entry_id equals the REAL raw UserMessage entry id (nev
   await session.appendActiveToolsChange(["read_only_test_tool"]);
   const input = makeInput("exact-0001");
   const { userEntryId, companionEntryId } = await appendVerifiedPair(session, input);
-  await closeSession(session);
+  await closeSession(handle.repo);
 
   // Prove the raw entry itself is a "message" type carrying the user role.
   const paths = resolveDataRootPaths(dataRoot, config);
-  const { SqliteSessionRepo, createNodeSqliteFactory } =
+  const { SqliteSessionRepository, createNodeSqliteFactory } =
     await import("@earendil-works/pi-storage-sqlite-node");
   const { nodeSqliteRepoEnv } = await import("../src/runtime/pi-env.js");
-  const repo = new SqliteSessionRepo({
+  const repo = new SqliteSessionRepository({
     env: nodeSqliteRepoEnv(dataRoot),
     sqlite: createNodeSqliteFactory(),
     databasePath: paths.sessionDb,
@@ -432,7 +431,7 @@ test("issue-6 #9: pi_user_entry_id equals the REAL raw UserMessage entry id (nev
   assert.ok(metadata);
   const reopened = await repo.open(metadata);
   const entries = await reopened.getEntries();
-  await closeSession(reopened);
+  await closeSession(repo);
   const rawUser = entries.find((entry) => entry.id === userEntryId);
   assert.equal(rawUser?.type, "message", "pi_user_entry_id must name a real message entry");
   const rawMessage = (rawUser as SessionTreeEntry & { message?: { role?: string } }).message;
@@ -512,7 +511,7 @@ test("issue-6 #12: corrupt ordering (companion before user) fails closed → sta
   // Corrupt ordering: companion appended BEFORE the UserMessage.
   await session.appendMessage(companion);
   await session.appendMessage({ role: "user", content: wire, timestamp: Date.now() });
-  await closeSession(session);
+  await closeSession(handle.repo);
 
   await acceptInput(dataRoot, config, input);
 
@@ -625,7 +624,7 @@ test("issue-6 settle path: resolveCommittedPair binds pi_user_entry_id to the RE
   const handle = await openSessionFor(dataRoot, config);
   const session = handle.session;
   await session.appendModelChange("mock", "model-v1");
-  await closeSession(session);
+  await closeSession(handle.repo);
 
   // Open the Host over the SAME data root (active Epoch + Session exist).
   const host = await IrisHost.open({ dataRoot, config, provider: "mock" });
@@ -641,10 +640,10 @@ test("issue-6 settle path: resolveCommittedPair binds pi_user_entry_id to the RE
     // The recorded pi_user_entry_id must be the REAL UserMessage raw entry,
     // NOT the model_change entry that precedes it in the raw array.
     const paths = resolveDataRootPaths(dataRoot, config);
-    const { SqliteSessionRepo, createNodeSqliteFactory } =
+    const { SqliteSessionRepository, createNodeSqliteFactory } =
       await import("@earendil-works/pi-storage-sqlite-node");
     const { nodeSqliteRepoEnv } = await import("../src/runtime/pi-env.js");
-    const repo = new SqliteSessionRepo({
+    const repo = new SqliteSessionRepository({
       env: nodeSqliteRepoEnv(dataRoot),
       sqlite: createNodeSqliteFactory(),
       databasePath: paths.sessionDb,
@@ -655,7 +654,7 @@ test("issue-6 settle path: resolveCommittedPair binds pi_user_entry_id to the RE
     assert.ok(metadata);
     const reopened = await repo.open(metadata);
     const entries = await reopened.getEntries();
-    await closeSession(reopened);
+    await closeSession(repo);
     const modelChangeId = entries.find((entry) => entry.type === "model_change")?.id;
     const userEntry = entries.find(
       (entry) => entry.type === "message" && entry.message?.role === "user",
