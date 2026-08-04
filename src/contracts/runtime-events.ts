@@ -37,6 +37,10 @@ export interface RuntimeEvent {
   entryId?: string;
   entrySeq?: number;
   contentHash?: string;
+  /** tool_execution_committed 的 attribution。 */
+  toolCallId?: string;
+  toolName?: string;
+  isError?: boolean;
   disposition: RuntimeEventDisposition;
   derivationRefs: RuntimeEventDerivationRefs;
   contextSeq?: number;
