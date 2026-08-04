@@ -6,13 +6,35 @@ import { DatabaseSync } from "node:sqlite";
 
 import { migrateDatabase } from "../db/migrate.js";
 
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ContextMessageUnit } from "../contracts/context-units.js";
+import type { ContextUnitStorePort } from "./context-ingest.js";
+
+interface UnitRow {
+  runtime_session_id: string;
+  context_seq: number;
+  unit_id: string;
+  source_event_id: string;
+  unit_type: string;
+  disposition: string;
+  entry_id: string | null;
+  entry_seq: number | null;
+  content_hash: string;
+  payload: string;
+  companion_entry_id: string | null;
+  pair_key: string | null;
+  paired: number;
+  derivation_refs: string;
+  created_at: string;
+}
+
 /**
  * Schema version of the Context domain model. Every migration file under
  * src/db/migrations/context/ must be applied in order; the store fails closed
  * if the on-disk schema_migrations.max(version) is NEWER than this constant
  * (a newer binary wrote state this binary cannot read).
  */
-export const LATEST_MIGRATION_VERSION = "0001_bootstrap";
+export const LATEST_MIGRATION_VERSION = "0002_units";
 
 export interface ContextLineage {
   runtimeSessionId: string;
@@ -197,7 +219,7 @@ export interface LkgSlot {
  * sources): the in-memory cache may be dropped, SQLite state is the
  * transform authority. It never stores a second copy of raw Pi messages.
  */
-export class ContextStore {
+export class ContextStore implements ContextUnitStorePort {
   private readonly db: DatabaseSync;
   private closed = false;
 
@@ -262,6 +284,126 @@ export class ContextStore {
     }
     this.closed = true;
     this.db.close();
+  }
+
+  // ---- R2: ContextMessageUnit 持久化（context_units 表，ContextUnitStorePort）----
+
+  hasUnitForEvent(eventId: string): boolean {
+    const row = this.db
+      .prepare("SELECT 1 AS hit FROM context_units WHERE source_event_id = ? LIMIT 1")
+      .get(eventId) as { hit: number } | undefined;
+    return row !== undefined;
+  }
+
+  insertUnit(unit: ContextMessageUnit): void {
+    this.db
+      .prepare(
+        `INSERT INTO context_units (
+           runtime_session_id, context_seq, unit_id, source_event_id, unit_type,
+           disposition, entry_id, entry_seq, content_hash, payload,
+           companion_entry_id, pair_key, paired, derivation_refs, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        unit.runtimeSessionId,
+        unit.contextSeq,
+        unit.unitId,
+        unit.sourceEventId,
+        unit.unitType,
+        unit.disposition,
+        unit.entryId ?? null,
+        unit.entrySeq ?? null,
+        unit.contentHash,
+        JSON.stringify(unit.payload),
+        unit.companionEntryId ?? null,
+        unit.pairKey ?? null,
+        unit.paired ? 1 : 0,
+        JSON.stringify(unit.derivationRefs),
+        unit.createdAt,
+      );
+  }
+
+  updateUnitPairing(
+    runtimeSessionId: string,
+    contextSeq: number,
+    update: { companionEntryId: string; pairKey: string; paired: boolean; payload: AgentMessage },
+  ): void {
+    const result = this.db
+      .prepare(
+        `UPDATE context_units SET
+           companion_entry_id = ?, pair_key = ?, paired = ?, payload = ?
+         WHERE runtime_session_id = ? AND context_seq = ?`,
+      )
+      .run(
+        update.companionEntryId,
+        update.pairKey,
+        update.paired ? 1 : 0,
+        JSON.stringify(update.payload),
+        runtimeSessionId,
+        contextSeq,
+      );
+    if (result.changes !== 1) {
+      throw new Error(
+        `context updateUnitPairing failed: no unit ${runtimeSessionId}/${contextSeq}`,
+      );
+    }
+  }
+
+  listUnits(
+    runtimeSessionId: string,
+    options: { afterContextSeq?: number; limit?: number } = {},
+  ): ContextMessageUnit[] {
+    const rows = (options.afterContextSeq === undefined
+      ? this.db
+          .prepare("SELECT * FROM context_units WHERE runtime_session_id = ? ORDER BY context_seq")
+          .all(runtimeSessionId)
+      : this.db
+          .prepare(
+            "SELECT * FROM context_units WHERE runtime_session_id = ? AND context_seq > ? ORDER BY context_seq",
+          )
+          .all(runtimeSessionId, options.afterContextSeq)) as unknown as UnitRow[];
+    const limit = options.limit ?? rows.length;
+    return rows.slice(0, limit).map((row) => this.rowToUnit(row));
+  }
+
+  lastUnpairedInputSeq(runtimeSessionId: string): number | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(context_seq) AS seq FROM context_units
+         WHERE runtime_session_id = ? AND unit_type = 'input' AND paired = 0`,
+      )
+      .get(runtimeSessionId) as { seq: number | null } | undefined;
+    const seq = row?.seq;
+    return seq ?? undefined;
+  }
+
+  maxContextSeq(runtimeSessionId: string): number {
+    const row = this.db
+      .prepare(
+        "SELECT COALESCE(MAX(context_seq), 0) AS seq FROM context_units WHERE runtime_session_id = ?",
+      )
+      .get(runtimeSessionId) as { seq: number };
+    return row.seq;
+  }
+
+  private rowToUnit(row: UnitRow): ContextMessageUnit {
+    return {
+      runtimeSessionId: row.runtime_session_id,
+      contextSeq: row.context_seq,
+      unitId: row.unit_id,
+      sourceEventId: row.source_event_id,
+      unitType: row.unit_type as ContextMessageUnit["unitType"],
+      disposition: row.disposition as ContextMessageUnit["disposition"],
+      ...(row.entry_id !== null ? { entryId: row.entry_id } : {}),
+      ...(row.entry_seq !== null ? { entrySeq: row.entry_seq } : {}),
+      contentHash: row.content_hash,
+      payload: JSON.parse(row.payload) as AgentMessage,
+      ...(row.companion_entry_id !== null ? { companionEntryId: row.companion_entry_id } : {}),
+      ...(row.pair_key !== null ? { pairKey: row.pair_key } : {}),
+      paired: row.paired === 1,
+      derivationRefs: JSON.parse(row.derivation_refs) as ContextMessageUnit["derivationRefs"],
+      createdAt: row.created_at,
+    };
   }
 
   /** Raw prepared-statement access for the replay/consumer layers. */

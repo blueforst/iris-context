@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS runtime_events (
   entry_id TEXT,
   entry_seq INTEGER,
   content_hash TEXT,
+  role TEXT,
+  payload TEXT,
   tool_call_id TEXT,
   tool_name TEXT,
   is_error INTEGER,
