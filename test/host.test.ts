@@ -470,10 +470,10 @@ test("IrisHost: A5 — active Epoch with missing Session is not-ready/corrupt", 
     /missing\/corrupt: Pi Session/,
   );
   // The lock was released by the failed startup (re-openable after repair).
-  const { SqliteSessionRepo, createNodeSqliteFactory } =
+  const { SqliteSessionRepository, createNodeSqliteFactory } =
     await import("@earendil-works/pi-storage-sqlite-node");
   const { nodeSqliteRepoEnv } = await import("../src/runtime/pi-env.js");
-  const repo = new SqliteSessionRepo({
+  const repo = new SqliteSessionRepository({
     env: nodeSqliteRepoEnv(dataRoot),
     sqlite: createNodeSqliteFactory(),
     databasePath: paths.sessionDb,
@@ -563,8 +563,8 @@ test("review-pass2 #1: partial pair (UserMessage w/o companion) fails closed, ne
     content: "IRIS_INPUT_V1\ninline_text:10\nhello iris\n",
     timestamp: Date.now(),
   });
-  const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
-  await storage.cleanup();
+  // 0.83.0+: release the Session storage connection (data retained).
+  await sessionHandle.repo[Symbol.asyncDispose]();
 
   // Accept the same input durably (simulating the crash-left accepted record).
   const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
@@ -707,8 +707,8 @@ test("review-pass3 #1: corrupt companion pairKey/layout is NOT a verified full p
       blocks: [],
     },
   });
-  const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
-  await storage.cleanup();
+  // 0.83.0+: release the Session storage connection (data retained).
+  await sessionHandle.repo[Symbol.asyncDispose]();
 
   const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
   const ledger = new InputAcceptanceLedger(paths.ingressDb, paths.blobsIngress, 20, 1);
@@ -755,8 +755,8 @@ test("review-pass3 #2: two inputs with identical body under different inputIds a
     content: "IRIS_INPUT_V1\ninline_text:9\nsame body\n",
     timestamp: Date.now(),
   });
-  const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
-  await storage.cleanup();
+  // 0.83.0+: release the Session storage connection (data retained).
+  await sessionHandle.repo[Symbol.asyncDispose]();
 
   // BOTH a-0001 and b-0001 accepted with the SAME body.
   const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
@@ -926,8 +926,8 @@ test("review-pass4 #1b: same-body A and B both with verified pairs are both prom
     await session.appendMessage({ role: "user", content: wire, timestamp: Date.now() });
     await session.appendMessage(companion);
   }
-  const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
-  await storage.cleanup();
+  // 0.83.0+: release the Session storage connection (data retained).
+  await sessionHandle.repo[Symbol.asyncDispose]();
 
   // Both accepted durably.
   const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
@@ -1066,8 +1066,8 @@ test("review-pass6 #1: same-identity pair with envelope mismatch is ambiguous, n
   };
   await session.appendMessage({ role: "user", content: wire, timestamp: Date.now() });
   await session.appendMessage(companion);
-  const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
-  await storage.cleanup();
+  // 0.83.0+: release the Session storage connection (data retained).
+  await sessionHandle.repo[Symbol.asyncDispose]();
 
   const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
   const ledger = new InputAcceptanceLedger(paths.ingressDb, paths.blobsIngress, 20, 1);
@@ -1118,8 +1118,8 @@ test("review-pass7 #2: a pair created under a DIFFERENT instanceEpoch is not ver
   const companion = createInputMetaCompanion(input, layoutHash, new Date().toISOString(), 1);
   await session.appendMessage({ role: "user", content: wire, timestamp: Date.now() });
   await session.appendMessage(companion);
-  const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
-  await storage.cleanup();
+  // 0.83.0+: release the Session storage connection (data retained).
+  await sessionHandle.repo[Symbol.asyncDispose]();
 
   // instanceEpoch=2 accepts the same inputId + wire, never appended.
   const { InputAcceptanceLedger } = await import("../src/host/ingress.js");
@@ -1230,8 +1230,8 @@ test("review-pass7-fix: rollover then accept then restart verifies the new sessi
   );
   await session.appendMessage({ role: "user", content: wire, timestamp: Date.now() });
   await session.appendMessage(companion);
-  const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
-  await storage.cleanup();
+  // 0.83.0+: release the Session storage connection (data retained).
+  await sessionHandle.repo[Symbol.asyncDispose]();
 
   // Restart: the ordinal-2 session's pair (instanceEpoch 1) must be verified
   // and promoted — NOT ambiguous/not-ready.

@@ -32,9 +32,9 @@
     "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run test:context-golden && npm run test:context-migrations && npm run migration:smoke && npm run crash:check && npm run bench:context && npm run build && npm run test:subprocess && npm run test:cli && npm run dist:smoke"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.82.1",
-    "@earendil-works/pi-ai": "0.82.1",
-    "@earendil-works/pi-storage-sqlite-node": "0.82.1",
+    "@earendil-works/pi-agent-core": "file:../pi/packages/agent",
+    "@earendil-works/pi-ai": "file:../pi/packages/ai",
+    "@earendil-works/pi-storage-sqlite-node": "file:../pi/packages/storage/sqlite-node",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "proper-lockfile": "4.1.2"

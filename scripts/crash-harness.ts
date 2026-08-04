@@ -18,7 +18,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 
-import { createNodeSqliteFactory, SqliteSessionRepo } from "@earendil-works/pi-storage-sqlite-node";
+import {
+  createNodeSqliteFactory,
+  SqliteSessionRepository,
+} from "@earendil-works/pi-storage-sqlite-node";
 
 import { defaultAgentConfig } from "../src/config/load.js";
 import { initializeDataRoot, resolveDataRootPaths } from "../src/host/data-root.js";
@@ -110,7 +113,7 @@ async function main(): Promise<void> {
   let orphanSessionsDeleted = 0;
 
   // Session history: head readable via the repo.
-  const repo = new SqliteSessionRepo({
+  const repo = new SqliteSessionRepository({
     env: nodeSqliteRepoEnv(dataRoot),
     sqlite: createNodeSqliteFactory(),
     databasePath: paths.sessionDb,
@@ -167,8 +170,10 @@ async function main(): Promise<void> {
         companionCount += 1;
       }
     }
-    const storage = session.getStorage() as unknown as { cleanup(): Promise<void> };
-    await storage.cleanup();
+    // 0.83.0+: Session connection lifecycle is owned by the repository.
+    // Dispose unconditionally (also when no sessions remain) so the Windows
+    // db handle is released before the temp dir is removed.
+    await repo[Symbol.asyncDispose]();
   }
 
   const invocationDb = existsSync(join(dataRoot, "invocation.db"));
@@ -264,7 +269,14 @@ async function main(): Promise<void> {
     process.exitCode = 1;
   }
 
-  rmSync(dataRoot, { recursive: true, force: true });
+  // Windows may hold the sqlite file handle briefly after close; a failed
+  // temp-dir removal must NOT fail the boundary check (verification already
+  // produced its verdict). The temp dir is under the OS tmpdir.
+  try {
+    rmSync(dataRoot, { recursive: true, force: true });
+  } catch (cleanupError) {
+    console.warn(`[crash-harness] temp cleanup skipped: ${String(cleanupError)}`);
+  }
   void childOutput;
 }
 

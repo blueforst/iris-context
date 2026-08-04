@@ -71,7 +71,12 @@ function buildCoordinator(options?: { maxQueuedInputs?: number }): Promise<{
       now,
       providerProfileId: "mock-iris-provider-v1",
     });
-    const adapter = new PiRuntimeAdapter({ harness, session, binding: currentInvocation });
+    const adapter = new PiRuntimeAdapter({
+      harness,
+      session,
+      binding: currentInvocation,
+      repo: sessionHandle.repo,
+    });
     const registry = new ActiveRuntimeRegistry();
     registry.install(activeRuntimeHandle(epoch, adapter, currentInvocation));
     const coordinator = new RuntimeCoordinator({
