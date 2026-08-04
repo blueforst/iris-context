@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "documentedAt": "2026-08-04",
+  "toolchain": {
+    "node": ">=22.19.0",
+    "nodeCiExact": "22.19.0",
+    "packageManager": "npm",
+    "lockfile": "package-lock.json"
+  },
+  "pi": {
+    "currentDependencySource": "npm_registry_earendil_works_release",
+    "packages": {
+      "@earendil-works/pi-agent-core": "0.82.1",
+      "@earendil-works/pi-ai": "0.82.1",
+      "@earendil-works/pi-storage-sqlite-node": "0.82.1"
+    },
+    "fork": {
+      "repository": "blueforst/pi",
+      "baselineCommit": "ab5f8d88ee1d400c0c8fb5c50ac10b2f4a4851d1",
+      "upstreamBaseCommit": "e741cb05ca7c1c7bc5a9664c99697df32de9fac6",
+      "upstreamAuditBaselineCommit": "b4f293684bba718d59cc1157679bcf6157b3a7f5",
+      "adoptionStatus": "planned_at_r1_seam_availability"
+    }
+  },
+  "magicContext": {
+    "repository": "cortexkit/magic-context",
+    "release": "v0.33.0",
+    "commit": "48ab531d8fa98af2f463db2e4d9f8ffdd63d765e",
+    "authoritativePath": "packages/plugin/src/hooks/magic-context",
+    "explicitlyNotAdopted": ["experimental.memory_mural"]
+  },
+  "memoryContracts": {
+    "package": "iris-memory-contracts",
+    "version": "0.1.1",
+    "manifestSha256": "2cb22deb5efded5a112dbb38c19506e6185ad328a973f7a96d9e66faf59a761b",
+    "owner": "blueforst/iris_memory"
+  },
+  "graphitiNeo4j": {
+    "owner": "blueforst/iris_memory",
+    "agentDirectDependency": false,
+    "candidateLock": {
+      "graphitiCore": "0.29.2",
+      "neo4jDriverMinimum": "5.26.0"
+    }
+  }
+}
