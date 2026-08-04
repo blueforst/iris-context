@@ -26,6 +26,8 @@ export interface ContextUnitStorePort {
     runtimeSessionId: string,
     options?: { afterContextSeq?: number; limit?: number },
   ): ContextMessageUnit[];
+  /** 按源事件找单元（companion 邻接配对的幂等锚点）。 */
+  findBySourceEvent(eventId: string): ContextMessageUnit | undefined;
   lastUnpairedInputSeq(runtimeSessionId: string): number | undefined;
   maxContextSeq(runtimeSessionId: string): number;
   close(): void;
@@ -145,9 +147,9 @@ export class ContextIngest implements ContextIngestPort {
     options: { limit?: number } = {},
   ): ContextMessageUnit[] {
     const events = this.ledger.listBySession(runtimeSessionId, options);
-    let pendingInputSeq = this.units.lastUnpairedInputSeq(runtimeSessionId);
-    for (const event of events) {
-      if (event.type !== "message_finalized") {
+    for (let index = 0; index < events.length; index += 1) {
+      const event = events[index];
+      if (event?.type !== "message_finalized") {
         continue;
       }
       if (this.units.hasUnitForEvent(event.eventId)) {
@@ -175,35 +177,53 @@ export class ContextIngest implements ContextIngestPort {
           ...(event.entryId !== undefined ? { entryId: event.entryId } : {}),
           ...(event.entrySeq !== undefined ? { entrySeq: event.entrySeq } : {}),
           contentHash: event.contentHash ?? "",
-          payload: message,
+          // 插入时用 UNVERIFIED 占位：context.db 永不存 raw wire（reviewer A
+          // NB-2）；companion 到达时折叠为 provenance 文本。
+          payload: {
+            role: "user",
+            content: "[USER REQUEST | UNVERIFIED]",
+            timestamp: message.timestamp,
+          },
           paired: false,
           derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
           createdAt: event.occurredAt,
         });
-        pendingInputSeq = seq;
         continue;
       }
 
       if (isInputMetaCompanion(message)) {
-        const pending = pendingInputSeq;
-        if (pending === undefined) {
-          continue; // 孤立 companion：不建单元（fail-closed）
+        // 事件邻接配对：companion 只与紧邻前驱 user 事件配对（ledger
+        // event_seq 顺序 = pi append 顺序）。历史 companion 重放时前驱 user
+        // unit 已配对 → 幂等跳过，绝不与"最新未配对 input"错配
+        // （reviewer B BLOCKING #1）。
+        const prev = events[index - 1];
+        if (
+          prev?.type !== "message_finalized" ||
+          prev.role !== "user" ||
+          prev.payload === undefined
+        ) {
+          continue; // 邻接失败：孤立/乱序 companion（fail-closed）
         }
-        const userUnit = this.units.listUnits(runtimeSessionId, {
-          afterContextSeq: pending - 1,
-        })[0];
-        if (userUnit === undefined || userUnit?.unitType !== "input") {
+        const userUnit = this.units.findBySourceEvent(prev.eventId);
+        if (userUnit?.unitType !== "input" || userUnit.paired) {
+          continue; // 前驱 user 无单元或已配对（重放幂等）
+        }
+        // 折叠数据源是前驱事件 payload（raw user message，在事件 ledger）；
+        // user unit 的 payload 从插入到配对保持 UNVERIFIED 占位，context.db
+        // 永不存 raw wire（reviewer A NB-2）。
+        let prevMessage: AgentMessage;
+        try {
+          prevMessage = JSON.parse(prev.payload) as AgentMessage;
+        } catch {
           continue;
         }
-        const userMessage = userUnit.payload as AgentMessage & { role: "user" };
-        const folded = foldUserPayload(userMessage, message);
+        const folded = foldUserPayload(prevMessage as AgentMessage & { role: "user" }, message);
         this.units.updateUnitPairing(runtimeSessionId, userUnit.contextSeq, {
           companionEntryId: event.entryId ?? "",
           pairKey: folded.pairKey,
           paired: folded.paired,
           payload: folded.payload,
         });
-        pendingInputSeq = undefined;
         continue;
       }
 

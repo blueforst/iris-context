@@ -377,6 +377,13 @@ export class ContextStore implements ContextUnitStorePort {
     return seq ?? undefined;
   }
 
+  findBySourceEvent(eventId: string): ContextMessageUnit | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM context_units WHERE source_event_id = ? LIMIT 1")
+      .get(eventId) as UnitRow | undefined;
+    return row === undefined ? undefined : this.rowToUnit(row);
+  }
+
   maxContextSeq(runtimeSessionId: string): number {
     const row = this.db
       .prepare(

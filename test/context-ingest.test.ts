@@ -243,6 +243,59 @@ test("r2: replay heals partial ingest (crash between event commit and unit creat
   }
 });
 
+test("r2: multi-input session never mis-pairs a replayed companion (reviewer B BLOCKING #1)", () => {
+  const dir = tempDir();
+  try {
+    const { ledger, store, ingest } = setup(dir);
+    // 模拟 seam 逐事件 ingest（每次 ingest 后全量 ensureUnitsUpTo）。
+    // 事件流：user-1, comp-1, user-2, comp-2（多轮对话）。
+    ledger.ingest(sampleEvent({ entryId: "user-1", role: "user", payload: userMessageWire() }));
+    ingest.ensureUnitsUpTo("session-1");
+    ledger.ingest(sampleEvent({ entryId: "comp-1", role: "custom", payload: realCompanionWire() }));
+    ingest.ensureUnitsUpTo("session-1");
+    ledger.ingest(sampleEvent({ entryId: "user-2", role: "user", payload: userMessageWire() }));
+    ingest.ensureUnitsUpTo("session-1");
+    ledger.ingest(sampleEvent({ entryId: "comp-2", role: "custom", payload: realCompanionWire() }));
+    ingest.ensureUnitsUpTo("session-1");
+
+    const units = ingest.listUnits("session-1");
+    assert.equal(units.length, 2);
+    const first = units[0];
+    const second = units[1];
+    assert.equal(first?.companionEntryId, "comp-1", "input-1 must pair with comp-1");
+    assert.equal(
+      second?.companionEntryId,
+      "comp-2",
+      "input-2 must pair with comp-2, never re-paired by comp-1",
+    );
+    assert.equal(first?.paired, true);
+    assert.equal(second?.paired, true);
+    store.close();
+    ledger.close();
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("r2: input unit payload never stores raw wire before pairing (placeholder)", () => {
+  const dir = tempDir();
+  try {
+    const { ledger, store, ingest } = setup(dir);
+    ledger.ingest(sampleEvent({ entryId: "user-1", role: "user", payload: userMessageWire() }));
+    // 只 ingest user（companion 未到）：unit payload 必须是 UNVERIFIED 占位，
+    // 绝不能是 IRIS_INPUT_V1 raw wire。
+    const units = ingest.ensureUnitsUpTo("session-1");
+    assert.equal(
+      (units[0]?.payload as { content?: unknown })?.content,
+      "[USER REQUEST | UNVERIFIED]",
+    );
+    store.close();
+    ledger.close();
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 test("r2: empty context.db initializes cleanly; 0002 applied and idempotent", () => {
   const dir = tempDir();
   try {
