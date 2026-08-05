@@ -29,7 +29,16 @@ import type { HistorianBoundarySnapshot, SequencedSessionEntry } from "../contra
  * deterministically from the durable cursor + the snapshot.
  */
 
-export interface BoundaryFreezeInput {
+/** R3-P1：Context lineage 物化边界输入（m0-clamp）。representedThroughEntrySeq
+ * 为 lineage 物化 watermark（represented_through_context_seq）对应的 entrySeq
+ * （由 ContextHistoryReadPort 提供）；null = 从未物化 / 前缀内无 entry_seq
+ * 映射 → 不 clamp。 */
+export interface LineageBoundaryInput {
+  representedThroughEntrySeq: number | null;
+}
+
+/** raw 部分：Session head 的纯 raw 输入（与 R3-P0 原 BoundaryFreezeInput 一致）。 */
+export interface RawBoundaryFreezeInput {
   runtimeSessionId: string;
   /** Raw sequenced entries of the CURRENT Session head (from the read port). */
   entries: SequencedSessionEntry[];
@@ -44,6 +53,17 @@ export interface BoundaryFreezeInput {
   frozenAt: string;
   /** Optional deterministic token estimate for the eligible range. */
   estimateTokens?: (text: string) => number;
+}
+
+/**
+ * R3-P1 freeze 输入：raw 部分 + 可选 lineage 物化边界。lineageBoundary 缺省 =
+ * 不 clamp（保持 R3-P0 纯 raw 语义）；提供时 eligible 范围以 lineage 边界为
+ * 上界（v13 m0-clamp：只有已进入 m0/m1 的 compartment 才可被 raw 替换）。
+ */
+export interface BoundaryFreezeInput {
+  rawSeamInput: RawBoundaryFreezeInput;
+  /** Context lineage 物化边界（可选）。 */
+  lineageBoundary?: LineageBoundaryInput;
 }
 
 export interface BoundaryFreezeResult {
@@ -125,21 +145,21 @@ function lastCompleteArcEnd(entries: SequencedSessionEntry[]): number {
  *   - an entry inside an ACTIVE assistant's toolCall window is never a seam.
  */
 export function freezeBoundary(input: BoundaryFreezeInput): BoundaryFreezeResult {
-  const tailMargin = input.tailMarginEntries ?? 2;
-  const head =
-    input.entries.length === 0 ? 0 : (input.entries[input.entries.length - 1]?.entrySeq ?? 0);
-  const unprocessedFromEntrySeq = Math.max(1, input.processedThroughEntrySeq + 1);
+  const raw = input.rawSeamInput;
+  const tailMargin = raw.tailMarginEntries ?? 2;
+  const head = raw.entries.length === 0 ? 0 : (raw.entries[raw.entries.length - 1]?.entrySeq ?? 0);
+  const unprocessedFromEntrySeq = Math.max(1, raw.processedThroughEntrySeq + 1);
 
-  if (head <= input.processedThroughEntrySeq) {
+  if (head <= raw.processedThroughEntrySeq) {
     return {
-      snapshot: emptySnapshot(input, head),
+      snapshot: emptySnapshot(raw, head),
       unprocessedFromEntrySeq,
       nothingNew: true,
     };
   }
 
   // 1. Last complete tool arc end (never cut an arc).
-  const arcEnd = lastCompleteArcEnd(input.entries);
+  const arcEnd = lastCompleteArcEnd(raw.entries);
   // 2. Protected tail margin (never cut the dynamic tail).
   const tailBoundary = Math.max(0, head - tailMargin);
   // 3. In-flight invocation seam: the seam must NOT land INSIDE an
@@ -151,9 +171,9 @@ export function freezeBoundary(input: BoundaryFreezeInput): BoundaryFreezeResult
   if (arcEnd > 0) {
     seam = Math.min(seam, arcEnd);
   }
-  const assistantEntries = collectAssistants(input.entries);
+  const assistantEntries = collectAssistants(raw.entries);
   const toolResultCallIds = new Set<string>();
-  for (const entry of input.entries) {
+  for (const entry of raw.entries) {
     if (isToolResult(entry)) {
       const candidate = entry.entry as { message?: { toolCallId?: string } };
       const callId = candidate?.message?.toolCallId;
@@ -175,10 +195,21 @@ export function freezeBoundary(input: BoundaryFreezeInput): BoundaryFreezeResult
   }
 
   // Ensure the seam never exceeds the head or falls below the cursor.
-  seam = Math.max(input.processedThroughEntrySeq, Math.min(seam, tailBoundary));
+  seam = Math.max(raw.processedThroughEntrySeq, Math.min(seam, tailBoundary));
 
-  const eligibleThroughEntrySeq = seam;
-  const protectedTailStartEntrySeq = Math.min(head, seam + 1);
+  // R3-P1 m0-clamp：只有已进入 m0/m1 的 compartment 才可被 raw 替换。
+  // rawSafeSeam 是纯 raw 安全接缝（arc/tail/in-flight 语义，不变）；
+  // lineage 物化边界（representedThroughEntrySeq）进一步收紧 eligible 范围：
+  //   eligibleThrough = min(rawSafeSeam, lineageBoundary)；
+  // protectedTailStart 保持 rawSafeSeam —— 动态保护尾部始终以 raw 语义为准，
+  // 永不被 lineage 边界挤压（尾部始终保留 raw 原样）。
+  const rawSafeSeam = seam;
+  const lineageEntrySeq = input.lineageBoundary?.representedThroughEntrySeq;
+  const eligibleThroughEntrySeq =
+    lineageEntrySeq !== null && lineageEntrySeq !== undefined
+      ? Math.min(rawSafeSeam, lineageEntrySeq)
+      : rawSafeSeam;
+  const protectedTailStartEntrySeq = Math.min(head, rawSafeSeam + 1);
   // The source range hash covers ONLY the unprocessed window
   // [unprocessedFromEntrySeq .. eligibleThroughEntrySeq] — the SAME window
   // the runner re-reads and re-verifies on its next run. Including already-
@@ -186,39 +217,39 @@ export function freezeBoundary(input: BoundaryFreezeInput): BoundaryFreezeResult
   // hash diverge from the runner's re-read on every cycle after the first
   // commit (the runner starts from the durable cursor), permanently
   // stalling the Historian (issue #8 R3 B3 review blocker).
-  const eligibleEntries = input.entries.filter(
+  const eligibleEntries = raw.entries.filter(
     (e) => e.entrySeq >= unprocessedFromEntrySeq && e.entrySeq <= eligibleThroughEntrySeq,
   );
   const sourceRangeHash = rangeHash(
-    input.runtimeSessionId,
+    raw.runtimeSessionId,
     unprocessedFromEntrySeq,
     eligibleThroughEntrySeq,
     eligibleEntries,
   );
   const rawText = eligibleEntries.map((e) => JSON.stringify(e.entry)).join("");
   const trueRawEligibleTokens =
-    input.estimateTokens === undefined ? rawText.length : input.estimateTokens(rawText);
+    raw.estimateTokens === undefined ? rawText.length : raw.estimateTokens(rawText);
   const narratableEligibleTokens = trueRawEligibleTokens;
 
   return {
     snapshot: {
-      boundarySnapshotId: `bs-${input.runtimeSessionId}-${head}`,
-      runtimeSessionId: input.runtimeSessionId,
+      boundarySnapshotId: `bs-${raw.runtimeSessionId}-${head}`,
+      runtimeSessionId: raw.runtimeSessionId,
       observedHeadEntrySeq: head,
       eligibleThroughEntrySeq,
       protectedTailStartEntrySeq,
       trueRawEligibleTokens,
       narratableEligibleTokens,
       sourceRangeHash,
-      modelProviderProfile: input.modelProviderProfile,
-      frozenAt: input.frozenAt,
+      modelProviderProfile: raw.modelProviderProfile,
+      frozenAt: raw.frozenAt,
     },
     unprocessedFromEntrySeq,
     nothingNew: false,
   };
 }
 
-function emptySnapshot(input: BoundaryFreezeInput, head: number): HistorianBoundarySnapshot {
+function emptySnapshot(input: RawBoundaryFreezeInput, head: number): HistorianBoundarySnapshot {
   return {
     boundarySnapshotId: `bs-${input.runtimeSessionId}-${head}-empty`,
     runtimeSessionId: input.runtimeSessionId,

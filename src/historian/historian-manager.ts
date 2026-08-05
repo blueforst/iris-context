@@ -15,7 +15,7 @@ import type {
 import type { HistorianStore } from "./historian-store.js";
 import { HistorianQueue, HistorianWorker, type HistorianJob } from "./historian-queue.js";
 import { HistorianRunner, type RunnerCommitHook } from "./historian-runner.js";
-import { freezeBoundary } from "./historian-boundary.js";
+import { freezeBoundary, type LineageBoundaryInput } from "./historian-boundary.js";
 import { buildAnalysisView, type HistorianAnalysisView } from "./historian-analysis.js";
 import { PublicationService } from "./historian-publication.js";
 import { runWrapup } from "./historian-continuity.js";
@@ -119,7 +119,23 @@ export class HistorianManager {
    * enqueue a highest-priority job (fire-and-forget — never blocks the Pi
    * main turn). The freeze reads the Session head through the read port. */
   async triggerIncremental(runtimeSessionId: string): Promise<boolean> {
-    const frozen = await this.freezeCurrent(runtimeSessionId);
+    return this.enqueueIncremental(runtimeSessionId);
+  }
+
+  /**
+   * R3-P1：lineage 感知的 active incremental trigger。冻结当前 Session head 并
+   * 以 highest 优先级入队（fire-and-forget）。lineageBoundary（由
+   * ContextHistoryReadPort 提供的物化边界）在 freeze 时 clamp eligible 范围：
+   * 只有已进入 m0/m1 的 compartment 才可被 raw 替换（v13 m0-clamp 规格）。
+   * lineageBoundary 缺省 = 纯 raw 语义（R3-P0 行为，与 triggerIncremental
+   * 完全一致）。freeze-trigger 接线（vertical-slice）在 HARD fold 提交后经
+   * 端口读取边界并调用本方法。
+   */
+  async enqueueIncremental(
+    runtimeSessionId: string,
+    lineageBoundary?: LineageBoundaryInput,
+  ): Promise<boolean> {
+    const frozen = await this.freezeCurrent(runtimeSessionId, lineageBoundary);
     if (frozen === null) {
       return false;
     }
@@ -240,6 +256,7 @@ export class HistorianManager {
 
   private async freezeCurrent(
     runtimeSessionId: string,
+    lineageBoundary?: LineageBoundaryInput,
   ): Promise<{ snapshot: HistorianBoundarySnapshot; nothingNew: boolean } | null> {
     const state = this.store.getSessionState(runtimeSessionId);
     const processed = state?.processedThroughEntrySeq ?? 0;
@@ -252,16 +269,21 @@ export class HistorianManager {
       return null;
     }
     const result = freezeBoundary({
-      runtimeSessionId,
-      entries: page.entries,
-      processedThroughEntrySeq: processed,
-      // No fixed tail margin: the freeze's arc/in-flight seam logic is the
-      // protected-tail authority (a fixed margin would leave short sessions
-      // permanently nothing_new). The runner's validation re-verifies the
-      // seam before any commit.
-      tailMarginEntries: 0,
-      modelProviderProfile: this.modelProviderProfile,
-      frozenAt: new Date(this.nowMs()).toISOString(),
+      rawSeamInput: {
+        runtimeSessionId,
+        entries: page.entries,
+        processedThroughEntrySeq: processed,
+        // No fixed tail margin: the freeze's arc/in-flight seam logic is the
+        // protected-tail authority (a fixed margin would leave short sessions
+        // permanently nothing_new). The runner's validation re-verifies the
+        // seam before any commit.
+        tailMarginEntries: 0,
+        modelProviderProfile: this.modelProviderProfile,
+        frozenAt: new Date(this.nowMs()).toISOString(),
+      },
+      // R3-P1 m0-clamp：lineage 物化边界（存在时）在 freeze 内收紧 eligible
+      // 范围——只有已进入 m0/m1 的 compartment 才可被 raw 替换。
+      ...(lineageBoundary !== undefined ? { lineageBoundary } : {}),
     });
     return { snapshot: result.snapshot, nothingNew: result.nothingNew };
   }
