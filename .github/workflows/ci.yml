@@ -29,6 +29,12 @@ jobs:
           repository: blueforst/pi
           path: pi-fork
           ref: ${{ steps.pi-pin.outputs.PI_REF }}
+          # The production-lock gate resolves the accepted runtime commit and
+          # its ancestry inside ../pi; a shallow (depth 1) checkout lacks the
+          # parent objects and the gate would fail closed on every PR. Fetch
+          # full history so cat-file/merge-base work (mirrors the Pi-side
+          # unshallow gate fix).
+          fetch-depth: 0
       - name: Move Pi fork checkout to adjacent path
         run: mv pi-fork ../pi
       - uses: actions/setup-node@v4
