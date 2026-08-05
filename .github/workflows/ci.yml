@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,10 +14,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # R1-P1d (fork file: adoption): iris_agent consumes the adjacent
+      # blueforst/pi checkout (production lock seamCommit). actions/checkout
+      # refuses paths outside the workspace, so check out inside then move to
+      # the adjacent ../pi location the file: deps expect.
+      - uses: actions/checkout@v4
+        with:
+          repository: blueforst/pi
+          path: pi-fork
+          ref: e18f7dd1457ea4a5987b4d44d0c41e0dfa48cedd
+      - name: Move Pi fork checkout to adjacent path
+        run: mv pi-fork ../pi
       - uses: actions/setup-node@v4
         with:
           node-version: 22.19.0
           cache: npm
+      - name: Install Pi fork workspace
+        run: npm ci
+        working-directory: ../pi
+      - name: Build Pi fork packages (ai/agent/sqlite-node)
+        run: npm run build
+        working-directory: ../pi
       - run: npm ci
       # Single aggregate check (format/lint/typecheck/unit + subprocess +
       # migration/crash/build/CLI/dist smoke) so CI never drifts from the
