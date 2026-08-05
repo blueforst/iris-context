@@ -660,3 +660,45 @@ function assistantLike(id: string, parentId: string, text: string, ts = 3): Sess
     },
   } as unknown as SessionTreeEntry;
 }
+
+// ---- 7. R3-P4 B1 修复：closing 阻塞增量 + wrapup 单飞替换不 wedge ----
+
+test("R3 Exit Gate: closing 会话拒绝增量提交（v13 状态机不变量，B1）", async () => {
+  const fixture = managerFixture([u("u1", null), u("u2", "u1")]);
+  try {
+    // wrapup 入队 → 持久化 closing。
+    await fixture.manager.enqueueWrapup("s1");
+    assert.equal(fixture.store.getSessionState("s1")?.status, "closing", "wrapup 入队即 closing");
+    // closing 后增量必须被拒绝（B1：closing 阻塞进一步 incremental 提交）。
+    const accepted = await fixture.manager.enqueueIncremental("s1");
+    assert.equal(accepted, false, "closing 会话不再接收增量提交");
+    assert.equal(fixture.manager.getQueue().pendingCount(), 1, "队列只剩 wrapup job");
+  } finally {
+    fixture.store.close();
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("R3 Exit Gate: wrapup 替换 pending 增量 → priority 降为 normal，不 wedge（B1 回归）", async () => {
+  const fixture = managerFixture([u("u1", null), u("u2", "u1")]);
+  try {
+    // 增量先入队（highest）。
+    await fixture.manager.enqueueIncremental("s1");
+    assert.equal(fixture.manager.getQueue().pendingCount(), 1, "增量 job 在队");
+    // wrapup 入队 → 单飞替换 → priority 必须变为 normal（否则 worker 走
+    // runner 路径提交 cursor、wrapup 任务丢失 → 会话卡死 closing 的 wedge）。
+    await fixture.manager.enqueueWrapup("s1");
+    const pendingJob = fixture.manager.getQueue().peek();
+    assert.equal(pendingJob?.priority, "normal", "单飞替换采用 wrapup 的 normal 优先级");
+    // pumpOnce 走 wrapup 路径 → 会话最终 closed / closed_incomplete（不 wedge）。
+    await fixture.manager.pumpOnce();
+    const status = fixture.store.getSessionState("s1")?.status;
+    assert.ok(
+      status === "closed" || status === "closed_incomplete",
+      `wrapup 完成，不卡 closing（实际 ${status}）`,
+    );
+  } finally {
+    fixture.store.close();
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});

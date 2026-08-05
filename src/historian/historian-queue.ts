@@ -118,6 +118,10 @@ export class HistorianQueue {
     const existing = this.pending.find((j) => j.runtimeSessionId === job.runtimeSessionId);
     if (existing !== undefined) {
       // Single-flight: refresh the boundary with a fresh run identity.
+      // R3-P4 B1 修复：priority 一并采用新 job 的（wrapup 替换 pending 增量时
+      // 必须降为 normal，否则 worker 走 runner 路径提交 cursor 而 wrapup 任务
+      // 丢失 → 会话卡死 closing 的 wedge）。
+      existing.priority = job.priority;
       existing.boundary = job.boundary;
       existing.sessionState = job.sessionState;
       return true;

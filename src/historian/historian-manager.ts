@@ -146,11 +146,25 @@ export class HistorianManager {
     runtimeSessionId: string,
     lineageBoundary?: LineageBoundaryInput,
   ): Promise<boolean> {
+    // R3-P4 B1 修复（v13 状态机不变量）：closing/closed 会话不再接收增量提交。
+    // closing = wrapup 已入队（收尾中）；closed/closed_incomplete = 已终结；
+    // corrupt = fail-closed（不可自动修复）。这些状态下入队增量会破坏
+    // active→closing→closed 状态机（post-close 提交 / wedge 风险），拒绝并返回
+    // false。只有 active 会话可以增量入队。
+    const durable = this.store.getSessionState(runtimeSessionId);
+    if (
+      durable?.status === "closing" ||
+      durable?.status === "closed" ||
+      durable?.status === "closed_incomplete" ||
+      durable?.status === "corrupt"
+    ) {
+      return false;
+    }
     const frozen = await this.freezeCurrent(runtimeSessionId, lineageBoundary);
     if (frozen === null) {
       return false;
     }
-    const state = this.store.getSessionState(runtimeSessionId) ?? {
+    const state = durable ?? {
       runtimeSessionId,
       processedThroughEntrySeq: 0,
       status: "active" as const,
