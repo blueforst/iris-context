@@ -516,6 +516,28 @@ export class ContextStore implements ContextUnitStorePort {
     return row.seq;
   }
 
+  /**
+   * R3-P1：entrySeqOf(representedThroughContextSeq) 的 SQL 实现——context_seq
+   * <= watermark 的单元中取 MAX(entry_seq)，跳过 entry_seq 为 NULL 的行
+   * （非 message 事件可能无 entrySeq；message_finalized 收据的 entrySeq 为
+   * 可选）。watermark 为 0 或前缀内无携带 entry_seq 的单元 → null。
+   *
+   * 选择专用聚合而非 listUnits + 过滤（设计决策）：单条 SQL 聚合为 O(log n)，
+   * 且不受 listUnits 默认 disposition 过滤（include）影响——映射面向全部语义
+   * 单元（R3 Historian 的 raw-replacement 裁剪候选），不能因 excluded 单元而
+   * 产生错误边界。语义参考实现见 history-read-port.ts 的纯函数
+   * resolveEntrySeqForWatermark。
+   */
+  maxEntrySeqAtOrBelowWatermark(runtimeSessionId: string, watermark: number): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(entry_seq) AS seq FROM context_units
+         WHERE runtime_session_id = ? AND context_seq <= ? AND entry_seq IS NOT NULL`,
+      )
+      .get(runtimeSessionId, watermark) as { seq: number | null } | undefined;
+    return row?.seq ?? null;
+  }
+
   private rowToUnit(row: UnitRow): ContextMessageUnit {
     return {
       runtimeSessionId: row.runtime_session_id,
