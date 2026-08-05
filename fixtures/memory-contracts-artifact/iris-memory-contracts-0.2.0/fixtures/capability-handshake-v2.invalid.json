@@ -1,0 +1,9 @@
+{
+  "service": "iris-memory",
+  "contractVersion": "0.1.0",
+  "status": "broken",
+  "capabilities": [
+    "health.read"
+  ],
+  "schemaVersion": "capability-handshake-v2"
+}

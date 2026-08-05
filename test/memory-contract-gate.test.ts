@@ -25,7 +25,7 @@ const ARTIFACT_ROOT = join(
   "..",
   "fixtures",
   "memory-contracts-artifact",
-  "iris-memory-contracts-0.1.1",
+  "iris-memory-contracts-0.2.0",
 );
 
 function readJson(relative: string): Record<string, unknown> {
@@ -35,12 +35,12 @@ function readJson(relative: string): Record<string, unknown> {
 test("cross-repo: agent reads the manifest from the REAL artifact", () => {
   const manifest = readJson("manifest.json");
   assert.equal(manifest["package"], "iris-memory-contracts");
-  assert.equal(manifest["version"], "0.1.1");
+  assert.equal(manifest["version"], "0.2.0");
   assert.equal(manifest["majorVersion"], 0);
   assert.ok(Array.isArray(manifest["schemas"]));
   assert.ok(Array.isArray(manifest["fixtures"]));
   const schemas = manifest["schemas"] as string[];
-  assert.equal(schemas.length, 14);
+  assert.equal(schemas.length, 20);
 });
 
 test("cross-repo: pinned manifestSha256 equals the REAL artifact manifest hash", () => {
@@ -122,10 +122,26 @@ test("cross-repo: agent validates valid/invalid fixtures against the artifact sc
     const schema = readJson(`schemas/${schemaName}.schema.json`);
     const instance = readJson(relative);
     // A fresh Ajv per fixture: schemas carry $id and ajv rejects duplicate
-    // registration when compiling the same schema across fixtures.
+    // registration when compiling the same schema across fixtures. v2
+    // schemas cross-reference reusable types by urn: id, so every packaged
+    // schema must be registered in the Ajv instance first.
     const ajv = new Ajv2020({ allErrors: true });
     formatsPlugin(ajv);
-    const validate = ajv.compile(schema);
+    let targetId: string | undefined;
+    for (const schemaRelative of manifest["schemas"] as string[]) {
+      const s = readJson(schemaRelative);
+      const id = s["$id"];
+      if (typeof id === "string") {
+        ajv.addSchema(s, id);
+        if (schemaRelative === `schemas/${schemaName}.schema.json`) {
+          targetId = id;
+        }
+      }
+    }
+    const validate =
+      targetId !== undefined
+        ? (ajv.getSchema(targetId) ?? ajv.compile(schema))
+        : ajv.compile(schema);
     const valid = validate(instance) === true;
     if (expectValid) {
       assert.equal(valid, true, `fixture ${relative} should be valid`);
@@ -151,7 +167,7 @@ test("cross-repo: agent does not depend on the Memory Python implementation", ()
   // no Python import anywhere in the agent repo.
   const pin = readContractPin();
   assert.equal(typeof pin.schemaSet, "object");
-  assert.equal(pin.schemaSet.length, 14);
+  assert.equal(pin.schemaSet.length, 20);
 });
 
 test("cross-repo: committed artifact carries provenance and matches its pin", () => {
@@ -167,7 +183,7 @@ test("cross-repo: committed artifact carries provenance and matches its pin", ()
   const producerCommit = provenance["producerCommit"];
   assert.equal(typeof producerCommit, "string");
   assert.ok((producerCommit as string).length >= 7);
-  assert.equal(provenance["contractVersion"], "0.1.1");
+  assert.equal(provenance["contractVersion"], "0.2.0");
   const pin = readContractPin();
   assert.equal(pin.manifestSha256, provenance["manifestSha256"]);
   const manifest = readJson("manifest.json");

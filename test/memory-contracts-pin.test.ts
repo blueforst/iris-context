@@ -3,7 +3,7 @@
  *
  * 契约方向（AGENTS.md 权威来源）：
  *  - iris-memory 发布版本化契约工件（fixtures/memory-contracts-artifact/
- *    iris-memory-contracts-0.1.1/），iris-agent 固定精确 version 并消费之，
+ *    iris-memory-contracts-0.2.0/），iris-agent 固定精确 version 并消费之，
  *    绝不手写复制跨项目 DTO；
  *  - Historian 是 Envelope 的生产方（authoritative publication_outbox），
  *    iris-memory 是 Consumer。
@@ -40,7 +40,7 @@ const ARTIFACT_ROOT = join(
   "..",
   "fixtures",
   "memory-contracts-artifact",
-  "iris-memory-contracts-0.1.1",
+  "iris-memory-contracts-0.2.0",
 );
 const PRODUCTION_LOCK = join(
   import.meta.dirname,
@@ -235,7 +235,7 @@ test("R3-P2: production-lock memoryContracts pin matches the artifact manifest h
   );
   assert.equal(lock.memoryContracts.package, "iris-memory-contracts");
   assert.equal(lock.memoryContracts.version, manifest["version"]);
-  assert.equal(lock.memoryContracts.version, "0.1.1");
+  assert.equal(lock.memoryContracts.version, "0.2.0");
 });
 
 test("R3-P2: historian-publication-v1 schema is pinned in the schema set", () => {
@@ -325,8 +325,8 @@ test("R3-P2: outbox delivery keys match the contract idempotencyKey pattern", as
     // outbox payloadHash = 64 位小写十六进制（同时满足 idempotencyKey 字符集）。
     assert.equal(produced.outbox.payloadHash, produced.publication.outputHash);
     assert.match(produced.outbox.payloadHash, /^[a-f0-9]{64}$/);
-    // 固定版本匹配：contractVersion 使用被钉的 0.1.1（semver 三字段）。
-    assert.match("0.1.1", /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/);
+    // 固定版本匹配：contractVersion 使用被钉的 0.2.0（semver 三字段）。
+    assert.match("0.2.0", /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/);
   } finally {
     produced.store.close();
     rmSync(produced.dir, { recursive: true, force: true });

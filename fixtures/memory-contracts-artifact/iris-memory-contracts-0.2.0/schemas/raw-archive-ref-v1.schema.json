@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:raw-archive-ref:v1",
+  "title": "RawArchiveRefV1",
+  "description": "Opaque Agent-owned locator into the Pi Session raw archive. Memory MUST NOT dereference it; it is attribution only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scheme", "locator"],
+  "properties": {
+    "scheme": {
+      "type": "string",
+      "const": "pi-session-entry"
+    },
+    "locator": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9_./:-]{1,512}$"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "duplicate-replay-receipt-v1",
+  "status": "duplicate_replay",
+  "receiptId": "22222222-2222-4222-8222-222222222222",
+  "publicationId": "11111111-1111-4111-8111-111111111111",
+  "canonicalPayloadHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "contractVersion": "0.1.0"
+}

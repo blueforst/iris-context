@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:acceptance-receipt:v1",
+  "title": "AcceptanceReceiptV1",
+  "description": "Deterministic durable receipt for an accepted publication.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "receiptId",
+    "publicationId",
+    "canonicalPayloadHash",
+    "contractVersion",
+    "acceptedAt"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "acceptance-receipt-v1"
+    },
+    "status": {
+      "const": "accepted"
+    },
+    "receiptId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "publicationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "canonicalPayloadHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "contractVersion": {
+      "type": "string"
+    },
+    "acceptedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

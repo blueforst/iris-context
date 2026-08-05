@@ -12,7 +12,7 @@ import {
 
 test("memory contract pin is exact and does not copy memory DTOs", () => {
   assert.equal(MEMORY_CONTRACTS_PIN.package, "iris-memory-contracts");
-  assert.equal(MEMORY_CONTRACTS_PIN.version, "0.1.1");
+  assert.equal(MEMORY_CONTRACTS_PIN.version, "0.2.0");
   assert.ok(memoryContractsVersion().includes("artifact_ready_pending_release"));
   const contractFiles = readdirSync(join(process.cwd(), "src", "contracts"));
   assert.ok(
@@ -25,31 +25,37 @@ test("memory contract pin is exact and does not copy memory DTOs", () => {
   );
 });
 
-test("memory contract pin schema set matches the published 0.1.1 manifest", () => {
+test("memory contract pin schema set matches the published 0.2.0 manifest", () => {
   // The pin declares a manifestSha256 anchor (SHA-256 of the published
-  // iris-memory v0.1.1 contracts/assets/manifest.json) plus the authoritative
+  // iris-memory v0.2.0 contracts/assets/manifest.json) plus the authoritative
   // schema list. The expected set below is the schema surface published by
   // that manifest (verified by re-running `sha256sum manifest.json` in the
   // iris-memory repo); a drift on either side (hash or list) fails here, so
   // the two cannot silently diverge from each other.
   assert.equal(
     MEMORY_CONTRACTS_PIN.manifestSha256,
-    "2cb22deb5efded5a112dbb38c19506e6185ad328a973f7a96d9e66faf59a761b",
-    "manifestSha256 must equal the published iris-memory v0.1.1 artifact manifest hash",
+    "f0f3c0969ad7f0dfc18e551ffbf6c96ff97adc105d00b3e38b7b5496d34e292d",
+    "manifestSha256 must equal the published iris-memory v0.2.0 artifact manifest hash",
   );
   const publishedSchemas = [
     "acceptance-receipt-v1.schema.json",
     "capability-handshake-v2.schema.json",
+    "context-range-v1.schema.json",
     "duplicate-replay-receipt-v1.schema.json",
+    "evidence-basis-ref-v1.schema.json",
     "expansion-request-v1.schema.json",
     "expansion-response-v1.schema.json",
     "health-response-v1.schema.json",
     "historian-publication-v1.schema.json",
+    "historian-publication-v2.schema.json",
     "idempotency-conflict-error-v1.schema.json",
     "memory-recall-card-v1.schema.json",
-    "publication-acceptance-request-v1.schema.json",
-    "recall-request-v1.schema.json",
     "not-implemented-error-v1.schema.json",
+    "publication-acceptance-request-v1.schema.json",
+    "publication-acceptance-request-v2.schema.json",
+    "raw-archive-ref-v1.schema.json",
+    "recall-request-v1.schema.json",
+    "semantic-derivation-refs-v1.schema.json",
     "sequence-conflict-error-v1.schema.json",
     "unsupported-version-error-v1.schema.json",
   ];
@@ -62,8 +68,8 @@ test("memory contract pin schema set matches the published 0.1.1 manifest", () =
   assert.equal(new Set(MEMORY_CONTRACTS_PIN.schemas).size, publishedSchemas.length);
 });
 
-test("memory contract pin version is a strict 0.1.x semver", () => {
-  assert.match(MEMORY_CONTRACTS_PIN.version, /^0\.1\.\d+$/);
+test("memory contract pin version is a strict 0.2.x semver", () => {
+  assert.match(MEMORY_CONTRACTS_PIN.version, /^0\.2\.\d+$/);
   assert.equal(MEMORY_CONTRACTS_PIN.major, 0);
 });
 

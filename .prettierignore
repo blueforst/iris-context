@@ -8,6 +8,11 @@ evidence/context-golden/
 # Notion spec snapshots are raw dumps of the authoritative source.
 evidence/notion-round4/
 
+# Cross-repo memory contract artifact: byte-reproducible from the producer
+# repo (iris_memory). Any reformat changes the manifest hashes and breaks
+# the artifact-verification gate — never prettier these files.
+fixtures/memory-contracts-artifact/
+
 # Subagent review files are written by reviewers, not by the repo formatter.
 evidence/reviews/
 

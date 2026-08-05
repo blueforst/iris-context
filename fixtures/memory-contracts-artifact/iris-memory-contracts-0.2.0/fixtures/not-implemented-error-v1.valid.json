@@ -1,0 +1,7 @@
+{
+  "schemaVersion": "not-implemented-error-v1",
+  "error": "not_implemented",
+  "code": "not_implemented",
+  "capability": "recall",
+  "message": "recall is not implemented in the R0 baseline"
+}
