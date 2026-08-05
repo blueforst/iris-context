@@ -510,6 +510,23 @@ export class ContextStore implements ContextUnitStorePort {
     const limit = options.limit ?? rows.length;
     return rows.slice(0, limit).map((row) => this.rowToUnit(row));
   }
+  /**
+   * R3 (anti-echo)：按 lineage 内闭区间 [fromContextSeq, toContextSeq] 读取
+   * 全部单元（含 reference_only / exclude —— Historian 需要完整分类视图）。
+   * 供 ContextHistoryReadPort.listUnitsForHistorian 消费（values-only）。
+   */
+  listUnitsByLineageRange(
+    lineageId: string,
+    fromContextSeq: number,
+    toContextSeq: number,
+  ): ContextMessageUnit[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM context_units WHERE context_lineage_id = ? AND context_seq BETWEEN ? AND ? ORDER BY context_seq",
+      )
+      .all(lineageId, fromContextSeq, toContextSeq) as unknown as UnitRow[];
+    return rows.map((row) => this.rowToUnit(row));
+  }
 
   /** R2-P3：该 session 的 context_units 行数（软/硬 cap 判定基准，含 excluded）。 */
   private countUnits(runtimeSessionId: string): number {

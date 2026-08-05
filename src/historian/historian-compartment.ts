@@ -11,6 +11,11 @@
 import { createHash } from "node:crypto";
 
 import type { HistorianBoundarySnapshot, SequencedSessionEntry } from "../contracts/historian.js";
+import {
+  classifyEvidenceBasis,
+  type EvidenceBasisRef,
+  type HistorianUnitView,
+} from "./anti-echo.js";
 import type { ProvisionalUnit, HistorianAnalysisView } from "./historian-analysis.js";
 
 /**
@@ -95,6 +100,13 @@ export interface EvidenceSet {
     role: "user" | "assistant" | "toolResult" | "custom" | "other";
     payload: unknown;
   }>;
+  /**
+   * R3 (anti-echo)：仅 disposition=include 且非 derived-only 的 Context
+   * 单元作为新 Evidence 的 basis。缺省（旧路径未提供单元视图）为 undefined。
+   */
+  evidenceBasis?: EvidenceBasisRef[];
+  /** R3 (anti-echo)：本 evidence 是否 derived-only（无任何新 basis）。 */
+  derivedOnly?: boolean;
 }
 
 /** Attribution manifest for a compartment (roles distinguished). */
@@ -115,6 +127,11 @@ export interface BuildCompartmentInput {
   /** The safe commit range (from the B3 validation outcome). */
   commitThroughEntrySeq: number;
   estimateTokens?: (text: string) => number;
+  /**
+   * R3 (anti-echo)：本批 Context 单元窄视图（values-only）。提供时在
+   * EvidenceSet 上计算 evidenceBasis/derivedOnly；缺省保持旧行为。
+   */
+  unitViews?: HistorianUnitView[];
 }
 
 export interface BuiltCompartment {
@@ -230,6 +247,17 @@ export function buildCompartment(input: BuildCompartmentInput): BuiltCompartment
     attributions: [...attributions.entries()].map(([role, entryIds]) => ({ role, entryIds })),
   };
 
+  // R3 (anti-echo)：当调用方提供 Context 单元视图时，计算 evidenceBasis
+  // 与 derivedOnly（仅 include 且非 derived-only 的单元成为新 Evidence
+  // basis；reference_only/exclude/回显不进入）。缺省 → 旧行为不变。
+  let evidenceBasis: EvidenceBasisRef[] | undefined;
+  let derivedOnly: boolean | undefined;
+  if (input.unitViews !== undefined && input.unitViews.length > 0) {
+    const classified = classifyEvidenceBasis(input.unitViews);
+    evidenceBasis = classified.evidenceBasis;
+    derivedOnly = classified.derivedOnly;
+  }
+
   const evidence: EvidenceSet = {
     evidenceSetId: `evidence-${runtimeSessionId}-${compartmentSequence}`,
     runtimeSessionId,
@@ -238,6 +266,8 @@ export function buildCompartment(input: BuildCompartmentInput): BuiltCompartment
     endEntrySeq,
     sourceRangeHash,
     entries: rawEntries,
+    ...(evidenceBasis !== undefined ? { evidenceBasis } : {}),
+    ...(derivedOnly !== undefined ? { derivedOnly } : {}),
   };
 
   // One segment PER attribution role across the compartment range (content

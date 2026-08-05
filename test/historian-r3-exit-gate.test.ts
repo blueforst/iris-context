@@ -83,6 +83,7 @@ function lineagePort(representedThroughEntrySeq: number | null): ContextHistoryR
       lineageStatus: "ok",
       providerProfileId: "opencode/deepseek-v4-flash",
     }),
+    listUnitsForHistorian: () => [],
   };
 }
 
@@ -90,6 +91,9 @@ function lineagePort(representedThroughEntrySeq: number | null): ContextHistoryR
 function noLineageThrowingPort(): ContextHistoryReadPort {
   return {
     getMaterializedBoundary: () => {
+      throw new Error("context history read port: no lineage for session (fail closed)");
+    },
+    listUnitsForHistorian: () => {
       throw new Error("context history read port: no lineage for session (fail closed)");
     },
   };

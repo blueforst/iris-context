@@ -25,6 +25,7 @@ import type {
 import type { OutboxRow, PublicationRecord } from "./historian-publication.js";
 import type { ContinuitySnapshot } from "./historian-continuity.js";
 import type { MemoryAssessmentDelta } from "./historian-assessment.js";
+import type { CompartmentReleaseView } from "./hot-row-reclaim.js";
 
 /**
  * R3 HistorianStore — the Historian's OWN durable store (historian.db,
@@ -476,6 +477,155 @@ export class HistorianStore {
         )
         .get() as { n: number }
     ).n;
+  }
+
+  // ---- R3 hot-row reclaim (0004) -------------------------------------------
+
+  /** 记录 compartment 释放条件(upsert;ACK 只追加不回退)。 */
+  upsertCompartmentRelease(view: CompartmentReleaseView): void {
+    this.db
+      .prepare(
+        `INSERT INTO compartment_release_state
+          (compartment_id, runtime_session_id, compartment_sequence, start_entry_seq,
+           end_entry_seq, publication_sequence, context_acked_at, bust_represented_at,
+           memory_durable_ack_at, memory_receipt_hash, shard_id, shard_verified_at,
+           reclaimed_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(compartment_id) DO UPDATE SET
+           context_acked_at = COALESCE(excluded.context_acked_at, compartment_release_state.context_acked_at),
+           bust_represented_at = COALESCE(excluded.bust_represented_at, compartment_release_state.bust_represented_at),
+           memory_durable_ack_at = COALESCE(excluded.memory_durable_ack_at, compartment_release_state.memory_durable_ack_at),
+           memory_receipt_hash = COALESCE(excluded.memory_receipt_hash, compartment_release_state.memory_receipt_hash),
+           shard_id = COALESCE(excluded.shard_id, compartment_release_state.shard_id),
+           shard_verified_at = COALESCE(excluded.shard_verified_at, compartment_release_state.shard_verified_at),
+           reclaimed_at = COALESCE(excluded.reclaimed_at, compartment_release_state.reclaimed_at)`,
+      )
+      .run(
+        view.compartmentId,
+        view.runtimeSessionId,
+        view.compartmentSequence,
+        view.startEntrySeq,
+        view.endEntrySeq,
+        view.publicationSequence,
+        view.contextAckedAt,
+        view.bustRepresentedAt,
+        view.memoryDurableAckAt,
+        view.memoryReceiptHash,
+        view.shardId,
+        view.shardVerifiedAt,
+        view.reclaimedAt,
+        new Date(this.now()).toISOString(),
+      );
+  }
+
+  /** 列出某 session 未释放的 compartment 释放条件视图(升序)。 */
+  listCompartmentReleaseViews(runtimeSessionId: string): CompartmentReleaseView[] {
+    const rows = this.db
+      .prepare(
+        `SELECT compartment_id, runtime_session_id, compartment_sequence, start_entry_seq,
+                end_entry_seq, publication_sequence, context_acked_at, bust_represented_at,
+                memory_durable_ack_at, memory_receipt_hash, shard_id, shard_verified_at,
+                reclaimed_at
+         FROM compartment_release_state
+         WHERE runtime_session_id = ? AND reclaimed_at IS NULL
+         ORDER BY compartment_sequence`,
+      )
+      .all(runtimeSessionId) as unknown as Array<{
+      compartment_id: string;
+      runtime_session_id: string;
+      compartment_sequence: number;
+      start_entry_seq: number;
+      end_entry_seq: number;
+      publication_sequence: number | null;
+      context_acked_at: string | null;
+      bust_represented_at: string | null;
+      memory_durable_ack_at: string | null;
+      memory_receipt_hash: string | null;
+      shard_id: string | null;
+      shard_verified_at: string | null;
+      reclaimed_at: string | null;
+    }>;
+    return rows.map((row) => ({
+      compartmentId: row.compartment_id,
+      runtimeSessionId: row.runtime_session_id,
+      compartmentSequence: row.compartment_sequence,
+      startEntrySeq: row.start_entry_seq,
+      endEntrySeq: row.end_entry_seq,
+      publicationSequence: row.publication_sequence,
+      contextAckedAt: row.context_acked_at,
+      bustRepresentedAt: row.bust_represented_at,
+      memoryDurableAckAt: row.memory_durable_ack_at,
+      memoryReceiptHash: row.memory_receipt_hash,
+      shardId: row.shard_id,
+      shardVerifiedAt: row.shard_verified_at,
+      reclaimedAt: row.reclaimed_at,
+    }));
+  }
+
+  /** 记录已 seal 的 archive shard(catalog,不可变)。 */
+  insertArchiveShard(shard: {
+    shardId: string;
+    runtimeSessionId: string;
+    firstCompartmentSequence: number;
+    lastCompartmentSequence: number;
+    shardPath: string;
+    sha256: string;
+    rowCount: number;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO archive_shards
+          (shard_id, runtime_session_id, first_compartment_sequence, last_compartment_sequence,
+           shard_path, sha256, row_count, sealed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        shard.shardId,
+        shard.runtimeSessionId,
+        shard.firstCompartmentSequence,
+        shard.lastCompartmentSequence,
+        shard.shardPath,
+        shard.sha256,
+        shard.rowCount,
+        new Date(this.now()).toISOString(),
+      );
+  }
+
+  /** 标记 compartment 已释放(hot rows 已删除;只留 catalog 痕迹)。 */
+  markReclaimed(compartmentId: string, at: string): void {
+    this.db
+      .prepare("UPDATE compartment_release_state SET reclaimed_at = ? WHERE compartment_id = ?")
+      .run(at, compartmentId);
+  }
+
+  /** 物理删除已释放 compartment 的 hot rows(原子事务内调用)。 */
+  deleteReclaimedHotRows(runtimeSessionId: string, compartmentId: string): void {
+    this.db
+      .prepare("DELETE FROM compartments WHERE compartment_id = ? AND runtime_session_id = ?")
+      .run(compartmentId, runtimeSessionId);
+    this.db.prepare("DELETE FROM segments WHERE compartment_id = ?").run(compartmentId);
+    this.db.prepare("DELETE FROM evidence_sets WHERE compartment_id = ?").run(compartmentId);
+    this.db
+      .prepare("DELETE FROM attribution_manifests WHERE attribution_manifest_id = ?")
+      .run(`am-${compartmentId.replace("compartment-", "")}`);
+  }
+
+  /** 已释放 compartment 数(审计)。 */
+  countReclaimed(): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS c FROM compartment_release_state WHERE reclaimed_at IS NOT NULL")
+      .get() as { c: number };
+    return row.c;
+  }
+
+  /** active hot compartments 数(平台期审计)。 */
+  countActiveCompartments(runtimeSessionId: string): number {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS c FROM compartment_release_state WHERE runtime_session_id = ? AND reclaimed_at IS NULL",
+      )
+      .get(runtimeSessionId) as { c: number };
+    return row.c;
   }
 
   commit(): void {

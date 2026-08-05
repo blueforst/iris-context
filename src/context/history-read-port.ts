@@ -26,6 +26,8 @@
  *    映射（与 SQL 实现语义一致，可单测）。
  */
 
+import type { ContextMessageUnit, ContextUnitType } from "../contracts/context-units.js";
+import type { RuntimeEventDerivationRefs } from "../contracts/runtime-events.js";
 import type { ContextLineage, ContextStore } from "./context-store.js";
 
 /** Context lineage 物化状态（与 context_lineages.emergency_state 语义同源）。 */
@@ -54,6 +56,27 @@ export interface MaterializedLineageBoundary {
  */
 export interface ContextHistoryReadPort {
   getMaterializedBoundary(runtimeSessionId: string): MaterializedLineageBoundary;
+
+  /**
+   * R3 (anti-echo)：读取 lineage 内 [fromContextSeq, toContextSeq] 闭区间的
+   * ContextMessageUnit 窄视图（values-only：contextSeq / disposition /
+   * derivationRefs / contentHash / runtimeEventId / unitType）。供 Historian
+   * 在构建 Evidence 时做 anti-echo 分类；不泄漏 context.db 句柄。
+   * 越界（toContextSeq 超过当前物化边界）→ 由调用方负责（只读语义）。
+   */
+  listUnitsForHistorian(
+    lineageId: string,
+    fromContextSeq: number,
+    toContextSeq: number,
+  ): Array<{
+    contextUnitId: string;
+    contextSeq: number;
+    runtimeEventId: string;
+    unitType: ContextUnitType;
+    disposition: ContextMessageUnit["disposition"];
+    contentHash: string;
+    derivationRefs: RuntimeEventDerivationRefs;
+  }>;
 }
 
 /**
@@ -120,6 +143,18 @@ export function createContextHistoryReadPort(store: ContextStore): ContextHistor
         lineageStatus: deriveLineageStatus(lineage),
         providerProfileId: lineage.providerProfileId,
       };
+    },
+    listUnitsForHistorian(lineageId, fromContextSeq, toContextSeq) {
+      // 只读 lineage 内闭区间的单元窄视图;按 contextSeq 升序返回。
+      return store.listUnitsByLineageRange(lineageId, fromContextSeq, toContextSeq).map((unit) => ({
+        contextUnitId: unit.unitId,
+        contextSeq: unit.contextSeq,
+        runtimeEventId: unit.runtimeEventId ?? unit.sourceEventId,
+        unitType: unit.unitType,
+        disposition: unit.disposition,
+        contentHash: unit.contentHash,
+        derivationRefs: unit.derivationRefs,
+      }));
     },
   };
 }
