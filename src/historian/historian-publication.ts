@@ -320,10 +320,19 @@ export class PublicationService {
       .run(now, input.receiptHash, now, input.publicationId);
   }
 
-  /** Mark a claimed publication failed (retry_wait up to attempts, then
-   * quarantined). */
+  /**
+   * Mark a claimed publication failed (retry_wait up to attempts, then
+   * quarantined).
+   *
+   * R3-P3 修复（R3-P0 oracle 审查标记）：retry_wait 必须携带未来退避 lease
+   * （now + exponential backoff(attempt)），而不是 NULL。若为 NULL，
+   * claimBatch 的 `claim_leased_until IS NULL` 分支会立即重新认领该行，
+   * 产生无退避热循环。quarantined 不可认领（state 不在 claimBatch 候选），
+   * lease 置 NULL 以便审计读取干净。
+   */
   markFailed(input: { publicationId: string; errorCode: string; maxAttempts?: number }): void {
-    const now = new Date(this.nowMs()).toISOString();
+    const nowMs = this.nowMs();
+    const now = new Date(nowMs).toISOString();
     const row = this.store
       .raw()
       .prepare("SELECT attempt_count FROM publication_outbox WHERE publication_id = ?")
@@ -331,18 +340,28 @@ export class PublicationService {
     const attempts = (row?.attempt_count ?? 0) + 1;
     const maxAttempts = input.maxAttempts ?? 8;
     const nextState = attempts >= maxAttempts ? "quarantined" : "retry_wait";
+    // retry_wait → 未来退避 lease；quarantined → NULL（不可认领）。
+    const claimLeasedUntil =
+      nextState === "retry_wait"
+        ? new Date(nowMs + this.retryBackoffMs(attempts)).toISOString()
+        : null;
     this.store
       .raw()
       .prepare(
-        "UPDATE publication_outbox SET state = ?, attempt_count = ?, last_error_code = ?, claim_leased_until = NULL, updated_at = ? WHERE publication_id = ?",
+        "UPDATE publication_outbox SET state = ?, attempt_count = ?, last_error_code = ?, claim_leased_until = ?, updated_at = ? WHERE publication_id = ?",
       )
-      .run(nextState, attempts, input.errorCode, now, input.publicationId);
+      .run(nextState, attempts, input.errorCode, claimLeasedUntil, now, input.publicationId);
     this.store
       .raw()
       .prepare(
         "UPDATE publications SET state = ?, attempt_count = ?, updated_at = ? WHERE publication_id = ?",
       )
       .run(nextState, attempts, now, input.publicationId);
+  }
+
+  /** 指数退避（毫秒）：attempt 1 → 1s，attempt 2 → 2s … 上限 5 分钟。 */
+  private retryBackoffMs(attempt: number): number {
+    return Math.min(1_000 * 2 ** (attempt - 1), 5 * 60_000);
   }
 }
 

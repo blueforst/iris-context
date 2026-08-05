@@ -118,6 +118,22 @@ export class HistorianQueue {
     const existing = this.pending.find((j) => j.runtimeSessionId === job.runtimeSessionId);
     if (existing !== undefined) {
       // Single-flight: refresh the boundary with a fresh run identity.
+      // B1 复审修复（终结性任务胜出）：merge 的优先级必须保证终结性任务
+      // （normal=wrapup / low=恢复，跑 wrapup 路径 closing→closed）在并发
+      // 交错下胜出——无论它是已有任务还是新任务。若直接 `existing.priority =
+      // job.priority`，并发 wrapup + incremental 时（incremental 的守卫读取
+      // 早于 wrapup 持久化 closing、其 enqueue 晚于 wrapup 入队），增量会把
+      // pending wrapup 升级为 highest → worker 走 runner 路径提交 cursor、
+      // wrapup 任务丢失 → 会话卡死 closing（recover 只恢复 closed/closed_
+      // incomplete）且无 ContinuitySnapshot 的 wedge 复发。
+      const isFinalizing = (p: HistorianJobPriority): boolean => p === "normal" || p === "low";
+      if (isFinalizing(existing.priority) || isFinalizing(job.priority)) {
+        // 任一是终结性任务 → 合并结果必须是终结性任务（取已有的，否则取新的）。
+        existing.priority = isFinalizing(existing.priority) ? existing.priority : job.priority;
+      } else {
+        // 两者均非终结性（highest/manual，都走 runner 路径）→ 采用新优先级。
+        existing.priority = job.priority;
+      }
       existing.boundary = job.boundary;
       existing.sessionState = job.sessionState;
       return true;
