@@ -1,5 +1,7 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 
 import assert from "node:assert/strict";
@@ -14,6 +16,15 @@ import { readContractPin } from "../src/contracts/memory-pin.js";
  * three-project boundary: Pi (release packages + controlled fork baseline),
  * Magic Context (OpenCode released authority), memory contracts artifact and
  * the Graphiti/Neo4j candidate lock owned by iris_memory.
+ *
+ * Since iris_agent#41 the Pi pin is single-source and cross-validated:
+ *   - src/contracts/pins/production-lock.json is the only place a Pi SHA lives
+ *     in this repository (CI derives its checkout ref from it);
+ *   - the gate proves the adjacent ../pi checkout is the pinned commit/tree;
+ *   - the gate verifies ../pi's own docs/iris-fork/production-lock.json
+ *     acceptedRuntime identity agrees with this repository's pin;
+ *   - CI checkout ref drift, stale pins, wrong remotes, wrong commits/trees
+ *     and tampered manifests fail closed.
  */
 
 const SHA40 = /^[0-9a-f]{40}$/;
@@ -34,9 +45,15 @@ function walkStrings(value: unknown, path: string, out: string[]): void {
   }
 }
 
-test("r0: production lock schemaVersion is 1 and documented", () => {
+function git(dir: string, args: string[]): string {
+  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim();
+}
+
+const PI_DIR = resolve(import.meta.dirname, "..", "..", "pi");
+
+test("r0: production lock schemaVersion is 2 and documented", () => {
   const lock = readProductionLock();
-  assert.equal(lock.schemaVersion, 1);
+  assert.equal(lock.schemaVersion, 2);
   assert.match(lock.documentedAt, /^\d{4}-\d{2}-\d{2}$/);
 });
 
@@ -51,6 +68,10 @@ test("r0: production lock contains no TBD/TODO/unknown placeholder", () => {
 test("r0: all pinned SHAs are full-length hex", () => {
   const lock = readProductionLock();
   assert.match(lock.pi.fork.baselineCommit, SHA40);
+  assert.match(lock.pi.fork.seamCommit, SHA40);
+  assert.match(lock.pi.fork.seamTree, SHA40);
+  assert.match(lock.pi.fork.acceptedRuntimeCommit, SHA40);
+  assert.match(lock.pi.fork.acceptedRuntimeTree, SHA40);
   assert.match(lock.pi.fork.upstreamBaseCommit, SHA40);
   assert.match(lock.pi.fork.upstreamAuditBaselineCommit, SHA40);
   assert.match(lock.magicContext.commit, SHA40);
@@ -97,6 +118,145 @@ test("r0: fork seam commit is a full SHA and adoption status is local file link"
   assert.match(lock.pi.fork.seamCommit, SHA40);
   assert.equal(lock.pi.currentDependencySource, "file_link_adjacent_fork_checkout");
   assert.equal(lock.pi.fork.adoptionStatus, "file_link_local_development");
+});
+
+// --- iris_agent#41 cross-repository production lock gate -------------------
+
+test("r41: adjacent ../pi is a real git repository (not an arbitrary directory)", () => {
+  assert.ok(
+    (() => {
+      try {
+        git(PI_DIR, ["rev-parse", "--git-dir"]);
+        return true;
+      } catch {
+        return false;
+      }
+    })(),
+    `expected a real git repository at ${PI_DIR}`,
+  );
+});
+
+test("r41: adjacent ../pi remote identity points at the expected fork family", () => {
+  const remotes = git(PI_DIR, ["remote", "-v"]);
+  assert.match(
+    remotes,
+    /blueforst\/pi|ceyirelehe47\/pi/,
+    "origin/upstream must be the pi fork family",
+  );
+});
+
+test("r41: adjacent ../pi HEAD equals the pinned seamCommit and its tree equals seamTree", () => {
+  const lock = readProductionLock();
+  const head = git(PI_DIR, ["rev-parse", "HEAD"]);
+  assert.equal(
+    head,
+    lock.pi.fork.seamCommit,
+    `../pi HEAD must be seamCommit (${lock.pi.fork.seamCommit})`,
+  );
+  const tree = git(PI_DIR, ["rev-parse", "HEAD^{tree}"]);
+  assert.equal(
+    tree,
+    lock.pi.fork.seamTree,
+    `../pi HEAD tree must be seamTree (${lock.pi.fork.seamTree})`,
+  );
+});
+
+test("r41: Pi authoritative lock acceptedRuntime agrees with this repository pin", () => {
+  const lock = readProductionLock();
+  const piLock = JSON.parse(
+    readFileSync(resolve(PI_DIR, "docs", "iris-fork", "production-lock.json"), "utf8"),
+  ) as {
+    acceptedRuntime?: {
+      repository: string;
+      commit: string;
+      tree: string;
+    };
+  };
+  assert.ok(
+    piLock.acceptedRuntime,
+    "../pi docs/iris-fork/production-lock.json must carry acceptedRuntime",
+  );
+  assert.equal(piLock.acceptedRuntime.repository, "blueforst/pi");
+  assert.equal(piLock.acceptedRuntime.commit, lock.pi.fork.acceptedRuntimeCommit);
+  assert.equal(piLock.acceptedRuntime.tree, lock.pi.fork.acceptedRuntimeTree);
+  // The accepted runtime commit must actually exist in the adjacent checkout.
+  assert.equal(
+    git(PI_DIR, ["cat-file", "-e", `${lock.pi.fork.acceptedRuntimeCommit}^{commit}`]),
+    "",
+    `acceptedRuntimeCommit ${lock.pi.fork.acceptedRuntimeCommit} must exist in ../pi`,
+  );
+  // And its tree must match what the Pi lock records.
+  assert.equal(
+    git(PI_DIR, ["rev-parse", `${lock.pi.fork.acceptedRuntimeCommit}^{tree}`]),
+    lock.pi.fork.acceptedRuntimeTree,
+  );
+});
+
+test("r41: CI checkout ref is derived from the pin, not a duplicate hardcoded SHA", () => {
+  const ci = readFileSync(
+    resolve(import.meta.dirname, "..", ".github", "workflows", "ci.yml"),
+    "utf8",
+  );
+  // The workflow must read the ref from the pin (read-pi-pin.mjs), and must
+  // not contain any hardcoded 40-hex Pi SHA.
+  assert.match(ci, /read-pi-pin\.mjs/, "ci.yml must derive the Pi ref via scripts/read-pi-pin.mjs");
+  const hardcoded = [...ci.matchAll(/ref:\s*([0-9a-f]{40})/g)].map((m) => m[1]);
+  assert.deepEqual(
+    hardcoded,
+    [],
+    "ci.yml must not hardcode a Pi SHA in a checkout ref (derive from the pin instead)",
+  );
+  // The pin reader must output exactly the pinned seamCommit.
+  const output = execFileSync(
+    process.execPath,
+    [resolve(import.meta.dirname, "..", "scripts", "read-pi-pin.mjs")],
+    {
+      encoding: "utf8",
+    },
+  ).trim();
+  assert.match(output, SHA40);
+  assert.equal(output, readProductionLock().pi.fork.seamCommit);
+  // --tree mode outputs the pinned seamTree.
+  const treeOut = execFileSync(
+    process.execPath,
+    [resolve(import.meta.dirname, "..", "scripts", "read-pi-pin.mjs"), "--tree"],
+    { encoding: "utf8" },
+  ).trim();
+  assert.equal(treeOut, readProductionLock().pi.fork.seamTree);
+});
+
+// --- failure modes (fail-closed) -------------------------------------------
+
+test("r41: a tampered seamCommit fails the pin reader (fail-closed)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "iris-pin-tamper-"));
+  const tampered = join(dir, "production-lock.json");
+  const lock = readProductionLock();
+  const original = lock.pi.fork.seamCommit;
+  writeFileSync(tampered, JSON.stringify(lock).replace(original, "not-a-sha"));
+  assert.throws(
+    () =>
+      execFileSync(
+        process.execPath,
+        [resolve(import.meta.dirname, "..", "scripts", "read-pi-pin.mjs"), "--pin", tampered],
+        {
+          encoding: "utf8",
+        },
+      ),
+    /invalid seamCommit/,
+  );
+});
+
+test("r41: CI ref drift is caught by the gate (workflow ref must come from pin)", () => {
+  const ci = readFileSync(
+    resolve(import.meta.dirname, "..", ".github", "workflows", "ci.yml"),
+    "utf8",
+  );
+  // A future edit that reintroduces a literal SHA as checkout ref fails here.
+  assert.doesNotMatch(
+    ci,
+    /ref:\s*[0-9a-f]{40}/,
+    "CI must derive the Pi ref from the pin, not hardcode it",
+  );
 });
 
 test("r0: memory contract pin and production lock agree on the artifact", () => {

@@ -14,15 +14,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # R1-P1d (fork file: adoption): iris_agent consumes the adjacent
-      # blueforst/pi checkout (production lock seamCommit). actions/checkout
-      # refuses paths outside the workspace, so check out inside then move to
-      # the adjacent ../pi location the file: deps expect.
+      # Pi checkout ref is derived from the production lock (single source of
+      # truth, iris_agent#41): scripts/read-pi-pin.mjs prints the pinned
+      # seamCommit and the workflow uses it as the checkout ref. The lock
+      # gate below (npm run check -> test/production-lock.test.ts) then
+      # verifies the checked-out ../pi commit/tree against the same pin, so a
+      # stale pin, wrong remote, wrong commit/tree, or tampered manifest fails
+      # closed. No SHA is duplicated in this workflow.
+      - name: Read Pi pin from production lock
+        id: pi-pin
+        run: echo "PI_REF=$(node scripts/read-pi-pin.mjs)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
           repository: blueforst/pi
           path: pi-fork
-          ref: e18f7dd1457ea4a5987b4d44d0c41e0dfa48cedd
+          ref: ${{ steps.pi-pin.outputs.PI_REF }}
       - name: Move Pi fork checkout to adjacent path
         run: mv pi-fork ../pi
       - uses: actions/setup-node@v4
