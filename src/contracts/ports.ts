@@ -1,10 +1,5 @@
 import type { AgentRuntimePhase } from "./runtime-ports.js";
 import type { AgentInput } from "./origin.js";
-import type {
-  ContextTransformResult,
-  PreparedContextSources,
-  TransformMessagesInput,
-} from "./context.js";
 import type { ToolDescriptor } from "./tool.js";
 
 export type AgentRuntimeEvent =
@@ -19,15 +14,6 @@ export interface AgentRuntimePort {
   prompt(input: AgentInput): AsyncIterable<AgentRuntimeEvent>;
   abort(invocationId: string, reason?: string): Promise<void>;
   getPhase(): AgentRuntimePhase;
-}
-
-export interface ContextRuntimePort {
-  prepareInvocationSources(input: {
-    inputId: string;
-    runtimeSessionId: string;
-  }): Promise<PreparedContextSources>;
-  transformMessages(input: TransformMessagesInput): Promise<ContextTransformResult>;
-  releaseInvocation(invocationId: string): Promise<void>;
 }
 
 export interface HistorianPublicationOutboxPort {

@@ -37,6 +37,7 @@ function makeLineage(overrides: Partial<ContextLineage> = {}): ContextLineage {
     cachedM0ProviderProfileId: "mock",
     lastResponseTime: 500,
     representedThroughEntrySeq: 10,
+    representedThroughContextSeq: 10,
     protectedTailStartEntrySeq: 5,
     lastSafeUserAnchorEntrySeq: 3,
     clearedReasoningThroughTag: 0,

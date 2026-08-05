@@ -22,7 +22,7 @@ jobs:
         with:
           repository: blueforst/pi
           path: pi-fork
-          ref: b7c5f40c3040f179fe644e0ffad1970a14563b15
+          ref: e18f7dd1457ea4a5987b4d44d0c41e0dfa48cedd
       - name: Move Pi fork checkout to adjacent path
         run: mv pi-fork ../pi
       - uses: actions/setup-node@v4
