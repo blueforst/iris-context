@@ -82,6 +82,13 @@ export interface WrapupInput {
   eligibleEntries: SequencedSessionEntry[];
   analysis: HistorianAnalysisView;
   nowMs?: () => number;
+  /**
+   * R3-P4：为 false 时只写不提交——调用方拥有事务（v13 最终 wrapup 事务把
+   * session_state + continuity_snapshot + 最终 publication/outbox/assessment
+   * 合并到 ONE 事务；任何一步失败整事务回滚）。缺省 true = 独立事务
+   * （R3-P0/B6 行为不变）。
+   */
+  commit?: boolean;
 }
 
 export interface WrapupResult {
@@ -193,9 +200,9 @@ export function runWrapup(input: WrapupInput): WrapupResult {
 
   // Atomic: the state transition + the snapshot persist in ONE transaction
   // (B6 review #3 — a crash between the two writes must not leave a closed
-  // session without its snapshot).
-  store.begin();
-  try {
+  // session without its snapshot). R3-P4：commit=false 时由调用方的事务
+  // 承接（v13 最终 wrapup 事务与 B5 的 publication/outbox/assessment 合并）。
+  const write = (): void => {
     store.upsertSessionState({
       runtimeSessionId,
       processedThroughEntrySeq: input.state.processedThroughEntrySeq,
@@ -204,10 +211,18 @@ export function runWrapup(input: WrapupInput): WrapupResult {
       updatedAt: new Date((input.nowMs ?? (() => Date.now()))()).toISOString(),
     });
     store.insertContinuitySnapshot(finalSnapshot);
-    store.commit();
-  } catch (error) {
-    store.rollback();
-    throw error;
+  };
+  if (input.commit === false) {
+    write();
+  } else {
+    store.begin();
+    try {
+      write();
+      store.commit();
+    } catch (error) {
+      store.rollback();
+      throw error;
+    }
   }
   return { snapshot: finalSnapshot, status };
 }
