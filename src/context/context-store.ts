@@ -6,13 +6,75 @@ import { DatabaseSync } from "node:sqlite";
 
 import { migrateDatabase } from "../db/migrate.js";
 
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ContextMessageUnit, UnitDispositionFilter } from "../contracts/context-units.js";
+import type { ContextUnitStorePort } from "./context-ingest.js";
+
+interface UnitRow {
+  runtime_session_id: string;
+  context_seq: number;
+  unit_id: string;
+  source_event_id: string;
+  unit_type: string;
+  disposition: string;
+  entry_id: string | null;
+  entry_seq: number | null;
+  content_hash: string;
+  payload: string;
+  companion_entry_id: string | null;
+  pair_key: string | null;
+  paired: number;
+  derivation_refs: string;
+  created_at: string;
+}
+
 /**
  * Schema version of the Context domain model. Every migration file under
  * src/db/migrations/context/ must be applied in order; the store fails closed
  * if the on-disk schema_migrations.max(version) is NEWER than this constant
  * (a newer binary wrote state this binary cannot read).
  */
-export const LATEST_MIGRATION_VERSION = "0001_bootstrap";
+export const LATEST_MIGRATION_VERSION = "0003_represented_through";
+
+/**
+ * R2-P3：每 session 的 context_units 软 cap（语义 ledger 有界化的第一级）。
+ * 单元总数（含已排除行）达到该值时，新单元以 disposition="exclude" 写入：
+ * provider 视图不可见（listUnits 默认过滤），且作为 R3 Historian 的裁剪候选。
+ * append-only 不变量不变——行永不物理删除，只改 disposition 标记。
+ */
+export const MAX_UNITS_PER_SESSION = 10_000;
+
+/**
+ * R2-P3：每 session 的 context_units 硬 cap（= 2× 软 cap，安全阀）。
+ * 单元总数达到该值时 insertUnit 拒绝写入并抛 ContextBoundsExceededError →
+ * 记录 lineage 紧急态 emergency_fail_closed → 错误经 seam 传播使 slice 大声失败
+ * （fail-closed：绝不允许语义 ledger 无界增长，也不允许超限后继续正常渲染）。
+ */
+export const HARD_UNITS_CAP = 2 * MAX_UNITS_PER_SESSION;
+
+/**
+ * R2-P3：context_units 硬 cap 超限的 typed 失败（fail-closed）。insertUnit 检测到
+ * 该 session 单元总数 >= 硬 cap 时抛出；经 ingest → seam subscribe 回调（emitOwn
+ * rethrow）自然传播，使 harness.prompt / runMinimalSlice 大声失败。抛出前绝不
+ * 删除任何行（append-only 不变量绑定）。
+ */
+export class ContextBoundsExceededError extends Error {
+  constructor(
+    readonly runtimeSessionId: string,
+    readonly hardCap: number,
+  ) {
+    super(
+      `context_units hard cap exceeded: session ${runtimeSessionId} reached ${hardCap} units (fail closed)`,
+    );
+    this.name = "ContextBoundsExceededError";
+  }
+}
+
+/** ContextStore.open 的构造选项（R2-P3 cap 注入：测试用极小值在少量单元内触发 cap 路径）。 */
+export interface ContextStoreOpenOptions {
+  /** 每 session 软 cap（超限单元标记 disposition="exclude"）。缺省 = MAX_UNITS_PER_SESSION。 */
+  maxUnitsPerSession?: number;
+}
 
 export interface ContextLineage {
   runtimeSessionId: string;
@@ -41,6 +103,10 @@ export interface ContextLineage {
   cachedM0ProviderProfileId: string | null;
   lastResponseTime: number | null;
   representedThroughEntrySeq: number;
+  /** R2-P1：Provider Renderer 的 context_seq 空间 watermark（ContextMessageUnit
+   * 序号，非 Session entrySeq）。m0 物化前缀覆盖到该 seq；其后的单元是 live
+   * tail（p5Tail）。 */
+  representedThroughContextSeq: number;
   protectedTailStartEntrySeq: number | null;
   lastSafeUserAnchorEntrySeq: number | null;
   clearedReasoningThroughTag: number;
@@ -91,6 +157,34 @@ export interface MaterializeM1Input {
   atMs: number;
 }
 
+/**
+ * R2-P1：HARD 物化（context_seq 语义）。与 v12 materializeM0 的唯一区别是
+ * watermark 为 represented_through_context_seq（ContextMessageUnit 序号），
+ * 绝不回写 v12 的 represented_through_entry_seq —— 两者空间不同，不得混用。
+ */
+export interface MaterializeM0ByContextSeqInput {
+  runtimeSessionId: string;
+  m0Body: string;
+  m1Body: string;
+  m0ContentHash: string;
+  m1ContentHash: string;
+  cachedM0SystemHash: string;
+  cachedM0ModelKey: string;
+  cachedM0ProviderProfileId: string;
+  representedThroughContextSeq: number;
+  atMs: number;
+}
+
+/** R2-P1：SOFT 物化（context_seq 语义），仅更新 m1，不推进物化 watermark
+ * （watermark 只在 HARD fold 时推进；SOFT 的 m1 从物化水位后累积渲染，
+ * 保证未进 m0 的单元始终在 provider 视图内，内容不丢失）。 */
+export interface MaterializeM1ByContextSeqInput {
+  runtimeSessionId: string;
+  m1Body: string;
+  m1ContentHash: string;
+  atMs: number;
+}
+
 interface LineageRow {
   runtime_session_id: string;
   context_source_snapshot_id: string;
@@ -118,6 +212,7 @@ interface LineageRow {
   cached_m0_provider_profile_id: string | null;
   last_response_time: number | null;
   represented_through_entry_seq: number;
+  represented_through_context_seq: number;
   protected_tail_start_entry_seq: number | null;
   last_safe_user_anchor_entry_seq: number | null;
   cleared_reasoning_through_tag: number;
@@ -155,6 +250,7 @@ function rowToLineage(row: LineageRow): ContextLineage {
     cachedM0ProviderProfileId: row.cached_m0_provider_profile_id,
     lastResponseTime: row.last_response_time,
     representedThroughEntrySeq: row.represented_through_entry_seq,
+    representedThroughContextSeq: row.represented_through_context_seq,
     protectedTailStartEntrySeq: row.protected_tail_start_entry_seq,
     lastSafeUserAnchorEntrySeq: row.last_safe_user_anchor_entry_seq,
     clearedReasoningThroughTag: row.cleared_reasoning_through_tag,
@@ -197,15 +293,21 @@ export interface LkgSlot {
  * sources): the in-memory cache may be dropped, SQLite state is the
  * transform authority. It never stores a second copy of raw Pi messages.
  */
-export class ContextStore {
+export class ContextStore implements ContextUnitStorePort {
   private readonly db: DatabaseSync;
+  /** R2-P3：每 session 软 cap（超限 → disposition="exclude"）。 */
+  private readonly maxUnitsPerSession: number;
+  /** R2-P3：每 session 硬 cap（超限 → 抛 ContextBoundsExceededError，fail-closed）。 */
+  private readonly hardUnitsCap: number;
   private closed = false;
 
-  private constructor(db: DatabaseSync) {
+  private constructor(db: DatabaseSync, options: ContextStoreOpenOptions) {
     this.db = db;
+    this.maxUnitsPerSession = options.maxUnitsPerSession ?? MAX_UNITS_PER_SESSION;
+    this.hardUnitsCap = 2 * this.maxUnitsPerSession;
   }
 
-  static open(contextDbPath: string): ContextStore {
+  static open(contextDbPath: string, options: ContextStoreOpenOptions = {}): ContextStore {
     try {
       mkdirSync(dirname(contextDbPath), { recursive: true });
     } catch {
@@ -245,7 +347,7 @@ export class ContextStore {
           );
         }
       }
-      return new ContextStore(db);
+      return new ContextStore(db, options);
     } catch (error) {
       try {
         db.close();
@@ -262,6 +364,198 @@ export class ContextStore {
     }
     this.closed = true;
     this.db.close();
+  }
+
+  // ---- R2: ContextMessageUnit 持久化（context_units 表，ContextUnitStorePort）----
+
+  hasUnitForEvent(eventId: string): boolean {
+    const row = this.db
+      .prepare("SELECT 1 AS hit FROM context_units WHERE source_event_id = ? LIMIT 1")
+      .get(eventId) as { hit: number } | undefined;
+    return row !== undefined;
+  }
+
+  insertUnit(unit: ContextMessageUnit): void {
+    // R2-P3：双级 cap 有界策略（append-only 不变量不变——绝不 DELETE）：
+    //  1) 硬 cap：count >= hardUnitsCap → 记录 lineage 紧急态 emergency_fail_closed
+    //     （best-effort：lineage 缺失时不掩盖 typed 错误）并抛
+    //     ContextBoundsExceededError，拒绝继续写入。错误经 ingest → seam 的
+    //     subscribe 回调（emitOwn rethrow）自然传播，使 harness.prompt /
+    //     runMinimalSlice 大声失败（fail-closed）。紧急态记录放在权威 owner
+    //     （ContextStore 同时拥有 context_units 与 context_lineages）而非 seam：
+    //     runtime-event-seam 受 R2-P3 边界约束不可修改。
+    //  2) 软 cap：count >= maxUnitsPerSession → 强制 disposition="exclude"
+    //     （行照写；provider 视图经 listUnits 默认过滤不可见；R3 Historian
+    //     以此为裁剪候选）。
+    const count = this.countUnits(unit.runtimeSessionId);
+    if (count >= this.hardUnitsCap) {
+      const error = new ContextBoundsExceededError(unit.runtimeSessionId, this.hardUnitsCap);
+      const lineage = this.getLineage(unit.runtimeSessionId);
+      if (lineage !== undefined) {
+        this.setEmergencyState(unit.runtimeSessionId, "emergency_fail_closed", error.message);
+      }
+      throw error;
+    }
+    const disposition = count >= this.maxUnitsPerSession ? "exclude" : unit.disposition;
+    this.db
+      .prepare(
+        `INSERT INTO context_units (
+           runtime_session_id, context_seq, unit_id, source_event_id, unit_type,
+           disposition, entry_id, entry_seq, content_hash, payload,
+           companion_entry_id, pair_key, paired, derivation_refs, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        unit.runtimeSessionId,
+        unit.contextSeq,
+        unit.unitId,
+        unit.sourceEventId,
+        unit.unitType,
+        disposition,
+        unit.entryId ?? null,
+        unit.entrySeq ?? null,
+        unit.contentHash,
+        JSON.stringify(unit.payload),
+        unit.companionEntryId ?? null,
+        unit.pairKey ?? null,
+        unit.paired ? 1 : 0,
+        JSON.stringify(unit.derivationRefs),
+        unit.createdAt,
+      );
+  }
+
+  updateUnitPairing(
+    runtimeSessionId: string,
+    contextSeq: number,
+    update: { companionEntryId: string; pairKey: string; paired: boolean; payload: AgentMessage },
+  ): void {
+    const result = this.db
+      .prepare(
+        `UPDATE context_units SET
+           companion_entry_id = ?, pair_key = ?, paired = ?, payload = ?
+         WHERE runtime_session_id = ? AND context_seq = ?`,
+      )
+      .run(
+        update.companionEntryId,
+        update.pairKey,
+        update.paired ? 1 : 0,
+        JSON.stringify(update.payload),
+        runtimeSessionId,
+        contextSeq,
+      );
+    if (result.changes !== 1) {
+      throw new Error(
+        `context updateUnitPairing failed: no unit ${runtimeSessionId}/${contextSeq}`,
+      );
+    }
+  }
+
+  listUnits(
+    runtimeSessionId: string,
+    options: {
+      afterContextSeq?: number;
+      limit?: number;
+      disposition?: UnitDispositionFilter;
+    } = {},
+  ): ContextMessageUnit[] {
+    // R2-P3：store 级默认过滤——只返回 disposition="include" 的单元（provider
+    // 视图），renderer（renderForProviderCall / renderProviderMessages /
+    // rebuildM0Body / renderHistorySince）与 harness 均消费本方法，因此 excluded
+    // / reference_only 单元在读取源头即不可见。需要读全部行（R3 Historian 裁剪
+    // 候选）时显式传 disposition: "all"。
+    const disposition = options.disposition ?? "include";
+    const afterContextSeq = options.afterContextSeq;
+    let sql = "SELECT * FROM context_units WHERE runtime_session_id = ?";
+    const params: Array<string | number> = [runtimeSessionId];
+    if (disposition !== "all") {
+      sql += " AND disposition = ?";
+      params.push(disposition);
+    }
+    if (afterContextSeq !== undefined) {
+      sql += " AND context_seq > ?";
+      params.push(afterContextSeq);
+    }
+    sql += " ORDER BY context_seq";
+    const rows = this.db.prepare(sql).all(...params) as unknown as UnitRow[];
+    const limit = options.limit ?? rows.length;
+    return rows.slice(0, limit).map((row) => this.rowToUnit(row));
+  }
+
+  /** R2-P3：该 session 的 context_units 行数（软/硬 cap 判定基准，含 excluded）。 */
+  private countUnits(runtimeSessionId: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS count FROM context_units WHERE runtime_session_id = ?")
+      .get(runtimeSessionId) as { count: number };
+    return row.count;
+  }
+
+  lastUnpairedInputSeq(runtimeSessionId: string): number | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(context_seq) AS seq FROM context_units
+         WHERE runtime_session_id = ? AND unit_type = 'input' AND paired = 0`,
+      )
+      .get(runtimeSessionId) as { seq: number | null } | undefined;
+    const seq = row?.seq;
+    return seq ?? undefined;
+  }
+
+  findBySourceEvent(eventId: string): ContextMessageUnit | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM context_units WHERE source_event_id = ? LIMIT 1")
+      .get(eventId) as UnitRow | undefined;
+    return row === undefined ? undefined : this.rowToUnit(row);
+  }
+
+  maxContextSeq(runtimeSessionId: string): number {
+    const row = this.db
+      .prepare(
+        "SELECT COALESCE(MAX(context_seq), 0) AS seq FROM context_units WHERE runtime_session_id = ?",
+      )
+      .get(runtimeSessionId) as { seq: number };
+    return row.seq;
+  }
+
+  /**
+   * R3-P1：entrySeqOf(representedThroughContextSeq) 的 SQL 实现——context_seq
+   * <= watermark 的单元中取 MAX(entry_seq)，跳过 entry_seq 为 NULL 的行
+   * （非 message 事件可能无 entrySeq；message_finalized 收据的 entrySeq 为
+   * 可选）。watermark 为 0 或前缀内无携带 entry_seq 的单元 → null。
+   *
+   * 选择专用聚合而非 listUnits + 过滤（设计决策）：单条 SQL 聚合为 O(log n)，
+   * 且不受 listUnits 默认 disposition 过滤（include）影响——映射面向全部语义
+   * 单元（R3 Historian 的 raw-replacement 裁剪候选），不能因 excluded 单元而
+   * 产生错误边界。语义参考实现见 history-read-port.ts 的纯函数
+   * resolveEntrySeqForWatermark。
+   */
+  maxEntrySeqAtOrBelowWatermark(runtimeSessionId: string, watermark: number): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(entry_seq) AS seq FROM context_units
+         WHERE runtime_session_id = ? AND context_seq <= ? AND entry_seq IS NOT NULL`,
+      )
+      .get(runtimeSessionId, watermark) as { seq: number | null } | undefined;
+    return row?.seq ?? null;
+  }
+
+  private rowToUnit(row: UnitRow): ContextMessageUnit {
+    return {
+      runtimeSessionId: row.runtime_session_id,
+      contextSeq: row.context_seq,
+      unitId: row.unit_id,
+      sourceEventId: row.source_event_id,
+      unitType: row.unit_type as ContextMessageUnit["unitType"],
+      disposition: row.disposition as ContextMessageUnit["disposition"],
+      ...(row.entry_id !== null ? { entryId: row.entry_id } : {}),
+      ...(row.entry_seq !== null ? { entrySeq: row.entry_seq } : {}),
+      contentHash: row.content_hash,
+      payload: JSON.parse(row.payload) as AgentMessage,
+      ...(row.companion_entry_id !== null ? { companionEntryId: row.companion_entry_id } : {}),
+      ...(row.pair_key !== null ? { pairKey: row.pair_key } : {}),
+      paired: row.paired === 1,
+      derivationRefs: JSON.parse(row.derivation_refs) as ContextMessageUnit["derivationRefs"],
+      createdAt: row.created_at,
+    };
   }
 
   /** Raw prepared-statement access for the replay/consumer layers. */
@@ -298,6 +592,7 @@ export class ContextStore {
       cached_m0_provider_profile_id: null,
       last_response_time: null,
       represented_through_entry_seq: 0,
+      represented_through_context_seq: 0,
       protected_tail_start_entry_seq: null,
       last_safe_user_anchor_entry_seq: null,
       cleared_reasoning_through_tag: 0,
@@ -321,11 +616,12 @@ export class ContextStore {
           m0_materialized_at, m1_updated_at,
           cached_m0_system_hash, cached_m0_model_key, cached_m0_provider_profile_id,
           last_response_time, represented_through_entry_seq,
+          represented_through_context_seq,
           protected_tail_start_entry_seq, last_safe_user_anchor_entry_seq,
           cleared_reasoning_through_tag, tool_reclaim_watermark,
           mutation_replay_watermark, deferred_signal_cursor,
           emergency_state, last_transform_error, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.runtime_session_id,
@@ -354,6 +650,7 @@ export class ContextStore {
         row.cached_m0_provider_profile_id,
         row.last_response_time,
         row.represented_through_entry_seq,
+        row.represented_through_context_seq,
         row.protected_tail_start_entry_seq,
         row.last_safe_user_anchor_entry_seq,
         row.cleared_reasoning_through_tag,
@@ -439,6 +736,89 @@ export class ContextStore {
     if (result.changes !== 1) {
       throw new Error(
         `context materializeM1 failed: no lineage for ${input.runtimeSessionId} (fail closed)`,
+      );
+    }
+  }
+
+  /**
+   * R2-P1 HARD materialization（context_seq 语义）：重建 m0 + 重置/渲染 m1，
+   * 并推进 represented_through_context_seq。单行事务：失败绝不留下 m0 已推进、
+   * watermark 未推进的中间态。cached_m0_* 记录本次 fold 的 cache 身份
+   * （provider-side cache 是在这个身份下构建的；后续 pass 与之比对 → 变化即
+   * HARD）。v12 的 represented_through_entry_seq 保持不动（不同空间）。
+   */
+  materializeM0ByContextSeq(input: MaterializeM0ByContextSeqInput): void {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE context_lineages SET
+           m0_body = ?, m1_body = ?, m0_content_hash = ?, m1_content_hash = ?,
+           m0_materialized_at = ?, m1_updated_at = ?,
+           cached_m0_system_hash = ?, cached_m0_model_key = ?,
+           cached_m0_provider_profile_id = ?,
+           represented_through_context_seq = ?,
+           updated_at = ?
+         WHERE runtime_session_id = ?`,
+      )
+      .run(
+        input.m0Body,
+        input.m1Body,
+        input.m0ContentHash,
+        input.m1ContentHash,
+        input.atMs,
+        input.atMs,
+        input.cachedM0SystemHash,
+        input.cachedM0ModelKey,
+        input.cachedM0ProviderProfileId,
+        input.representedThroughContextSeq,
+        now,
+        input.runtimeSessionId,
+      );
+    if (result.changes !== 1) {
+      throw new Error(
+        `context materializeM0ByContextSeq failed: no lineage for ${input.runtimeSessionId} (fail closed)`,
+      );
+    }
+  }
+
+  /**
+   * R2-P1 SOFT materialization（context_seq 语义）：只更新 m1（m0 保持
+   * byte-identical）。不推进 represented_through_context_seq（watermark
+   * 只在 HARD fold 时推进，见 B1 parity 修复：SOFT 累积渲染 m1）。
+   */
+  materializeM1ByContextSeq(input: MaterializeM1ByContextSeqInput): void {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE context_lineages SET
+           m1_body = ?, m1_content_hash = ?, m1_updated_at = ?,
+           updated_at = ?
+         WHERE runtime_session_id = ?`,
+      )
+      .run(input.m1Body, input.m1ContentHash, input.atMs, now, input.runtimeSessionId);
+    if (result.changes !== 1) {
+      throw new Error(
+        `context materializeM1ByContextSeq failed: no lineage for ${input.runtimeSessionId} (fail closed)`,
+      );
+    }
+  }
+
+  /**
+   * R2-P1：仅推进 represented_through_context_seq watermark（SOFT+ 字节不变
+   * 通过后用于幂等对齐；也供测试直接驱动）。
+   */
+  updateRepresentedThrough(runtimeSessionId: string, representedThroughContextSeq: number): void {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE context_lineages SET
+           represented_through_context_seq = ?, updated_at = ?
+         WHERE runtime_session_id = ?`,
+      )
+      .run(representedThroughContextSeq, now, runtimeSessionId);
+    if (result.changes !== 1) {
+      throw new Error(
+        `context updateRepresentedThrough failed: no lineage for ${runtimeSessionId}`,
       );
     }
   }
