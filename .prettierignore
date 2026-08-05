@@ -10,3 +10,6 @@ evidence/notion-round4/
 
 # Subagent review files are written by reviewers, not by the repo formatter.
 evidence/reviews/
+
+# Architecture consultation transcripts are raw advisory outputs (R1 planning).
+evidence/r1/

@@ -5,7 +5,10 @@ import test from "node:test";
 
 import assert from "node:assert/strict";
 
-import { createNodeSqliteFactory, SqliteSessionRepo } from "@earendil-works/pi-storage-sqlite-node";
+import {
+  createNodeSqliteFactory,
+  SqliteSessionRepository,
+} from "@earendil-works/pi-storage-sqlite-node";
 
 import { defaultAgentConfig } from "../src/config/load.js";
 import { initializeDataRoot, resolveDataRootPaths } from "../src/host/data-root.js";
@@ -42,7 +45,7 @@ test("settled rollover closes the old epoch and activates a fresh linked epoch",
   // is a REAL session row — not a missing one that masquerades as empty.
   assert.equal(rolled.entries.length, 0);
   const paths = resolveDataRootPaths(dataRoot, config);
-  const repo = new SqliteSessionRepo({
+  const repo = new SqliteSessionRepository({
     env: nodeSqliteRepoEnv(dataRoot),
     sqlite: createNodeSqliteFactory(),
     databasePath: paths.sessionDb,
