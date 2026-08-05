@@ -1,8 +1,10 @@
 -- R3 (iris_agent#9) — archive shards & hot-row reclaim (Exit Gate 4).
 --
 -- active historian.db 的有界性:compartments/segments/evidence_sets/
--- attribution_manifests/boundary_snapshots 行在满足四条件后才从 hot 区
--- 释放(物理删除),释放前先 seal 成不可变 archive shard(带 sha256 + catalog)。
+-- attribution_manifests 行在满足四条件后才从 hot 区释放(物理删除),释放前
+-- 先 seal 成不可变 archive shard(带 sha256 + catalog)。
+-- (boundary_snapshots 是 session 级表、无 compartment_id,不在 per-compartment
+-- 回收范围;publications/outbox 有独立 retention 语义,也不在本表回收范围。)
 --
 -- 四条件(全部满足才释放):
 --   1. context_ack           : Context 侧已确认该范围(ACK 记录)

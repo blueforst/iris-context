@@ -116,13 +116,52 @@ export function toEvidenceBasisRef(unit: HistorianUnitView): EvidenceBasisRef | 
  * 批量分类(供 compartment builder 使用):输入本批单元的窄视图,输出
  *  (evidenceBasis, derivedOnly) —— evidenceBasis 只含 eligible 单元;
  * derivedOnly=true 当本批没有产生任何新 Evidence basis(整批是回显/重述)。
+ *
+ * 批级语义(anti-echo 注释承诺的实现):assistant 单元若引用了**本批内的
+ * 新单元**(derivationRefs.sourceContextUnitIds 与本批 include 且非
+ * derived-only 的 input/tool_result 单元有交集),说明它是"基于新输入/
+ * 新 tool 结果的回答"而非纯回显 —— 此时即使它携带 memory/compartment
+ * 派生引用,也不判 derived-only(避免误杀正常回答)。
  */
 export function classifyEvidenceBasis(units: HistorianUnitView[]): {
   evidenceBasis: EvidenceBasisRef[];
   derivedOnly: boolean;
 } {
   const evidenceBasis: EvidenceBasisRef[] = [];
+  // 第一遍:收集本批内真正的新 observation 单元(input/tool_result,
+  // include 且无派生引用)。
+  const newObservationIds = new Set<string>();
   for (const unit of units) {
+    if (unit.disposition !== "include") {
+      continue;
+    }
+    if (unit.unitType === "input" || unit.unitType === "tool_result") {
+      if (!hasAnyDerivationRefs(unit.derivationRefs)) {
+        newObservationIds.add(unit.contextUnitId);
+      }
+    }
+  }
+  // 第二遍:分类。assistant 引用本批新单元 → 不判 derived-only。
+  for (const unit of units) {
+    if (unit.disposition !== "include") {
+      continue;
+    }
+    const groundedInNewObservations =
+      unit.unitType === "assistant" &&
+      unit.derivationRefs.sourceContextUnitIds.some((id) => newObservationIds.has(id));
+    if (groundedInNewObservations) {
+      // 基于本批新观察的回答:即使携带派生引用也不是纯回显,直接进入
+      // basis(保留原始 derivationRefs 作审计面)。
+      evidenceBasis.push({
+        contextUnitId: unit.contextUnitId,
+        contextSeq: unit.contextSeq,
+        runtimeEventId: unit.runtimeEventId,
+        contentHash: unit.contentHash,
+        historianDisposition: "include",
+        derivationRefs: unit.derivationRefs,
+      });
+      continue;
+    }
     if (isEvidenceEligibleUnit(unit)) {
       const ref = toEvidenceBasisRef(unit);
       if (ref !== undefined) {

@@ -77,6 +77,26 @@ export interface ContextHistoryReadPort {
     contentHash: string;
     derivationRefs: RuntimeEventDerivationRefs;
   }>;
+
+  /**
+   * R3 (anti-echo)：按 Session entrySeq 区间读取单元窄视图。Historian 的
+   * 工作空间是 Session-scoped entrySeq(safe prefix),本方法在其内部完成
+   * session → lineage 解析,返回与 listUnitsForHistorian 相同的 values-only
+   * 视图;entry_seq IS NULL 的单元不参与。无 lineage → fail-closed 抛错。
+   */
+  listUnitsForHistorianByEntrySeq(
+    runtimeSessionId: string,
+    fromEntrySeq: number,
+    toEntrySeq: number,
+  ): Array<{
+    contextUnitId: string;
+    contextSeq: number;
+    runtimeEventId: string;
+    unitType: ContextUnitType;
+    disposition: ContextMessageUnit["disposition"];
+    contentHash: string;
+    derivationRefs: RuntimeEventDerivationRefs;
+  }>;
 }
 
 /**
@@ -155,6 +175,28 @@ export function createContextHistoryReadPort(store: ContextStore): ContextHistor
         contentHash: unit.contentHash,
         derivationRefs: unit.derivationRefs,
       }));
+    },
+    listUnitsForHistorianByEntrySeq(runtimeSessionId, fromEntrySeq, toEntrySeq) {
+      // Session → lineage 解析后,按 entrySeq 闭区间读取单元窄视图
+      // (Historian 的 safe prefix 是 Session-scoped 空间)。无 lineage →
+      // fail-closed。
+      const lineage = store.getLineage(runtimeSessionId);
+      if (lineage === undefined) {
+        throw new Error(
+          `context history read port: no lineage for ${runtimeSessionId} (fail closed)`,
+        );
+      }
+      return store
+        .listUnitsByEntrySeqRange(lineage.lineageId, fromEntrySeq, toEntrySeq)
+        .map((unit) => ({
+          contextUnitId: unit.unitId,
+          contextSeq: unit.contextSeq,
+          runtimeEventId: unit.runtimeEventId ?? unit.sourceEventId,
+          unitType: unit.unitType,
+          disposition: unit.disposition,
+          contentHash: unit.contentHash,
+          derivationRefs: unit.derivationRefs,
+        }));
     },
   };
 }

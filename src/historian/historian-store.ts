@@ -275,11 +275,14 @@ export class HistorianStore {
 
   /** Insert an immutable evidence set (B4; never a summary/recall). */
   insertEvidenceSet(evidence: EvidenceSet): void {
+    // R3 (anti-echo):evidence_basis_json/derived_only 由 0005 提供,旧库
+    // 无列时保持旧行为(不伪造分类)。
     this.db
       .prepare(
         "INSERT INTO evidence_sets (evidence_set_id, runtime_session_id, compartment_id, " +
-          "start_entry_seq, end_entry_seq, source_range_hash, entries_json, created_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          "start_entry_seq, end_entry_seq, source_range_hash, entries_json, " +
+          "evidence_basis_json, derived_only, created_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         evidence.evidenceSetId,
@@ -289,6 +292,8 @@ export class HistorianStore {
         evidence.endEntrySeq,
         evidence.sourceRangeHash,
         JSON.stringify(evidence.entries),
+        evidence.evidenceBasis !== undefined ? JSON.stringify(evidence.evidenceBasis) : null,
+        evidence.derivedOnly !== undefined ? (evidence.derivedOnly ? 1 : 0) : null,
         new Date(this.nowMs()).toISOString(),
       );
   }

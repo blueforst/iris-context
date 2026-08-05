@@ -104,6 +104,7 @@ export class HistorianManager {
       store: this.store,
       nowMs: this.nowMs,
       claimLeaseMs: this.claimLeaseMs,
+      ...(this.historyPort !== undefined ? { historyPort: this.historyPort } : {}),
     });
     const commitHook: RunnerCommitHook = {
       commitSafePrefix: (input) => {

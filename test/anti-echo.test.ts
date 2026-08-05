@@ -114,6 +114,53 @@ test("anti-echo: empty batch is derivedOnly (no new evidence)", () => {
   assert.equal(evidenceBasis.length, 0);
 });
 
+test("anti-echo: batch semantics — assistant grounded in new user input is not derived-only", () => {
+  // 新 user 输入 + assistant 回答(引用该输入)→ 回答成为 evidence basis。
+  const units = [
+    unitView({ contextUnitId: "u1", contextSeq: 1, unitType: "input" }),
+    unitView({
+      contextUnitId: "u2",
+      contextSeq: 2,
+      unitType: "assistant",
+      derivationRefs: {
+        memoryRefs: ["mem-1"],
+        compartmentIds: [],
+        sourceContextUnitIds: ["u1"],
+      },
+    }),
+  ];
+  const { evidenceBasis, derivedOnly } = classifyEvidenceBasis(units);
+  assert.equal(derivedOnly, false);
+  assert.deepEqual(
+    evidenceBasis.map((ref) => ref.contextUnitId),
+    ["u1", "u2"],
+    "assistant grounded in new observation must be evidence-eligible",
+  );
+});
+
+test("anti-echo: batch semantics — assistant citing only old memory stays derived-only", () => {
+  const units = [
+    unitView({ contextUnitId: "u1", contextSeq: 1, unitType: "input" }),
+    unitView({
+      contextUnitId: "u2",
+      contextSeq: 2,
+      unitType: "assistant",
+      derivationRefs: {
+        memoryRefs: ["mem-1"],
+        compartmentIds: [],
+        sourceContextUnitIds: ["old-unit-9"],
+      },
+    }),
+  ];
+  const { evidenceBasis, derivedOnly } = classifyEvidenceBasis(units);
+  assert.equal(derivedOnly, false, "user input still produces basis");
+  assert.deepEqual(
+    evidenceBasis.map((ref) => ref.contextUnitId),
+    ["u1"],
+    "assistant citing only old memory must be excluded",
+  );
+});
+
 test("anti-echo: hasAnyDerivationRefs covers workSnapshotVersion", () => {
   assert.equal(
     hasAnyDerivationRefs({

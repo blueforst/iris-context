@@ -11,11 +11,13 @@
 import { createHash } from "node:crypto";
 
 import type { HistorianBoundarySnapshot, SequencedSessionEntry } from "../contracts/historian.js";
+import type { ContextHistoryReadPort } from "../context/history-read-port.js";
 import type { HistorianStore } from "./historian-store.js";
 import type { RunnerCommitHook } from "./historian-runner.js";
 import type { HistorianAnalysisView } from "./historian-analysis.js";
 import type { ValidationOutcome } from "./historian-analysis.js";
 import { buildCompartment } from "./historian-compartment.js";
+import type { HistorianUnitView } from "./anti-echo.js";
 import {
   deriveMemoryAssessments,
   type InvocationMemoryRecallProjection,
@@ -85,6 +87,13 @@ export interface OutboxRow {
 
 export interface PublicationServiceOptions {
   store: HistorianStore;
+  /**
+   * R3 (anti-echo)：Context lineage 窄读取端口。提供时,commitSafePrefix
+   * 会把 Session-safe-prefix 的 entrySeq 范围映射到 Context 单元视图并
+   * 传入 buildCompartment → EvidenceSet 携带 evidenceBasis/derivedOnly。
+   * 缺省 = 旧行为(无 anti-echo 分类,向后兼容)。
+   */
+  historyPort?: ContextHistoryReadPort;
   nowMs?: () => number;
   /** Router claim lease TTL (ms). Default 60s. */
   claimLeaseMs?: number;
@@ -111,12 +120,14 @@ export class PublicationService {
   private readonly nowMs: () => number;
   private readonly claimLeaseMs: number;
   private readonly recallProjections: InvocationMemoryRecallProjection[];
+  private readonly historyPort: ContextHistoryReadPort | undefined;
 
   constructor(options: PublicationServiceOptions) {
     this.store = options.store;
     this.nowMs = options.nowMs ?? (() => Date.now());
     this.claimLeaseMs = options.claimLeaseMs ?? 60_000;
     this.recallProjections = options.recallProjections ?? [];
+    this.historyPort = options.historyPort;
   }
 
   /**
@@ -140,6 +151,23 @@ export class PublicationService {
 
     // Build the immutable compartment from the VERIFIED safe prefix.
     const nextSequence = this.store.maxCompartmentSequence(runtimeSessionId) + 1;
+
+    // R3 (anti-echo):把 Session-safe-prefix 的 entrySeq 范围映射到 Context
+    // 单元窄视图,使 EvidenceSet 携带 evidenceBasis/derivedOnly(derived-only
+    // 内容不产生新 Evidence)。historyPort 未接线 → unitViews 缺省,保持旧
+    // 行为(向后兼容)。
+    let unitViews: HistorianUnitView[] | undefined;
+    if (this.historyPort !== undefined && safePrefix.length > 0) {
+      const first = safePrefix[0];
+      const last = safePrefix[safePrefix.length - 1];
+      if (first !== undefined && last !== undefined) {
+        unitViews = this.historyPort.listUnitsForHistorianByEntrySeq(
+          runtimeSessionId,
+          first.entrySeq,
+          last.entrySeq,
+        );
+      }
+    }
     const built = buildCompartment({
       runtimeSessionId,
       compartmentSequence: nextSequence,
@@ -147,6 +175,7 @@ export class PublicationService {
       eligibleEntries: safePrefix,
       analysis,
       commitThroughEntrySeq: outcome.commitThroughEntrySeq,
+      ...(unitViews !== undefined ? { unitViews } : {}),
     });
     if (built === null) {
       // No eligible entries in the safe prefix — nothing to publish. This is

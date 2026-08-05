@@ -510,6 +510,24 @@ export class ContextStore implements ContextUnitStorePort {
     const limit = options.limit ?? rows.length;
     return rows.slice(0, limit).map((row) => this.rowToUnit(row));
   }
+
+  /**
+   * R3 (anti-echo)：按 lineage 内 entrySeq 闭区间 [fromEntrySeq, toEntrySeq]
+   * 读取单元（窄归档映射;entry_seq IS NULL 的单元不参与）。供 Historian
+   * 把 Session-scoped safe prefix 映射到 Context 单元视图。
+   */
+  listUnitsByEntrySeqRange(
+    lineageId: string,
+    fromEntrySeq: number,
+    toEntrySeq: number,
+  ): ContextMessageUnit[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM context_units WHERE context_lineage_id = ? AND entry_seq BETWEEN ? AND ? ORDER BY context_seq",
+      )
+      .all(lineageId, fromEntrySeq, toEntrySeq) as unknown as UnitRow[];
+    return rows.map((row) => this.rowToUnit(row));
+  }
   /**
    * R3 (anti-echo)：按 lineage 内闭区间 [fromContextSeq, toContextSeq] 读取
    * 全部单元（含 reference_only / exclude —— Historian 需要完整分类视图）。
