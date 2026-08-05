@@ -702,3 +702,52 @@ test("R3 Exit Gate: wrapup 替换 pending 增量 → priority 降为 normal，�
     rmSync(fixture.dir, { recursive: true, force: true });
   }
 });
+
+test("R3 Exit Gate: queue 单飞合并——终结性任务（normal/low）胜出，双向不 wedge（B1 复审）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "iris-exit-merge-"));
+  const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
+  try {
+    const newQueue = () =>
+      new HistorianManager({
+        store,
+        readPort: new SessionHistoryReadPort({
+          readRawEntries: async () => [u("u1", null), u("u2", "u1")],
+        }),
+        modelProviderProfile: "m",
+      }).getQueue();
+    const job = (priority: "highest" | "normal" | "low" | "manual") => ({
+      priority,
+      runtimeSessionId: "s1",
+      boundary: {} as never,
+      sessionState: {
+        runtimeSessionId: "s1",
+        processedThroughEntrySeq: 0,
+        status: "active" as const,
+        updatedAt: "t",
+      },
+    });
+    // 原 B1 案例：pending 增量 + wrapup 到达 → 合并后 normal。
+    const q1 = newQueue();
+    q1.enqueue(job("highest"));
+    q1.enqueue(job("normal"));
+    assert.equal(q1.peek()?.priority, "normal", "wrapup 合并 pending 增量 → normal");
+    // 复审反方向：pending wrapup + 增量后到 → 合并仍 normal（不得升级回 highest）。
+    const q2 = newQueue();
+    q2.enqueue(job("normal"));
+    q2.enqueue(job("highest"));
+    assert.equal(q2.peek()?.priority, "normal", "增量合并 pending wrapup → 仍 normal，不升级");
+    // manual（recomp）不得把 pending wrapup 降级。
+    const q3 = newQueue();
+    q3.enqueue(job("normal"));
+    q3.enqueue(job("manual"));
+    assert.equal(q3.peek()?.priority, "normal", "recomp 合并 pending wrapup → 仍 normal");
+    // low（恢复）胜出 highest（终结性任务不被增量覆盖）。
+    const q4 = newQueue();
+    q4.enqueue(job("highest"));
+    q4.enqueue(job("low"));
+    assert.equal(q4.peek()?.priority, "low", "恢复任务合并增量 → low 胜出");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
