@@ -23,7 +23,7 @@ import { sampleAgentInput } from "../src/runtime/vertical-slice.js";
  * - companion 配对折叠（pairKey/paired；未验证 → UNVERIFIED 占位）；
  * - exactly-once（重复 ensureUnitsUpTo 不重复单元）；
  * - 重放自愈（事件已提交、部分单元缺失 → 下一次补齐）；
- * - migration：空库初始化 + 0002 幂等 + newer-schema fence。
+ * - migration：空库初始化 + 0001-0003 幂等 + newer-schema fence。
  */
 
 function tempDir(): string {
@@ -296,7 +296,7 @@ test("r2: input unit payload never stores raw wire before pairing (placeholder)"
   }
 });
 
-test("r2: empty context.db initializes cleanly; 0002 applied and idempotent", () => {
+test("r2: empty context.db initializes cleanly; 0001-0003 applied and idempotent", () => {
   const dir = tempDir();
   try {
     const store = ContextStore.open(join(dir, "context.db"));
@@ -304,7 +304,7 @@ test("r2: empty context.db initializes cleanly; 0002 applied and idempotent", ()
     store.close();
     const reopened = ContextStore.open(join(dir, "context.db"));
     reopened.close();
-    assert.equal(LATEST_MIGRATION_VERSION, "0002_units");
+    assert.equal(LATEST_MIGRATION_VERSION, "0003_represented_through");
   } finally {
     cleanupDir(dir);
   }

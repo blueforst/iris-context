@@ -1,7 +1,11 @@
 import type { AgentMessage, CustomMessage } from "@earendil-works/pi-agent-core";
 
 import { IRIS_INPUT_META_CONTENT, IRIS_INPUT_META_CUSTOM_TYPE } from "../contracts/context.js";
-import type { ContextMessageUnit, ContextIngestPort } from "../contracts/context-units.js";
+import type {
+  ContextMessageUnit,
+  ContextIngestPort,
+  UnitDispositionFilter,
+} from "../contracts/context-units.js";
 import type { RuntimeEventIngestPort } from "../contracts/runtime-events.js";
 import {
   type IrisInputMetaDetails,
@@ -24,7 +28,7 @@ export interface ContextUnitStorePort {
   ): void;
   listUnits(
     runtimeSessionId: string,
-    options?: { afterContextSeq?: number; limit?: number },
+    options?: { afterContextSeq?: number; limit?: number; disposition?: UnitDispositionFilter },
   ): ContextMessageUnit[];
   /** 按源事件找单元（companion 邻接配对的幂等锚点）。 */
   findBySourceEvent(eventId: string): ContextMessageUnit | undefined;
@@ -32,6 +36,14 @@ export interface ContextUnitStorePort {
   maxContextSeq(runtimeSessionId: string): number;
   close(): void;
 }
+
+/**
+ * 注（R2-P3）：ensureUnitsUpTo 内调用 insertUnit 时，若该 session 已超过硬 cap
+ * （HARD_UNITS_CAP），insertUnit 抛 ContextBoundsExceededError（typed、文档化），
+ * 本方法不捕获、原样向上传播。seam 的 subscribe 回调（runtime-event-seam.ts 不可
+ * 修改）经 harness emitOwn rethrow 把该错误继续传播到 prompt 调用方 → slice 大声
+ * 失败（fail-closed）。
+ */
 
 function isInputMetaCompanion(message: AgentMessage): message is CustomMessage<unknown> {
   return (
@@ -258,7 +270,11 @@ export class ContextIngest implements ContextIngestPort {
 
   listUnits(
     runtimeSessionId: string,
-    options: { afterContextSeq?: number; limit?: number } = {},
+    options: {
+      afterContextSeq?: number;
+      limit?: number;
+      disposition?: UnitDispositionFilter;
+    } = {},
   ): ContextMessageUnit[] {
     return this.units.listUnits(runtimeSessionId, options);
   }
