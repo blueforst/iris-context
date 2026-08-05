@@ -10,15 +10,19 @@
  */
 import type {
   HistorianBoundarySnapshot,
+  HistorianSessionState,
   RuntimeSessionHistoryReadPort,
+  SequencedSessionEntry,
 } from "../contracts/historian.js";
 import type { HistorianStore } from "./historian-store.js";
 import { HistorianQueue, HistorianWorker, type HistorianJob } from "./historian-queue.js";
 import { HistorianRunner, type RunnerCommitHook } from "./historian-runner.js";
 import { freezeBoundary, type LineageBoundaryInput } from "./historian-boundary.js";
-import { buildAnalysisView, type HistorianAnalysisView } from "./historian-analysis.js";
+import { buildAnalysisView, validateRange } from "./historian-analysis.js";
 import { PublicationService } from "./historian-publication.js";
 import { runWrapup } from "./historian-continuity.js";
+import { createCompactionAuthorizer, type CompactionAuthorization } from "./compaction-trigger.js";
+import type { ContextHistoryReadPort } from "../context/history-read-port.js";
 /**
  * R3 Historian product integration (issue #8 Phase B Feature B8).
  *
@@ -52,6 +56,9 @@ export interface HistorianManagerOptions {
   claimLeaseMs?: number;
   maxQueuedJobs?: number;
   maxAttempts?: number;
+  /** R3-P4：Context lineage 物化边界读取端口（compaction 授权用）。缺省 =
+   * 未接线，此时 authorizeCompaction 抛错（fail-closed）。 */
+  historyPort?: ContextHistoryReadPort;
   /** Optional per-invocation recall projections for B7 assessments. */
   recallProjectionsFor?: (
     runtimeSessionId: string,
@@ -76,6 +83,8 @@ export class HistorianManager {
   private readonly recallProjectionsFor: HistorianManagerOptions["recallProjectionsFor"];
   private readonly service: PublicationService;
   private readonly runner: HistorianRunner;
+  private readonly historyPort: ContextHistoryReadPort | undefined;
+  private readonly claimLeaseMs: number;
   private draining = false;
 
   constructor(options: HistorianManagerOptions) {
@@ -84,6 +93,8 @@ export class HistorianManager {
     this.modelProviderProfile = options.modelProviderProfile;
     this.nowMs = options.nowMs ?? (() => Date.now());
     this.recallProjectionsFor = options.recallProjectionsFor;
+    this.historyPort = options.historyPort;
+    this.claimLeaseMs = options.claimLeaseMs ?? 60_000;
     this.queue = new HistorianQueue({
       maxQueuedJobs: options.maxQueuedJobs ?? 256,
       maxAttempts: options.maxAttempts ?? 8,
@@ -92,7 +103,7 @@ export class HistorianManager {
     this.service = new PublicationService({
       store: this.store,
       nowMs: this.nowMs,
-      claimLeaseMs: options.claimLeaseMs ?? 60_000,
+      claimLeaseMs: this.claimLeaseMs,
     });
     const commitHook: RunnerCommitHook = {
       commitSafePrefix: (input) => {
@@ -154,23 +165,34 @@ export class HistorianManager {
   }
 
   /** Rollover wrapup: finalize the OLD Session at `normal` priority.
-   * Returns immediately — rollover does NOT wait for the wrapup job. */
+   * Returns immediately — rollover does NOT wait for the wrapup job.
+   *
+   * R3-P4 v13 状态机：wrapup 入队即持久化 status="closing"（closing 是收尾阶段，
+   * 不可再接收 incremental 提交）；wrapup 任务的最终事务把 closing → closed /
+   * closed_incomplete（与 ContinuitySnapshot 同事务）。 */
   async enqueueWrapup(runtimeSessionId: string): Promise<boolean> {
     const frozen = await this.freezeCurrent(runtimeSessionId);
     if (frozen === null) {
       return false;
     }
-    const state = this.store.getSessionState(runtimeSessionId) ?? {
+    const durable = this.store.getSessionState(runtimeSessionId) ?? {
       runtimeSessionId,
       processedThroughEntrySeq: 0,
       status: "active" as const,
       updatedAt: new Date(this.nowMs()).toISOString(),
     };
+    const closing: HistorianSessionState = {
+      ...durable,
+      status: "closing",
+      observedHeadEntrySeq: frozen.snapshot.observedHeadEntrySeq,
+      updatedAt: new Date(this.nowMs()).toISOString(),
+    };
+    this.store.upsertSessionState(closing);
     return this.queue.enqueue({
       priority: "normal",
       runtimeSessionId,
       boundary: frozen.snapshot,
-      sessionState: state,
+      sessionState: closing,
     });
   }
 
@@ -252,6 +274,80 @@ export class HistorianManager {
     this.store.close();
   }
 
+  /**
+   * R3-P4：Pi Session compaction 授权（v13 "只有已进入 m0/m1 的 compartment 才可
+   * 替换 raw P5"）。cut = min(protectedTailStartEntrySeq - 1,
+   * lineageMaterializedEntrySeq)——保护尾部 raw-inviolable，任何授权都绝不越过
+   * protectedTailStartEntrySeq - 1；lineage 从未物化 → cut = 0（不授权）。
+   * 需要 historyPort（ContextHistoryReadPort）；未接线 → 抛错（fail-closed，
+   * compaction 授权必须显式接线才能生效）。
+   */
+  authorizeCompaction(runtimeSessionId: string): CompactionAuthorization {
+    if (this.historyPort === undefined) {
+      throw new Error(
+        "historian manager: authorizeCompaction requires a ContextHistoryReadPort (wire historyPort)",
+      );
+    }
+    const authorizer = createCompactionAuthorizer({
+      historyPort: this.historyPort,
+      sessionReadPort: this.readPort,
+      latestBoundaryFor: (sessionId) => this.store.listBoundarySnapshots(sessionId, 1)[0],
+    });
+    return authorizer.authorize(runtimeSessionId);
+  }
+
+  /**
+   * R3-P4：在 wrapup 的最终事务内发布剩余未处理窗口（复用 B5
+   * PublicationService.commitSafePrefix）。只发布 [cursor+1 ..
+   * eligibleThroughEntrySeq] 的未处理 safe prefix（与 frozen sourceRangeHash
+   * 同窗口）；validateRange 失败 → 本次 wrapup 只落快照（B3 语义：验证失败不
+   * 推进、不发布）。recallProjectionsFor 提供的投影（若存在）在同一事务内派生
+   * assessment delta。调用方必须在事务内调用本方法。
+   */
+  private commitWrapupPublication(input: {
+    runtimeSessionId: string;
+    boundary: HistorianBoundarySnapshot;
+    eligible: SequencedSessionEntry[];
+    state: HistorianSessionState;
+  }): void {
+    const unprocessedFrom = Math.max(1, (input.state.processedThroughEntrySeq ?? 0) + 1);
+    const unprocessed = input.eligible.filter((e) => e.entrySeq >= unprocessedFrom);
+    if (unprocessed.length === 0) {
+      return; // 全部已发布 → 仅快照，不产生新 publication
+    }
+    const analysis = buildAnalysisView({
+      runtimeSessionId: input.runtimeSessionId,
+      boundary: input.boundary,
+      eligibleEntries: unprocessed,
+    });
+    const outcome = validateRange({
+      runtimeSessionId: input.runtimeSessionId,
+      boundary: input.boundary,
+      eligibleEntries: unprocessed,
+    });
+    if (!outcome.ok) {
+      return; // 边界漂移 → 本次 wrapup 只落快照（不推进、不发布）
+    }
+    const projections = this.recallProjectionsFor?.(input.runtimeSessionId) ?? [];
+    const service =
+      projections.length === 0
+        ? this.service
+        : new PublicationService({
+            store: this.store,
+            nowMs: this.nowMs,
+            claimLeaseMs: this.claimLeaseMs,
+            recallProjections: projections,
+          });
+    service.commitSafePrefix({
+      runtimeSessionId: input.runtimeSessionId,
+      boundary: input.boundary,
+      safePrefix: unprocessed.filter((e) => e.entrySeq <= outcome.commitThroughEntrySeq),
+      analysis,
+      outcome,
+      previousProcessedThroughEntrySeq: input.state.processedThroughEntrySeq ?? 0,
+    });
+  }
+
   // ---- internals ----
 
   private async freezeCurrent(
@@ -306,24 +402,36 @@ export class HistorianManager {
           afterEntrySeqExclusive: 0,
           limit: 4096,
         });
-        const analysis: HistorianAnalysisView = buildAnalysisView({
+        const eligible = page.entries.filter((e) => e.entrySeq <= boundary.eligibleThroughEntrySeq);
+        const analysis = buildAnalysisView({
           runtimeSessionId,
           boundary,
-          eligibleEntries: page.entries.filter(
-            (e) => e.entrySeq <= boundary.eligibleThroughEntrySeq,
-          ),
+          eligibleEntries: eligible,
         });
-        runWrapup({
-          store: this.store,
-          runtimeSessionId,
-          state,
-          boundary,
-          eligibleEntries: page.entries.filter(
-            (e) => e.entrySeq <= boundary.eligibleThroughEntrySeq,
-          ),
-          analysis,
-          nowMs: this.nowMs,
-        });
+        // R3-P4 v13：wrapup 的最终事务 = session_state（cursor 载体 + 状态
+        // 转移）+ continuity_snapshot + 最终 publication + outbox（+
+        // assessment）在 ONE 事务内原子提交（B6 review #3 原子性的规格化）。
+        // runWrapup(commit:false) 只写不提交；PublicationService 在同一事务
+        // 内复用 B5 的 commitSafePrefix；任何一步失败 → 整事务回滚（cursor /
+        // snapshot / publication 都不落盘）。
+        this.store.begin();
+        try {
+          runWrapup({
+            store: this.store,
+            runtimeSessionId,
+            state,
+            boundary,
+            eligibleEntries: eligible,
+            analysis,
+            nowMs: this.nowMs,
+            commit: false,
+          });
+          this.commitWrapupPublication({ runtimeSessionId, boundary, eligible, state });
+          this.store.commit();
+        } catch (error) {
+          this.store.rollback();
+          throw error;
+        }
         return { ok: true };
       }
       // highest / manual: incremental commit via the runner.
