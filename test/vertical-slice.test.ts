@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +9,13 @@ import type { CustomMessage, SessionTreeEntry } from "@earendil-works/pi-agent-c
 
 import { defaultAgentConfig } from "../src/config/load.js";
 import { IRIS_INPUT_META_CONTENT, IRIS_INPUT_META_CUSTOM_TYPE } from "../src/contracts/context.js";
+import { ContextStore } from "../src/context/context-store.js";
+import { createContextHistoryReadPort } from "../src/context/history-read-port.js";
+import type { RuntimeSessionHistoryReadPort } from "../src/contracts/historian.js";
+import type { LineageBoundaryInput } from "../src/historian/historian-boundary.js";
+import { HistorianManager } from "../src/historian/historian-manager.js";
+import { HistorianStore } from "../src/historian/historian-store.js";
+import { resolveDataRootPaths } from "../src/host/data-root.js";
 import {
   computeContentLayoutHash,
   decodeInputFrames,
@@ -20,6 +27,31 @@ import {
   runMinimalSlice,
   sampleAgentInput,
 } from "../src/runtime/vertical-slice.js";
+
+/** R3-P1：记录 enqueueIncremental 调用的 mock manager（不触碰真实 freeze/runner）。 */
+class RecordingHistorianManager extends HistorianManager {
+  readonly enqueueCalls: Array<{
+    runtimeSessionId: string;
+    lineageBoundary: LineageBoundaryInput | undefined;
+  }> = [];
+
+  override async enqueueIncremental(
+    runtimeSessionId: string,
+    lineageBoundary?: LineageBoundaryInput,
+  ): Promise<boolean> {
+    this.enqueueCalls.push({ runtimeSessionId, lineageBoundary });
+    return true;
+  }
+}
+
+/** 空 Session 的 raw 读端口（mock；真实 freeze 不在此测试中执行）。 */
+function emptyReadPort(): RuntimeSessionHistoryReadPort {
+  return {
+    async readEntries() {
+      return { entries: [], nextCursor: 0, endOfSession: true, gap: null };
+    },
+  };
+}
 
 function messageEntries(entries: SessionTreeEntry[]): Array<{
   type: string;
@@ -125,4 +157,52 @@ test("restart reopens the same active Session without synthetic entries", async 
 
   assert.ok(!existsSync(join(dataRoot, "invocation.db")));
   assert.ok(!existsSync(join(dataRoot, "result.db")));
+});
+
+test("R3-P1 vertical slice: wired historianManager triggers enqueueIncremental on the HARD fold with the lineage boundary", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-slice-historian-"));
+  const historianDir = mkdtempSync(join(tmpdir(), "iris-slice-historian-db-"));
+  const config = defaultAgentConfig();
+  const input = sampleAgentInput();
+  const historianStore = HistorianStore.open({ databasePath: join(historianDir, "historian.db") });
+  try {
+    const manager = new RecordingHistorianManager({
+      store: historianStore,
+      readPort: emptyReadPort(),
+      modelProviderProfile: "mock-iris-provider-v1",
+      nowMs: () => 1_785_000_000_000,
+    });
+    const result = await runMinimalSlice({
+      dataRoot,
+      config,
+      input,
+      historianManager: manager,
+    });
+    // 一次 prompt → 结束时一次 persistRender → HARD（first_render）→ 一次触发。
+    assert.equal(manager.enqueueCalls.length, 1, "HARD fold at prompt completion triggers once");
+    const call = manager.enqueueCalls[0];
+    assert.ok(call, "enqueueIncremental was called");
+    assert.equal(call.runtimeSessionId, result.runtimeSessionId);
+    assert.ok(call.lineageBoundary !== undefined, "lineage boundary is passed to the freeze");
+    // 交叉验证：传入 freeze 的物化边界与 context.db 中持久化的 lineage 一致
+    // （端口读取为权威值）。
+    const paths = resolveDataRootPaths(dataRoot, config);
+    const reopened = ContextStore.open(paths.contextDb);
+    try {
+      const boundary = createContextHistoryReadPort(reopened).getMaterializedBoundary(
+        result.runtimeSessionId,
+      );
+      assert.equal(
+        call.lineageBoundary?.representedThroughEntrySeq,
+        boundary.representedThroughEntrySeq,
+        "wired boundary matches the durable lineage boundary",
+      );
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    historianStore.close();
+    rmSync(dataRoot, { recursive: true, force: true });
+    rmSync(historianDir, { recursive: true, force: true });
+  }
 });

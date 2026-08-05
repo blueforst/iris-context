@@ -309,6 +309,17 @@ export class ContextRenderer {
   private activeFold:
     { representedThroughContextSeq: number; m0Body: string; m1Body: string } | undefined;
 
+  /**
+   * R3-P1：HARD fold 提交后的回调（freeze-trigger 接线点）。persistRender 在
+   * HARD 物化成功落库后调用，携带本次 fold watermark 对应的 entrySeq（null =
+   * 该前缀内无携带 entry_seq 的单元 / watermark 为 0）。SOFT / SOFT+ 绝不触发
+   * （m0 未推进，无新的"已物化 compartment"信号）。由 vertical-slice 在
+   * historianManager 存在时注入；缺省 = 不接线（行为与 R2 完全一致）。
+   */
+  onMaterialized:
+    ((runtimeSessionId: string, representedThroughEntrySeq: number | null) => void) | undefined =
+    undefined;
+
   constructor(private readonly store: ContextStore) {}
 
   renderForProviderCall(args: RenderForProviderCallArgs): {
@@ -436,6 +447,17 @@ export class ContextRenderer {
           representedThroughContextSeq: record.representedThroughContextSeq,
           atMs: nowMs,
         });
+        // R3-P1：HARD fold 已提交 → 通知外部 freeze-trigger。该信号点是
+        // "一个 compartment 已物化"的权威时刻（materializeM0ByContextSeq
+        // 已推进 represented_through_context_seq）；回调携带该 watermark
+        // 对应的 entrySeq（store 聚合，与 ContextHistoryReadPort 同源）。
+        if (this.onMaterialized !== undefined) {
+          const representedThroughEntrySeq = this.store.maxEntrySeqAtOrBelowWatermark(
+            record.runtimeSessionId,
+            record.representedThroughContextSeq,
+          );
+          this.onMaterialized(record.runtimeSessionId, representedThroughEntrySeq);
+        }
         break;
       case "SOFT":
         this.store.materializeM1ByContextSeq({
