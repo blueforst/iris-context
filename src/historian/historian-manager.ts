@@ -23,6 +23,7 @@ import { PublicationService } from "./historian-publication.js";
 import { runWrapup } from "./historian-continuity.js";
 import { createCompactionAuthorizer, type CompactionAuthorization } from "./compaction-trigger.js";
 import type { ContextHistoryReadPort } from "../context/history-read-port.js";
+import type { MemoryClientPort } from "../contracts/ports.js";
 /**
  * R3 Historian product integration (issue #8 Phase B Feature B8).
  *
@@ -63,6 +64,11 @@ export interface HistorianManagerOptions {
   recallProjectionsFor?: (
     runtimeSessionId: string,
   ) => import("./historian-assessment.js").InvocationMemoryRecallProjection[];
+  /**
+   * R4:Memory Client(投递 publication 到 iris_memory)。缺省 = 未接线,
+   * drainOutbox 退化为旧行为(伪 receipt,仅供 lease 恢复验证)。
+   */
+  memoryClient?: MemoryClientPort;
 }
 
 export interface HistorianHealth {
@@ -84,6 +90,7 @@ export class HistorianManager {
   private readonly service: PublicationService;
   private readonly runner: HistorianRunner;
   private readonly historyPort: ContextHistoryReadPort | undefined;
+  private readonly memoryClient: MemoryClientPort | undefined;
   private readonly claimLeaseMs: number;
   private draining = false;
 
@@ -94,6 +101,7 @@ export class HistorianManager {
     this.nowMs = options.nowMs ?? (() => Date.now());
     this.recallProjectionsFor = options.recallProjectionsFor;
     this.historyPort = options.historyPort;
+    this.memoryClient = options.memoryClient;
     this.claimLeaseMs = options.claimLeaseMs ?? 60_000;
     this.queue = new HistorianQueue({
       maxQueuedJobs: options.maxQueuedJobs ?? 256,
@@ -235,18 +243,70 @@ export class HistorianManager {
     await this.worker.runOnce();
   }
 
-  /** Delivery loop: claim pending outbox rows and mark them delivered (a
-   * Router port would be invoked here; for now the claim+deliver cycle is
-   * exercised so lease recovery is proven). */
+  /**
+   * Delivery loop: claim pending outbox rows and deliver via the Memory
+   * Client (R4). Success/conflict → delivered with the REAL receipt hash;
+   * validation/unsupported → quarantined; transient/unavailable → the claim
+   * lease expires and the row is re-claimed (crash-recoverable). Without a
+   * memoryClient the old fake-receipt cycle is kept (lease recovery proof).
+   */
   drainOutbox(batchSize = 10): number {
     const batch = this.service.claimBatch({ batchSize });
+    if (this.memoryClient === undefined) {
+      for (const row of batch) {
+        this.service.markDelivered({
+          publicationId: row.publicationId,
+          receiptHash: `receipt-${row.outboxSequence}`,
+        });
+      }
+      return batch.length;
+    }
     for (const row of batch) {
-      this.service.markDelivered({
-        publicationId: row.publicationId,
-        receiptHash: `receipt-${row.outboxSequence}`,
-      });
+      if (row.payloadJson === undefined) {
+        // 无 payload(旧行/未写 payload_json)→ 保留待重试,不误标 delivered。
+        continue;
+      }
+      void this.deliverOne(row);
     }
     return batch.length;
+  }
+
+  /** 单条投递(异步;失败走 lease 过期重认领,不阻塞循环)。 */
+  private async deliverOne(row: {
+    publicationId: string;
+    payloadJson: string | null;
+  }): Promise<void> {
+    if (row.payloadJson === null) {
+      return;
+    }
+    let publication: unknown;
+    try {
+      publication = JSON.parse(row.payloadJson);
+    } catch {
+      this.service.markFailed({
+        publicationId: row.publicationId,
+        errorCode: "invalid_payload_json",
+        maxAttempts: 1,
+      });
+      return;
+    }
+    const outcome = await this.memoryClient?.deliverPublication(publication);
+    if (outcome === undefined) {
+      return;
+    }
+    if (outcome.ok) {
+      this.service.markDelivered({
+        publicationId: row.publicationId,
+        receiptHash: outcome.receiptHash,
+      });
+    } else if (outcome.error === "rejected") {
+      this.service.markFailed({
+        publicationId: row.publicationId,
+        errorCode: "memory_rejected",
+        maxAttempts: 1,
+      });
+    }
+    // unavailable / http_5xx:保持 delivering,lease 过期后重认领。
   }
 
   /** Health/readiness snapshot. */

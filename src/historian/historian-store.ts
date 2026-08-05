@@ -363,14 +363,15 @@ export class HistorianStore {
   insertOutboxRow(row: Omit<OutboxRow, "outboxSequence">): void {
     this.db
       .prepare(
-        "INSERT INTO publication_outbox (publication_id, runtime_session_id, payload_hash, state, " +
+        "INSERT INTO publication_outbox (publication_id, runtime_session_id, payload_hash, payload_json, state, " +
           "attempt_count, last_error_code, claim_leased_until, created_at, updated_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         row.publicationId,
         row.runtimeSessionId,
         row.payloadHash,
+        row.payloadJson ?? null,
         row.state,
         row.attemptCount,
         row.lastErrorCode,

@@ -18,6 +18,7 @@ import type { HistorianAnalysisView } from "./historian-analysis.js";
 import type { ValidationOutcome } from "./historian-analysis.js";
 import { buildCompartment } from "./historian-compartment.js";
 import type { HistorianUnitView } from "./anti-echo.js";
+import type { BuiltCompartment } from "./historian-compartment.js";
 import {
   deriveMemoryAssessments,
   type InvocationMemoryRecallProjection,
@@ -77,6 +78,8 @@ export interface OutboxRow {
   publicationId: string;
   runtimeSessionId: string;
   payloadHash: string;
+  /** R4:完整 historian-publication-v2 envelope(投递到 iris_memory)。 */
+  payloadJson: string | null;
   state: OutboxState;
   attemptCount: number;
   lastErrorCode: string | null;
@@ -248,6 +251,7 @@ export class PublicationService {
       publicationId,
       runtimeSessionId,
       payloadHash: outputHash,
+      payloadJson: this.buildPublicationEnvelope(built, nextSequence, now),
       state: "pending",
       attemptCount: 0,
       lastErrorCode: null,
@@ -255,6 +259,57 @@ export class PublicationService {
       createdAt: now,
       updatedAt: now,
     });
+  }
+
+  /**
+   * R4 (iris_memory#6):构建 historian-publication-v2 envelope —— Memory
+   * Client 投递到 iris_memory /historian/publications 的完整 payload。
+   * 字段与 iris-memory-contracts 0.2.0 的 historian-publication-v2 schema
+   * 对齐(evidenceBasis/derivedOnly 来自 anti-echo 分类)。
+   */
+  private buildPublicationEnvelope(
+    built: BuiltCompartment,
+    publicationSequence: number,
+    now: string,
+  ): string {
+    const evidence = built.evidence;
+    const basis =
+      evidence.evidenceBasis !== undefined
+        ? evidence.evidenceBasis.map((ref) => ({
+            contextUnitId: ref.contextUnitId,
+            contextSeq: ref.contextSeq,
+            runtimeEventId: ref.runtimeEventId,
+            contentHash: ref.contentHash,
+            historianDisposition: ref.historianDisposition,
+            ...(ref.derivationRefs !== undefined ? { derivationRefs: ref.derivationRefs } : {}),
+          }))
+        : [];
+    const envelope = {
+      schemaVersion: "historian-publication-v2",
+      publicationId: `publication-${built.compartment.runtimeSessionId}-${publicationSequence}`,
+      sourceSequence: publicationSequence,
+      publishedAt: now,
+      payloadHash: createHash("sha256")
+        .update(
+          `${built.compartment.sourceRangeHash}:${basis.map((b) => b.contextUnitId).join(",")}`,
+          "utf8",
+        )
+        .digest("hex"),
+      contextRange: {
+        contextLineageId: `identity-${built.compartment.runtimeSessionId}`,
+        fromContextSeq: basis.length > 0 ? Math.min(...basis.map((b) => b.contextSeq)) : 1,
+        toContextSeq: basis.length > 0 ? Math.max(...basis.map((b) => b.contextSeq)) : 0,
+        rangeHash: built.compartment.sourceRangeHash,
+      },
+      semanticSourceVersion: "context-unit-v1",
+      compartmentCount: 1,
+      segmentCount: built.segments.length,
+      evidenceCount: basis.length,
+      evidenceBasis: basis,
+      derivedOnly: evidence.derivedOnly ?? basis.length === 0,
+      summary: built.compartment.content.slice(0, 4000),
+    };
+    return JSON.stringify(envelope);
   }
 
   /** publicationSequence = MAX(publication_sequence)+1 (in-transaction). */
@@ -288,7 +343,7 @@ export class PublicationService {
     const rows = this.store
       .raw()
       .prepare(
-        "SELECT outbox_sequence, publication_id, runtime_session_id, payload_hash, state, " +
+        "SELECT outbox_sequence, publication_id, runtime_session_id, payload_hash, payload_json, state, " +
           "attempt_count, last_error_code, claim_leased_until, created_at, updated_at " +
           "FROM publication_outbox " +
           "WHERE state IN ('pending','retry_wait','delivering') AND " +
@@ -300,6 +355,7 @@ export class PublicationService {
       publication_id: string;
       runtime_session_id: string;
       payload_hash: string;
+      payload_json: string | null;
       state: OutboxState;
       attempt_count: number;
       last_error_code: string | null;
@@ -321,6 +377,7 @@ export class PublicationService {
       publicationId: row.publication_id,
       runtimeSessionId: row.runtime_session_id,
       payloadHash: row.payload_hash,
+      payloadJson: row.payload_json,
       state: "delivering",
       attemptCount: row.attempt_count,
       lastErrorCode: row.last_error_code,
