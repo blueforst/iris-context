@@ -118,6 +118,11 @@ export type HistoryProjectionUnit =
       inputId?: string;
       pairKey?: string;
       verified: boolean;
+      /** Canonical provider-visible text (origin-labelled real content).
+       * R3-P0 port：类型级扩展（可选），供 contracts/historian.ts 使用；本
+       * 构建器暂不填充（分支上的 provider-visible 渲染器属于被排除的 A-phase
+       * 特性，R3-P1..P4 对齐 v13 规格时接入）。 */
+      providerVisible?: string;
     }
   | {
       kind: "assistant";
@@ -130,6 +135,9 @@ export type HistoryProjectionUnit =
       providerProfileId?: string;
       modelKey?: string;
       stopReason?: string;
+      /** Canonical provider-visible text (real assistant words + tool calls).
+       * R3-P0 port：类型级扩展（可选），见 input 变体注释。 */
+      providerVisible?: string;
     }
   | {
       kind: "tool_result";
@@ -141,6 +149,9 @@ export type HistoryProjectionUnit =
       toolCallId: string;
       toolName: string;
       toolExecutionKey?: string;
+      /** Canonical provider-visible text (real tool result content).
+       * R3-P0 port：类型级扩展（可选），见 input 变体注释。 */
+      providerVisible?: string;
     }
   | {
       kind: "tool_arc";
@@ -153,6 +164,9 @@ export type HistoryProjectionUnit =
       entryRange: { startEntrySeq: number; endEntrySeq: number };
       contentHash: string;
       sealed: boolean;
+      /** Provider-visible text: empty (the arc is an atomicity seam).
+       * R3-P0 port：类型级扩展（可选），见 input 变体注释。 */
+      providerVisible?: string;
     }
   | {
       kind: "reasoning";
@@ -161,6 +175,9 @@ export type HistoryProjectionUnit =
       assistantEntryId: string;
       entrySeq: number;
       contentHash: string;
+      /** Canonical provider-visible text (preserved thinking).
+       * R3-P0 port：类型级扩展（可选），见 input 变体注释。 */
+      providerVisible?: string;
     }
   | {
       kind: "compaction_boundary";
@@ -170,6 +187,9 @@ export type HistoryProjectionUnit =
       entrySeq: number;
       summary: string;
       firstKeptEntryId?: string;
+      /** Provider-visible text (compaction summary marker).
+       * R3-P0 port：类型级扩展（可选），见 input 变体注释。 */
+      providerVisible?: string;
     }
   | {
       kind: "branch_boundary";
@@ -179,6 +199,9 @@ export type HistoryProjectionUnit =
       entrySeq: number;
       fromId: string;
       summary: string;
+      /** Provider-visible text (branch boundary marker).
+       * R3-P0 port：类型级扩展（可选），见 input 变体注释。 */
+      providerVisible?: string;
     };
 
 export interface ProjectedLogicalUnits {
