@@ -8,18 +8,19 @@
     "lockfile": "package-lock.json"
   },
   "pi": {
-    "currentDependencySource": "npm_registry_earendil_works_release",
+    "currentDependencySource": "file_link_adjacent_fork_checkout",
     "packages": {
-      "@earendil-works/pi-agent-core": "0.82.1",
-      "@earendil-works/pi-ai": "0.82.1",
-      "@earendil-works/pi-storage-sqlite-node": "0.82.1"
+      "@earendil-works/pi-agent-core": "file:../pi/packages/agent",
+      "@earendil-works/pi-ai": "file:../pi/packages/ai",
+      "@earendil-works/pi-storage-sqlite-node": "file:../pi/packages/storage/sqlite-node"
     },
     "fork": {
       "repository": "blueforst/pi",
       "baselineCommit": "ab5f8d88ee1d400c0c8fb5c50ac10b2f4a4851d1",
+      "seamCommit": "e18f7dd1457ea4a5987b4d44d0c41e0dfa48cedd",
       "upstreamBaseCommit": "e741cb05ca7c1c7bc5a9664c99697df32de9fac6",
       "upstreamAuditBaselineCommit": "b4f293684bba718d59cc1157679bcf6157b3a7f5",
-      "adoptionStatus": "planned_at_r1_seam_availability"
+      "adoptionStatus": "file_link_local_development"
     }
   },
   "magicContext": {

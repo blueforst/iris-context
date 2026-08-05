@@ -21,7 +21,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createNodeSqliteFactory, SqliteSessionRepo } from "@earendil-works/pi-storage-sqlite-node";
+import {
+  createNodeSqliteFactory,
+  SqliteSessionRepository,
+} from "@earendil-works/pi-storage-sqlite-node";
 
 import { defaultAgentConfig } from "../src/config/load.js";
 import { initializeDataRoot, resolveDataRootPaths } from "../src/host/data-root.js";
@@ -124,7 +127,7 @@ try {
     );
     epochStore.ensureActive("2026-08-01T00:00:00.000Z");
     const pending = epochStore.beginRollover("2026-08-01T00:00:00.000Z");
-    const repo = new SqliteSessionRepo({
+    const repo = new SqliteSessionRepository({
       env: nodeSqliteRepoEnv(dataRoot),
       sqlite: createNodeSqliteFactory(),
       databasePath: paths.sessionDb,
@@ -134,7 +137,7 @@ try {
     await park();
   }
 
-  const repo = new SqliteSessionRepo({
+  const repo = new SqliteSessionRepository({
     env: nodeSqliteRepoEnv(dataRoot),
     sqlite: createNodeSqliteFactory(),
     databasePath: paths.sessionDb,

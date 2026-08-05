@@ -70,6 +70,35 @@ test("r0: Pi package pins match package.json dependencies exactly", () => {
   assert.deepEqual(piPkgs.sort(), Object.keys(lock.pi.packages).sort());
 });
 
+test("r0: Pi file: dependency targets exist and are the adjacent fork checkout (fail-closed)", () => {
+  const lock = readProductionLock();
+  const pkg = JSON.parse(
+    readFileSync(resolve(import.meta.dirname, "..", "package.json"), "utf8"),
+  ) as { dependencies: Record<string, string> };
+  for (const [name, spec] of Object.entries(lock.pi.packages)) {
+    assert.ok(
+      spec.startsWith("file:../pi/packages/"),
+      `${name} must use the adjacent fork checkout file: spec (got ${spec})`,
+    );
+    assert.equal(pkg.dependencies[name], spec);
+    // Fail closed when the adjacent checkout is missing or not a fork commit.
+    const target = resolve(import.meta.dirname, "..", spec.slice("file:".length));
+    const targetPkg = JSON.parse(readFileSync(resolve(target, "package.json"), "utf8")) as {
+      name: string;
+      version: string;
+    };
+    assert.equal(targetPkg.name, name, `${target} must be the ${name} package`);
+    assert.notEqual(targetPkg.version, "0.82.1", `${name} must NOT be the upstream 0.82.1 release`);
+  }
+});
+
+test("r0: fork seam commit is a full SHA and adoption status is local file link", () => {
+  const lock = readProductionLock();
+  assert.match(lock.pi.fork.seamCommit, SHA40);
+  assert.equal(lock.pi.currentDependencySource, "file_link_adjacent_fork_checkout");
+  assert.equal(lock.pi.fork.adoptionStatus, "file_link_local_development");
+});
+
 test("r0: memory contract pin and production lock agree on the artifact", () => {
   const lock = readProductionLock();
   const pin = readContractPin();

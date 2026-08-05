@@ -6,14 +6,14 @@
 
 锁定的版本面（对应 Roadmap v13 R0 deliverables）：
 
-| 面                        | 锁定值                                                                                                          | 状态                                                             |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| Node                      | `>=22.19.0`（CI 精确 `22.19.0`），npm + package-lock.json                                                       | 已锁定                                                           |
-| Pi packages（当前消费源） | `@earendil-works/pi-*@0.82.1`（npm registry release）                                                           | 已锁定                                                           |
-| Pi 受控 fork              | `blueforst/pi` baseline `ab5f8d88…`；upstream base `e741cb05…`；audit baseline `b4f2936…/0.82.1`                | 已锁定（adoption 计划于 R1 seam 可用时切换）                     |
-| Magic Context             | `cortexkit/magic-context` `v0.33.0` @ `48ab531d…`，authoritative path `packages/plugin/src/hooks/magic-context` | 已锁定                                                           |
-| Memory contracts          | `iris-memory-contracts@0.1.1`，manifestSha256 `2cb22deb…`，owner `blueforst/iris_memory`                        | 已锁定（与 `src/contracts/pins/memory-contracts.json` 交叉一致） |
-| Graphiti / Neo4j          | `graphiti-core@0.29.2`、neo4j driver min `5.26.0`（候选锁，owner `blueforst/iris_memory`；agent 无直接依赖）    | 候选锁定                                                         |
+| 面                        | 锁定值                                                                                                                                     | 状态                                                             |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| Node                      | `>=22.19.0`（CI 精确 `22.19.0`），npm + package-lock.json                                                                                  | 已锁定                                                           |
+| Pi packages（当前消费源） | `file:../pi/packages/{agent,ai,sqlite-node}`（相邻 blueforst/pi checkout，单机开发决策，未发布 npm）                                       | 已锁定                                                           |
+| Pi 受控 fork              | `blueforst/pi` baseline `ab5f8d88…`；seam commit `b7c5f40…`（PI-015/016/017）；upstream base `e741cb05…`；audit baseline `b4f2936…/0.82.1` | 已锁定（file link 本地开发，未来多机部署切换 tarball/npm 发布）  |
+| Magic Context             | `cortexkit/magic-context` `v0.33.0` @ `48ab531d…`，authoritative path `packages/plugin/src/hooks/magic-context`                            | 已锁定                                                           |
+| Memory contracts          | `iris-memory-contracts@0.1.1`，manifestSha256 `2cb22deb…`，owner `blueforst/iris_memory`                                                   | 已锁定（与 `src/contracts/pins/memory-contracts.json` 交叉一致） |
+| Graphiti / Neo4j          | `graphiti-core@0.29.2`、neo4j driver min `5.26.0`（候选锁，owner `blueforst/iris_memory`；agent 无直接依赖）                               | 候选锁定                                                         |
 
 跨仓库一致性：Pi fork 的值与 `blueforst/pi` 的
 `docs/iris-fork/production-lock.json` 对齐；memory contracts 的值与
