@@ -173,3 +173,164 @@ test("r1 gate3: ledger persists across reopen (crash-window recovery basis)", as
     // OS tmpdir 管理。
   }
 });
+
+// --- iris_agent#40: every supported append path reaches the ledger ----------
+
+test("r40: direct harness.appendMessage produces exactly one ledger message_finalized", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-r40-direct-"));
+  try {
+    const config = defaultAgentConfig();
+    const now = "2026-08-05T00:00:00.000Z";
+    initializeDataRoot(dataRoot, config);
+    const paths = resolveDataRootPaths(dataRoot, config);
+    const epochStore = new RuntimeEpochStore(
+      paths.epochRegistryDb,
+      config.runtime_sessions.session_id_prefix,
+      config.runtime_sessions.timezone,
+    );
+    const epoch = epochStore.ensureActive(now);
+    const { repo, session } = await openOrCreateSession(dataRoot, config, epoch.runtimeSessionId);
+    const { models, model, providerProfileId } = await composeProvider("mock");
+    const prepared = prepareContextSources(
+      sampleAgentInput(),
+      epoch.runtimeSessionId,
+      epoch.epochId,
+      config,
+      now,
+    );
+    const { harness } = createIrisHarness({
+      session,
+      instanceEpoch: epoch.ordinalWithinDate,
+      models,
+      model,
+      tools: [makeReadOnlyTestTool()],
+      currentInvocation: {
+        input: sampleAgentInput(),
+        prepared,
+        invocationId: `invocation-direct`,
+      },
+      now,
+      providerProfileId,
+    });
+    const ledger = RuntimeEventLedger.open(paths.runtimeLedgerDb);
+    attachRuntimeEventSeam(harness, {
+      ledger,
+      runtimeSessionId: epoch.runtimeSessionId,
+      piSessionId: epoch.runtimeSessionId,
+    });
+
+    // Direct append outside the agent loop must still produce a receipt event.
+    await harness.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: "direct append" }],
+      timestamp: Date.now(),
+    });
+
+    const events = ledger.listBySession(epoch.runtimeSessionId);
+    const finalized = events.filter((event) => event.type === "message_finalized");
+    assert.equal(finalized.length, 1, "direct append must yield exactly one message_finalized");
+    const firstFinalized = finalized[0];
+    assert.ok(firstFinalized !== undefined);
+    assert.ok(typeof firstFinalized.entryId === "string" && firstFinalized.entryId.length > 0);
+    assert.equal(firstFinalized.contentHash?.length, 64);
+    ledger.close();
+    await closeSessionStorage(repo);
+    epochStore.close();
+  } finally {
+    // OS tmpdir 管理。
+  }
+});
+
+test("r40: pending-writes flush appends are committed to the ledger exactly once", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-r40-flush-"));
+  try {
+    const config = defaultAgentConfig();
+    const now = "2026-08-05T00:00:00.000Z";
+    initializeDataRoot(dataRoot, config);
+    const paths = resolveDataRootPaths(dataRoot, config);
+    const epochStore = new RuntimeEpochStore(
+      paths.epochRegistryDb,
+      config.runtime_sessions.session_id_prefix,
+      config.runtime_sessions.timezone,
+    );
+    const epoch = epochStore.ensureActive(now);
+    const { repo, session } = await openOrCreateSession(dataRoot, config, epoch.runtimeSessionId);
+    const { models, model, providerProfileId } = await composeProvider("mock");
+    const prepared = prepareContextSources(
+      sampleAgentInput(),
+      epoch.runtimeSessionId,
+      epoch.epochId,
+      config,
+      now,
+    );
+    const { harness } = createIrisHarness({
+      session,
+      instanceEpoch: epoch.ordinalWithinDate,
+      models,
+      model,
+      tools: [makeReadOnlyTestTool()],
+      currentInvocation: {
+        input: sampleAgentInput(),
+        prepared,
+        invocationId: `invocation-flush`,
+      },
+      now,
+      providerProfileId,
+    });
+    const ledger = RuntimeEventLedger.open(paths.runtimeLedgerDb);
+    attachRuntimeEventSeam(harness, {
+      ledger,
+      runtimeSessionId: epoch.runtimeSessionId,
+      piSessionId: epoch.runtimeSessionId,
+    });
+
+    // While a prompt is in flight, appends are queued and flushed later; both
+    // queued messages must appear in the ledger with distinct entries.
+    const promptPromise = harness.prompt("hello");
+    await harness.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: "queued-1" }],
+      timestamp: Date.now(),
+    });
+    await harness.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: "queued-2" }],
+      timestamp: Date.now(),
+    });
+    await promptPromise;
+
+    const events = ledger.listBySession(epoch.runtimeSessionId);
+    const finalized = events.filter((event) => event.type === "message_finalized");
+    // prompt user + assistant + two queued messages
+    assert.ok(finalized.length >= 4, `expected >=4 message_finalized, got ${finalized.length}`);
+    const entryIds = new Set(finalized.map((event) => event.entryId));
+    assert.equal(
+      entryIds.size,
+      finalized.length,
+      "each appended message must have a distinct entryId",
+    );
+    // Ordering: the two queued appends appear after the prompt's assistant reply.
+    const texts = finalized.map((event) => {
+      try {
+        return (
+          (JSON.parse(event.payload ?? "{}") as { content?: Array<{ text?: string }> }).content?.[0]
+            ?.text ?? ""
+        );
+      } catch {
+        return "";
+      }
+    });
+    const queuedIdx = [texts.indexOf("queued-1"), texts.indexOf("queued-2")];
+    assert.ok(queuedIdx[0] !== undefined && queuedIdx[0] > 0, "queued messages must be present");
+    assert.ok(queuedIdx[1] !== undefined && queuedIdx[1] > 0, "queued messages must be present");
+    assert.ok(
+      queuedIdx[0] !== undefined && queuedIdx[1] !== undefined && queuedIdx[1] > queuedIdx[0],
+      "queued messages must keep commit order",
+    );
+    ledger.close();
+    await closeSessionStorage(repo);
+    epochStore.close();
+  } finally {
+    // OS tmpdir 管理。
+  }
+});
