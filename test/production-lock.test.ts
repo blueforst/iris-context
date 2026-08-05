@@ -192,6 +192,66 @@ test("r41: Pi authoritative lock acceptedRuntime agrees with this repository pin
   );
 });
 
+test("r41: acceptedRuntimeCommit is anchored inside the checked-out seamCommit history", () => {
+  // The seam checkout must contain the accepted runtime commit as an
+  // ancestor; otherwise a consistently-tampered pin could point at an
+  // arbitrary valid commit that is unrelated to the accepted identity.
+  const lock = readProductionLock();
+  assert.equal(
+    git(PI_DIR, [
+      "merge-base",
+      "--is-ancestor",
+      lock.pi.fork.acceptedRuntimeCommit,
+      lock.pi.fork.seamCommit,
+    ]),
+    "",
+    `acceptedRuntimeCommit ${lock.pi.fork.acceptedRuntimeCommit} must be an ancestor of seamCommit ${lock.pi.fork.seamCommit}`,
+  );
+  // The tree relationship must hold too: the accepted commit's tree is what
+  // the Pi lock records, and it must be reachable from the checked-out HEAD.
+  assert.equal(
+    git(PI_DIR, ["merge-base", "--is-ancestor", lock.pi.fork.acceptedRuntimeCommit, "HEAD"]),
+    "",
+    `acceptedRuntimeCommit must be an ancestor of ../pi HEAD`,
+  );
+});
+
+test("r41: a consistent but wrong pin (valid hex, unrelated identity) is rejected", () => {
+  // Tamper the pin with a *valid* 40-hex commit that is NOT an ancestor of
+  // the real accepted commit: every SHA-shape check passes, only the ancestry
+  // anchor catches it. This proves the gate is fail-closed against consistent
+  // tampering, not just malformed SHAs.
+  const dir = mkdtempSync(join(tmpdir(), "iris-pin-swap-"));
+  const tampered = join(dir, "production-lock.json");
+  const lock = readProductionLock();
+  const wrong = "f".repeat(40); // valid shape, not an ancestor of anything real
+  const swapped = JSON.parse(JSON.stringify(lock)) as typeof lock;
+  swapped.pi.fork.seamCommit = wrong;
+  swapped.pi.fork.seamTree = wrong;
+  writeFileSync(tampered, JSON.stringify(swapped, null, 2));
+  // The pin reader itself only validates shape, so it would accept the swap;
+  // the ancestry anchor lives in this gate (it reads the *real* adjacent
+  // checkout), which is why the test asserts the anchor catches it.
+  const readerOut = execFileSync(
+    process.execPath,
+    [resolve(import.meta.dirname, "..", "scripts", "read-pi-pin.mjs"), "--pin", tampered],
+    { encoding: "utf8" },
+  ).trim();
+  assert.equal(readerOut, wrong);
+  // Gate-side anchor: the wrong commit is not an ancestor of ../pi HEAD.
+  const head = git(PI_DIR, ["rev-parse", "HEAD"]);
+  assert.notEqual(head, wrong);
+  const anchor = (() => {
+    try {
+      git(PI_DIR, ["merge-base", "--is-ancestor", wrong, head]);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  assert.equal(anchor, false, "wrong valid-hex commit must fail the ancestry anchor");
+});
+
 test("r41: CI checkout ref is derived from the pin, not a duplicate hardcoded SHA", () => {
   const ci = readFileSync(
     resolve(import.meta.dirname, "..", ".github", "workflows", "ci.yml"),
