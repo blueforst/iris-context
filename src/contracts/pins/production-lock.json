@@ -17,7 +17,7 @@
     "fork": {
       "repository": "blueforst/pi",
       "baselineCommit": "ab5f8d88ee1d400c0c8fb5c50ac10b2f4a4851d1",
-      "seamCommit": "b7c5f40c3040f179fe644e0ffad1970a14563b15",
+      "seamCommit": "e18f7dd1457ea4a5987b4d44d0c41e0dfa48cedd",
       "upstreamBaseCommit": "e741cb05ca7c1c7bc5a9664c99697df32de9fac6",
       "upstreamAuditBaselineCommit": "b4f293684bba718d59cc1157679bcf6157b3a7f5",
       "adoptionStatus": "file_link_local_development"
