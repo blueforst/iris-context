@@ -10,7 +10,7 @@
  *  6. envelope 字段与 historian-publication-v2 schema 对齐(anti-echo
  *     evidenceBasis/derivedOnly 传递)。
  */
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -256,6 +256,111 @@ test("r4 memory client: envelope carries anti-echo basis and derivedOnly", async
     assert.equal(sent.derivedOnly, true);
     assert.equal(sent.evidenceBasis.length, 0);
     assert.equal(sent.evidenceCount, 0);
+  } finally {
+    store.close();
+  }
+});
+
+test("r4 memory client: real envelope (from commitSafePrefix) validates against pinned 0.2.0 schema", async () => {
+  // 驱动真实生产路径:PublicationService.commitSafePrefix → buildCompartment
+  // (带 unitViews)→ buildPublicationEnvelope → outbox payload_json。
+  const dir = mkdtempSync(join(tmpdir(), "iris-r4-schema-"));
+  const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
+  try {
+    const { PublicationService } = await import("../src/historian/historian-publication.js");
+    const service = new PublicationService({ store, historyPort: fakeHistoryPort() });
+    const safePrefix = [
+      {
+        runtimeSessionId: SESSION,
+        entrySeq: 1,
+        entryId: "entry-1",
+        entry: {
+          type: "message",
+          id: "e-1",
+          parentId: null,
+          timestamp: "t",
+          message: { role: "user", content: "hello", timestamp: 1 },
+        },
+        contentHash: "b".repeat(64),
+      },
+    ];
+    service.commitSafePrefix({
+      runtimeSessionId: SESSION,
+      boundary: {
+        boundarySnapshotId: "bs-1",
+        runtimeSessionId: SESSION,
+        observedHeadEntrySeq: 1,
+        eligibleThroughEntrySeq: 1,
+        protectedTailStartEntrySeq: 2,
+        trueRawEligibleTokens: 10,
+        narratableEligibleTokens: 10,
+        sourceRangeHash: "range-hash-1",
+        modelProviderProfile: "mock",
+        frozenAt: "t",
+      },
+      safePrefix,
+      analysis: {
+        runtimeSessionId: SESSION,
+        boundary: {} as never,
+        eligibleEntries: safePrefix as never,
+        units: [
+          {
+            entrySeq: 1,
+            entryId: "entry-1",
+            kind: "user_input" as const,
+            inFlight: false,
+            providerVisible: "hello",
+          },
+        ],
+        trueRawEligibleTokens: 10,
+      },
+      outcome: { ok: true, commitThroughEntrySeq: 1, discardedFromEntrySeq: null } as never,
+      previousProcessedThroughEntrySeq: 0,
+    });
+
+    const row = store
+      .raw()
+      .prepare("SELECT payload_json FROM publication_outbox WHERE publication_id = ?")
+      .get("publication-iris-runtime-2026-08-01-1-1") as { payload_json: string };
+    assert.ok(row.payload_json, "envelope must be persisted");
+    const sent = JSON.parse(row.payload_json) as Record<string, unknown>;
+
+    // 用 pinned 0.2.0 schema(与 memory-contract-gate 相同方式)校验
+    const { Ajv2020 } = await import("ajv/dist/2020.js");
+    const formatsModule = await import("ajv-formats");
+    const formatsPlugin = formatsModule.default as unknown as (validator: unknown) => void;
+    const ARTIFACT = "fixtures/memory-contracts-artifact/iris-memory-contracts-0.2.0";
+    const manifest = JSON.parse(readFileSync(join(ARTIFACT, "manifest.json"), "utf8")) as {
+      schemas: string[];
+    };
+    const ajv = new Ajv2020({ allErrors: true });
+    formatsPlugin(ajv);
+    let targetId: string | undefined;
+    for (const schemaRelative of manifest.schemas) {
+      const s = JSON.parse(readFileSync(join(ARTIFACT, schemaRelative), "utf8")) as {
+        $id?: string;
+      };
+      if (typeof s.$id === "string") {
+        ajv.addSchema(s, s.$id);
+        if (schemaRelative === "schemas/historian-publication-v2.schema.json") {
+          targetId = s.$id;
+        }
+      }
+    }
+    const validate = ajv.getSchema(targetId ?? "");
+    assert.ok(validate, "v2 schema must be registered");
+    const valid = validate(sent);
+    if (!valid) {
+      assert.fail(`envelope fails pinned schema: ${JSON.stringify(validate.errors)}`);
+    }
+    // publicationId 必须满足 uuid 格式
+    const pubId = sent["publicationId"] as string;
+    assert.match(pubId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    // contextRange 必须 >= 1
+    const range = sent["contextRange"] as { fromContextSeq: number; toContextSeq: number };
+    assert.ok(range.fromContextSeq >= 1);
+    assert.ok(range.toContextSeq >= 1);
+    assert.ok(range.fromContextSeq <= range.toContextSeq);
   } finally {
     store.close();
   }

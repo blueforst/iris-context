@@ -51,6 +51,27 @@ import {
  * runner's BEGIN..COMMIT, so a throw rolls the whole transaction back.
  */
 
+/** 确定性 RFC-4122 UUID(sha1(namespace || name),version 5 + variant 10)。
+ * 满足 0.2.0 schema 的 format: uuid,且跨重启稳定(publication 幂等键)。 */
+export function deterministicUuid(name: string): string {
+  const NAMESPACE = "6ba7b811-9dad-11d1-80b4-00c04fd430c8"; // DNS namespace
+  const nsBytes = [...Buffer.from(NAMESPACE.replaceAll("-", ""), "hex")];
+  const nameBytes = [...Buffer.from(name, "utf8")];
+  const digest = createHash("sha1")
+    .update(Buffer.from([...nsBytes, ...nameBytes]))
+    .digest();
+  const bytes = Array.from(digest.subarray(0, 16));
+  const b6 = bytes[6];
+  const b8 = bytes[8];
+  if (b6 === undefined || b8 === undefined) {
+    throw new Error("deterministicUuid: digest too short");
+  }
+  bytes[6] = (b6 & 0x0f) | 0x50; // version 5
+  bytes[8] = (b8 & 0x3f) | 0x80; // variant 10
+  const hex = bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
 export type OutboxState = "pending" | "delivering" | "retry_wait" | "delivered" | "quarantined";
 
 export interface PublicationRecord {
@@ -251,7 +272,7 @@ export class PublicationService {
       publicationId,
       runtimeSessionId,
       payloadHash: outputHash,
-      payloadJson: this.buildPublicationEnvelope(built, nextSequence, now),
+      payloadJson: this.buildPublicationEnvelope(built, nextSequence, now, unitViews),
       state: "pending",
       attemptCount: 0,
       lastErrorCode: null,
@@ -271,6 +292,7 @@ export class PublicationService {
     built: BuiltCompartment,
     publicationSequence: number,
     now: string,
+    unitViews?: HistorianUnitView[],
   ): string {
     const evidence = built.evidence;
     const basis =
@@ -284,9 +306,28 @@ export class PublicationService {
             ...(ref.derivationRefs !== undefined ? { derivationRefs: ref.derivationRefs } : {}),
           }))
         : [];
+    // contextRange 覆盖本批 Context 单元(unitViews 优先;退化到 basis;
+    // 两者皆空 = 纯 derived-only 批,仍给合法最小范围 1..1,绝不为 0)。
+    const rangeSeqs = (unitViews ?? []).map((u) => u.contextSeq);
+    const fromContextSeq =
+      rangeSeqs.length > 0
+        ? Math.min(...rangeSeqs)
+        : basis.length > 0
+          ? Math.min(...basis.map((b) => b.contextSeq))
+          : 1;
+    const toContextSeq =
+      rangeSeqs.length > 0
+        ? Math.max(...rangeSeqs)
+        : basis.length > 0
+          ? Math.max(...basis.map((b) => b.contextSeq))
+          : 1;
     const envelope = {
       schemaVersion: "historian-publication-v2",
-      publicationId: `publication-${built.compartment.runtimeSessionId}-${publicationSequence}`,
+      // 0.2.0 schema 要求 format: uuid;确定性派生(sha256 of
+      // session:seq)保证跨重启稳定、可被 iris_memory 强校验通过。
+      publicationId: deterministicUuid(
+        `iris:historian-publication:${built.compartment.runtimeSessionId}:${publicationSequence}`,
+      ),
       sourceSequence: publicationSequence,
       publishedAt: now,
       payloadHash: createHash("sha256")
@@ -297,8 +338,8 @@ export class PublicationService {
         .digest("hex"),
       contextRange: {
         contextLineageId: `identity-${built.compartment.runtimeSessionId}`,
-        fromContextSeq: basis.length > 0 ? Math.min(...basis.map((b) => b.contextSeq)) : 1,
-        toContextSeq: basis.length > 0 ? Math.max(...basis.map((b) => b.contextSeq)) : 0,
+        fromContextSeq,
+        toContextSeq,
         rangeHash: built.compartment.sourceRangeHash,
       },
       semanticSourceVersion: "context-unit-v1",
