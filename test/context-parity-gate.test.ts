@@ -74,7 +74,8 @@ function assistantEntry(id: string, parentId: string, text: string, ts = 3): Ses
 function makeLineage(overrides: Partial<ContextLineage> = {}): ContextLineage {
   const now = "2026-08-01T12:00:00.000Z";
   return {
-    runtimeSessionId: "iris-runtime-2026-08-01-1",
+    lineageId: "identity-test",
+    currentRuntimeSessionId: "iris-runtime-2026-08-01-1",
     contextSourceSnapshotId: "src-1",
     epochId: "iris-runtime-2026-08-01-1",
     personaSnapshotId: "persona-1",
@@ -97,7 +98,7 @@ function makeLineage(overrides: Partial<ContextLineage> = {}): ContextLineage {
     cachedM0ModelKey: "anthropic:opus",
     cachedM0ProviderProfileId: "mock",
     lastResponseTime: null,
-    representedThroughEntrySeq: 3,
+    representedThroughEntrySeq: 0,
     representedThroughContextSeq: 3,
     protectedTailStartEntrySeq: null,
     lastSafeUserAnchorEntrySeq: null,
@@ -132,7 +133,7 @@ test("parity-gate: SOFT+ fixture — pipeline reproduces byte-identical defer cl
 
   // The lineage already represents the full projection (representedThrough 7
   // covers every entry) → no live delta → SOFT+ (defer, reuse).
-  const lineage = makeLineage({ representedThroughEntrySeq: 7 });
+  const lineage = makeLineage({ representedThroughEntrySeq: 7, representedThroughContextSeq: 7 });
   const decision = runContextPass({
     runtimeSessionId: "iris-runtime-2026-08-01-1",
     entries: entriesForTwoTurns(),
@@ -159,7 +160,7 @@ test("parity-gate: SOFT fixture — pipeline re-renders m1 when live delta exist
   assert.equal(fixture.expected.passClassification, "SOFT");
 
   // representedThrough 3: the newest turn (seq 5-7) is a live delta → SOFT.
-  const lineage = makeLineage({ representedThroughEntrySeq: 3 });
+  const lineage = makeLineage({ representedThroughEntrySeq: 3, representedThroughContextSeq: 3 });
   const decision = runContextPass({
     runtimeSessionId: "iris-runtime-2026-08-01-1",
     entries: entriesForTwoTurns(),
@@ -188,7 +189,7 @@ test("parity-gate: HARD fixture — pipeline rebuilds m0 on model change", () =>
 
   // Lineage was materialized under anthropic/opus; the current pass uses a
   // different model → HARD model_change.
-  const lineage = makeLineage({ representedThroughEntrySeq: 7 });
+  const lineage = makeLineage({ representedThroughEntrySeq: 7, representedThroughContextSeq: 7 });
   const decision = runContextPass({
     runtimeSessionId: "iris-runtime-2026-08-01-1",
     entries: entriesForTwoTurns(),
@@ -222,6 +223,7 @@ test("parity-gate: empty HARD signal fixture — no fold unless live delta", () 
   // absent signal.
   const lineage = makeLineage({
     representedThroughEntrySeq: 7,
+    representedThroughContextSeq: 7,
     cachedM0SystemHash: "sys-v1",
     cachedM0ModelKey: "anthropic:opus",
   });
@@ -253,6 +255,7 @@ test("parity-gate: ttl-idle fixture folds ONLY on a genuine current-flight signa
   // Genuine ttl signal: cacheExpired=true + lastResponseTime > m0MaterializedAt.
   const lineage = makeLineage({
     representedThroughEntrySeq: 7,
+    representedThroughContextSeq: 7,
     m0MaterializedAt: 1,
   });
   const decision = runContextPass({

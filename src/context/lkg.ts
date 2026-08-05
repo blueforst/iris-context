@@ -418,7 +418,7 @@ export function captureLkgSlot(store: ContextStore, args: LkgCaptureInput): bool
   if (payload.inputContentDigests.some((digest) => digest.length === 0)) return false;
   if (slotBytes(payload) > LKG_SINGLE_SLOT_BYTES) return false;
   const slot: LkgSlot = {
-    runtimeSessionId: args.runtimeSessionId,
+    lineageId: args.runtimeSessionId,
     slotKey: LKG_SLOT_KEY,
     lkgJson: JSON.stringify(payload),
     capturedAt: new Date(payload.capturedAt).toISOString(),

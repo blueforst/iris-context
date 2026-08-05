@@ -493,7 +493,7 @@ test("lkg: corrupt payload shape fails closed with a typed reason, not a throw (
   try {
     // Manually write a parseable-but-shape-corrupt slot (missing inputIdSeq).
     store.captureLkgSlot({
-      runtimeSessionId: "s-corrupt",
+      lineageId: "s-corrupt",
       slotKey: LKG_SLOT_KEY,
       lkgJson: JSON.stringify({ jsonPrefix: "[]", modelKey: "model-a", providerKey: "opencode" }),
       capturedAt: "2026-08-01T00:00:00.000Z",

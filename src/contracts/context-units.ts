@@ -13,15 +13,21 @@ export type ContextUnitType = "input" | "assistant" | "tool_result";
 export type UnitDispositionFilter = "include" | "all";
 
 export interface ContextMessageUnit {
+  /** R2 (iris_agent#9)：identity-level lineage id（one per data root）。 */
+  lineageId: string;
+  /** 源 Pi Runtime Session（archive attribution；非 Context 身份/顺序）。 */
   runtimeSessionId: string;
-  /** 每 session 单调（R3 Historian 的读取序）。 */
+  /** lineage 内全局单调（跨 Runtime Session 连续；R3 Historian 读取序）。 */
   contextSeq: number;
   unitId: string;
   /** 源 runtime event（exactly-once：一个事件最多一个单元）。 */
   sourceEventId: string;
+  /** 稳定的 runtime event id（跨 session 不变的 attribution）。 */
+  runtimeEventId?: string;
   unitType: ContextUnitType;
-  disposition: "include" | "reference_only" | "exclude";
+  disposition: "include" | "reference_only" | "exclude" | "retired";
   entryId?: string;
+  /** 窄归档映射（可选）：Pi Session-local entry 序号，非 Context 权威顺序。 */
   entrySeq?: number;
   contentHash: string;
   /** canonical provider-visible 序列化（非 raw 原文副本）。 */
@@ -31,6 +37,10 @@ export interface ContextMessageUnit {
   /** companion 配对是否在 ingest 时验证通过。 */
   paired: boolean;
   derivationRefs: RuntimeEventDerivationRefs;
+  /** R2 (iris_agent#9)：语义单元 schema 版本。 */
+  schemaVersion: string;
+  /** R2 (iris_agent#9)：窄归档定位（Pi Session raw archive），非 Context 数据副本。 */
+  rawArchiveRef?: string;
   createdAt: string;
 }
 

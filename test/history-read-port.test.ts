@@ -61,6 +61,7 @@ function closeStore(store: ContextStore, dir: string): void {
 
 function makeUnit(overrides: Partial<ContextMessageUnit>): ContextMessageUnit {
   return {
+    lineageId: "identity-test",
     runtimeSessionId: SESSION,
     contextSeq: 0,
     unitId: "unit-x",
@@ -71,6 +72,7 @@ function makeUnit(overrides: Partial<ContextMessageUnit>): ContextMessageUnit {
     payload: { role: "user", content: "x", timestamp: 0 } as AgentMessage,
     paired: false,
     derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+    schemaVersion: "context-unit-v1",
     createdAt: "2026-08-01T00:00:00.000Z",
     ...overrides,
   };
