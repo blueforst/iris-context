@@ -248,16 +248,14 @@ test("f2-xrepo: out-of-order recovery replays in commit order with stable identi
     for (let i = 0; i < texts.length; i++) {
       const text = texts[i];
       assert.ok(text !== undefined, "test vector must exist");
-      const contentHash = await computeMessageContentHash(userMessage(text));
-      const { entryId } = await s.session.appendMessageWithCommitReceipt(
-        userMessage(text),
-        (id) => ({
-          sessionId: metadata.id,
-          entryId: id,
-          contentHash,
-          committedAt: new Date(Date.now() + i).toISOString(),
-        }),
-      );
+      const message = userMessage(text);
+      const contentHash = await computeMessageContentHash(message);
+      const { entryId } = await s.session.appendMessageWithCommitReceipt(message, (id) => ({
+        sessionId: metadata.id,
+        entryId: id,
+        contentHash,
+        committedAt: new Date(Date.now() + i).toISOString(),
+      }));
       entryIds.push(entryId);
     }
     await expectPending(s, 3);
@@ -443,16 +441,14 @@ test("f2-xrepo: same-millisecond committedAt ties replay in exact append order (
     const texts = ["alpha", "beta", "gamma"];
     const entryIds: string[] = [];
     for (const text of texts) {
-      const contentHash = await computeMessageContentHash(userMessage(text));
-      const { entryId } = await s.session.appendMessageWithCommitReceipt(
-        userMessage(text),
-        (id) => ({
-          sessionId: metadata.id,
-          entryId: id,
-          contentHash,
-          committedAt: sameTimestamp,
-        }),
-      );
+      const message = userMessage(text);
+      const contentHash = await computeMessageContentHash(message);
+      const { entryId } = await s.session.appendMessageWithCommitReceipt(message, (id) => ({
+        sessionId: metadata.id,
+        entryId: id,
+        contentHash,
+        committedAt: sameTimestamp,
+      }));
       entryIds.push(entryId);
     }
     await expectPending(s, 3);
@@ -527,22 +523,20 @@ test("f2-xrepo: tampered persisted receipt is quarantined, never emitted, never 
       | { prepare: (sql: string) => { run: (...a: Array<string | number>) => { changes: number } } }
       | undefined;
     if (db !== undefined) {
-      db.prepare("UPDATE session_commit_receipts SET content_hash = ? WHERE session_id = ? AND entry_id = ?").run(
-        "0".repeat(64),
-        metadata.id,
-        entryId,
-      );
+      db.prepare(
+        "UPDATE session_commit_receipts SET content_hash = ? WHERE session_id = ? AND entry_id = ?",
+      ).run("0".repeat(64), metadata.id, entryId);
     } else {
       // Fallback: reach the sqlite connection through the backend internals
       // is intentionally not part of the contract; the tamper is applied via
       // a direct DatabaseSync open of the same file instead.
       const { DatabaseSync } = await import("node:sqlite");
       const direct = new DatabaseSync(s.paths.sessionDb);
-      direct.prepare("UPDATE session_commit_receipts SET content_hash = ? WHERE session_id = ? AND entry_id = ?").run(
-        "0".repeat(64),
-        metadata.id,
-        entryId,
-      );
+      direct
+        .prepare(
+          "UPDATE session_commit_receipts SET content_hash = ? WHERE session_id = ? AND entry_id = ?",
+        )
+        .run("0".repeat(64), metadata.id, entryId);
       direct.close();
     }
 
@@ -553,7 +547,11 @@ test("f2-xrepo: tampered persisted receipt is quarantined, never emitted, never 
       .listBySession(s.epoch.runtimeSessionId)
       .filter((e) => e.type === "message_finalized");
     assert.equal(finalized.length, 0, "tampered receipt must never reach the ledger");
-    assert.equal((await s.session.readPendingCommitReceipts()).length, 0, "quarantined rows leave pending");
+    assert.equal(
+      (await s.session.readPendingCommitReceipts()).length,
+      0,
+      "quarantined rows leave pending",
+    );
     const quarantined = await s.session.readQuarantinedCommitReceipts();
     assert.equal(quarantined.length, 1);
     assert.equal(quarantined[0]?.entryId, entryId);
@@ -581,7 +579,11 @@ test("f2-xrepo: the seam refuses to ingest an event whose payload contradicts it
           entryId: string;
           role: string;
           contentHash: string;
-          message: { role: string; content: Array<{ type: string; text: string }>; timestamp: number };
+          message: {
+            role: string;
+            content: Array<{ type: string; text: string }>;
+            timestamp: number;
+          };
           receipt: { entrySeq?: number };
         }) => void | Promise<void>)
       | undefined;
@@ -600,22 +602,20 @@ test("f2-xrepo: the seam refuses to ingest an event whose payload contradicts it
 
     const message = userMessage("seam payload");
     const goodHash = await computeMessageContentHash(message);
-    await assert.rejects(
-      async () => {
-        await captured?.({
-          type: "message_finalized",
-          entryId: "e-seam",
-          role: "user",
-          contentHash: "f".repeat(64),
-          message,
-          receipt: { entrySeq: 1 },
-        });
-      },
-      /content hash mismatch/,
-    );
+    await assert.rejects(async () => {
+      await captured?.({
+        type: "message_finalized",
+        entryId: "e-seam",
+        role: "user",
+        contentHash: "f".repeat(64),
+        message,
+        receipt: { entrySeq: 1 },
+      });
+    }, /content hash mismatch/);
     // The inconsistent event never reached the ledger.
     assert.equal(
-      ledger.listBySession(s.epoch.runtimeSessionId).filter((e) => e.type === "message_finalized").length,
+      ledger.listBySession(s.epoch.runtimeSessionId).filter((e) => e.type === "message_finalized")
+        .length,
       0,
     );
     assert.notEqual(goodHash, "f".repeat(64), "test vector must actually be inconsistent");
