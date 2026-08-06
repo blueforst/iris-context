@@ -59,7 +59,7 @@ interface UnitRow {
  * if the on-disk schema_migrations.max(version) is NEWER than this constant
  * (a newer binary wrote state this binary cannot read).
  */
-export const LATEST_MIGRATION_VERSION = "0004_identity_lineage";
+export const LATEST_MIGRATION_VERSION = "0005_session_lineage_bindings";
 
 /**
  * R2-P3：每 session 的 context_units 软 cap（语义 ledger 有界化的第一级）。
@@ -423,7 +423,20 @@ export class ContextStore implements ContextUnitStorePort {
     return row !== undefined;
   }
 
-  insertUnit(unit: ContextMessageUnit): void {
+  insertUnit(
+    unit: ContextMessageUnit,
+    options?: {
+      /**
+       * iris_agent#52: recovery mode skips the session-binding validation.
+       * The Recovery Reconciler has ALREADY verified the historical session
+       * through resolveLineageForRecovery (binding ledger + checksum +
+       * receipt identity), so re-resolving by session would fail closed for
+       * a legitimately historical session. Default (production ingest) keeps
+       * the fail-closed session check.
+       */
+      verifySessionBinding?: boolean;
+    },
+  ): void {
     // R2-P3：双级 cap 有界策略（append-only 不变量不变——绝不 DELETE）：
     //  1) 硬 cap：count >= hardUnitsCap → 记录 lineage 紧急态 emergency_fail_closed
     //     （best-effort：lineage 缺失时不掩盖 typed 错误）并抛
@@ -435,10 +448,13 @@ export class ContextStore implements ContextUnitStorePort {
     //  2) 软 cap：count >= maxUnitsPerSession → 强制 disposition="exclude"
     //     （行照写；provider 视图经 listUnits 默认过滤不可见；R3 Historian
     //     以此为裁剪候选）。
-    const count = this.countUnits(unit.runtimeSessionId);
+    const verify = options?.verifySessionBinding !== false;
+    const count = verify
+      ? this.countUnits(unit.runtimeSessionId)
+      : this.countUnitsByLineage(unit.lineageId);
     if (count >= this.hardUnitsCap) {
       const error = new ContextBoundsExceededError(unit.runtimeSessionId, this.hardUnitsCap);
-      const lineage = this.getLineage(unit.runtimeSessionId);
+      const lineage = verify ? this.getLineage(unit.runtimeSessionId) : this.getLineageByLineageId(unit.lineageId);
       if (lineage !== undefined) {
         this.setEmergencyState(unit.runtimeSessionId, "emergency_fail_closed", error.message);
       }
@@ -450,8 +466,8 @@ export class ContextStore implements ContextUnitStorePort {
     // lookup. The session binding is still validated fail-closed first so an
     // unknown/stale/wrong-data-root session cannot write into ANY lineage,
     // even one supplied by the caller.
-    const boundLineageId = this.resolveLineageId(unit.runtimeSessionId);
-    if (unit.lineageId !== boundLineageId) {
+    const boundLineageId = verify ? this.resolveLineageId(unit.runtimeSessionId) : unit.lineageId;
+    if (verify && unit.lineageId !== boundLineageId) {
       throw new ContextLineageResolutionError(unit.runtimeSessionId);
     }
     this.db
@@ -493,8 +509,8 @@ export class ContextStore implements ContextUnitStorePort {
     const result = this.db
       .prepare(
         `UPDATE context_units SET
-           companion_entry_id = ?, pair_key = ?, paired = ?, payload = ?
-         WHERE context_lineage_id = ? AND context_seq = ?`,
+          companion_entry_id = ?, pair_key = ?, paired = ?, payload = ?
+        WHERE context_lineage_id = ? AND context_seq = ?`,
       )
       .run(
         update.companionEntryId,
@@ -507,6 +523,36 @@ export class ContextStore implements ContextUnitStorePort {
     if (result.changes !== 1) {
       throw new Error(
         `context updateUnitPairing failed: no unit ${runtimeSessionId}/${contextSeq}`,
+      );
+    }
+  }
+
+  /**
+   * iris_agent#52: lineage-direct variant of {@link updateUnitPairing} for
+   * the Recovery Reconciler (historical Session, no session resolution).
+   */
+  updateUnitPairingByLineage(
+    lineageId: string,
+    contextSeq: number,
+    update: { companionEntryId: string; pairKey: string; paired: boolean; payload: AgentMessage },
+  ): void {
+    const result = this.db
+      .prepare(
+        `UPDATE context_units SET
+          companion_entry_id = ?, pair_key = ?, paired = ?, payload = ?
+        WHERE context_lineage_id = ? AND context_seq = ?`,
+      )
+      .run(
+        update.companionEntryId,
+        update.pairKey,
+        update.paired ? 1 : 0,
+        JSON.stringify(update.payload),
+        lineageId,
+        contextSeq,
+      );
+    if (result.changes !== 1) {
+      throw new Error(
+        `context updateUnitPairingByLineage failed: no unit ${lineageId}/${contextSeq}`,
       );
     }
   }
@@ -528,6 +574,36 @@ export class ContextStore implements ContextUnitStorePort {
     const afterContextSeq = options.afterContextSeq;
     let sql = "SELECT * FROM context_units WHERE context_lineage_id = ?";
     const params: Array<string | number> = [this.resolveLineageId(runtimeSessionId)];
+    if (disposition !== "all") {
+      sql += " AND disposition = ?";
+      params.push(disposition);
+    }
+    if (afterContextSeq !== undefined) {
+      sql += " AND context_seq > ?";
+      params.push(afterContextSeq);
+    }
+    sql += " ORDER BY context_seq";
+    const rows = this.db.prepare(sql).all(...params) as unknown as UnitRow[];
+    const limit = options.limit ?? rows.length;
+    return rows.slice(0, limit).map((row) => this.rowToUnit(row));
+  }
+
+  /**
+   * iris_agent#52: lineage-direct variant of {@link listUnits} for the
+   * Recovery Reconciler (historical Session, no session resolution).
+   */
+  listUnitsByLineage(
+    lineageId: string,
+    options: {
+      afterContextSeq?: number;
+      limit?: number;
+      disposition?: UnitDispositionFilter;
+    } = {},
+  ): ContextMessageUnit[] {
+    const disposition = options.disposition ?? "include";
+    const afterContextSeq = options.afterContextSeq;
+    let sql = "SELECT * FROM context_units WHERE context_lineage_id = ?";
+    const params: Array<string | number> = [lineageId];
     if (disposition !== "all") {
       sql += " AND disposition = ?";
       params.push(disposition);
@@ -585,6 +661,14 @@ export class ContextStore implements ContextUnitStorePort {
     return row.count;
   }
 
+  /** iris_agent#52: lineage-direct count for recovery-mode inserts. */
+  private countUnitsByLineage(lineageId: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS count FROM context_units WHERE context_lineage_id = ?")
+      .get(lineageId) as { count: number };
+    return row.count;
+  }
+
   lastUnpairedInputSeq(runtimeSessionId: string): number | undefined {
     const row = this.db
       .prepare(
@@ -609,6 +693,22 @@ export class ContextStore implements ContextUnitStorePort {
         "SELECT COALESCE(MAX(context_seq), 0) AS seq FROM context_units WHERE context_lineage_id = ?",
       )
       .get(this.resolveLineageId(runtimeSessionId)) as { seq: number };
+    return row.seq;
+  }
+
+  /**
+   * iris_agent#52: lineage-direct variant of {@link maxContextSeq} for the
+   * Recovery Reconciler — the recovered Session is historical, so session
+   * resolution would fail closed; the lineage id comes from
+   * {@link resolveLineageForRecovery} instead. Context seq stays global and
+   * monotonic WITHIN the lineage across sessions (rollover never resets it).
+   */
+  maxContextSeqByLineage(lineageId: string): number {
+    const row = this.db
+      .prepare(
+        "SELECT COALESCE(MAX(context_seq), 0) AS seq FROM context_units WHERE context_lineage_id = ?",
+      )
+      .get(lineageId) as { seq: number };
     return row.seq;
   }
 
@@ -779,7 +879,32 @@ export class ContextStore implements ContextUnitStorePort {
         row.created_at,
         row.updated_at,
       );
+    // iris_agent#52: record the authoritative binding in the append-only
+    // ledger (idempotent: re-creating the same lineage/session pair is a
+    // no-op; a DIFFERENT lineage already bound to this session fails closed
+    // above).
+    this.db
+      .prepare(
+        `INSERT INTO session_lineage_bindings
+          (runtime_session_id, context_lineage_id, binding_role, bound_at, superseded_at, binding_checksum)
+         VALUES (?, ?, 'current', ?, NULL, ?)
+         ON CONFLICT(runtime_session_id, context_lineage_id) DO NOTHING`,
+      )
+      .run(
+        row.current_runtime_session_id,
+        row.context_lineage_id,
+        now,
+        this.bindingChecksum(row.current_runtime_session_id, row.context_lineage_id),
+      );
     return rowToLineage(row);
+  }
+
+  /**
+   * iris_agent#52: integrity checksum of a binding row.
+   * sha256(runtimeSessionId + ":" + contextLineageId).
+   */
+  private bindingChecksum(runtimeSessionId: string, lineageId: string): string {
+    return createHash("sha256").update(`${runtimeSessionId}:${lineageId}`).digest("hex");
   }
 
   /**
@@ -797,16 +922,110 @@ export class ContextStore implements ContextUnitStorePort {
    * R2 (iris_agent#9)：把 lineage 绑定到新的 Pi Runtime Session（rollover
    * 路径）。仅更新 current_runtime_session_id；lineage 的 m0/m1/watermark/
    * replay 状态全部保留。绑定不存在的 lineage → throw（fail-closed）。
+   *
+   * iris_agent#52：rollover 在同一个事务里把旧的 current binding 标记为
+   * historical（superseded_at，行永不删除）并写入新的 current binding——
+   * 历史 Session→lineage 解析路径在 rollover 后依然可用（仅限 Recovery
+   * Reconciler / audit，见 {@link resolveLineageForRecovery}），普通生产
+   * ingest 仍然只认 current_runtime_session_id。
    */
   bindCurrentSession(lineageId: string, runtimeSessionId: string): void {
-    const result = this.db
-      .prepare(
-        "UPDATE context_lineages SET current_runtime_session_id = ?, updated_at = ? WHERE context_lineage_id = ?",
-      )
-      .run(runtimeSessionId, new Date().toISOString(), lineageId);
-    if (result.changes !== 1) {
-      throw new Error(`context bindCurrentSession failed: no lineage ${lineageId}`);
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const previous = this.db
+        .prepare(
+          "SELECT runtime_session_id FROM session_lineage_bindings WHERE context_lineage_id = ? AND binding_role = 'current' LIMIT 1",
+        )
+        .get(lineageId) as { runtime_session_id: string } | undefined;
+      if (previous !== undefined && previous.runtime_session_id !== runtimeSessionId) {
+        this.db
+          .prepare(
+            `UPDATE session_lineage_bindings
+             SET binding_role = 'historical', superseded_at = ?
+             WHERE runtime_session_id = ? AND context_lineage_id = ?`,
+          )
+          .run(now, previous.runtime_session_id, lineageId);
+      }
+      this.db
+        .prepare(
+          `INSERT INTO session_lineage_bindings
+            (runtime_session_id, context_lineage_id, binding_role, bound_at, superseded_at, binding_checksum)
+           VALUES (?, ?, 'current', ?, NULL, ?)
+           ON CONFLICT(runtime_session_id, context_lineage_id) DO UPDATE SET
+             binding_role = 'current', bound_at = ?, superseded_at = NULL`,
+        )
+        .run(
+          runtimeSessionId,
+          lineageId,
+          now,
+          this.bindingChecksum(runtimeSessionId, lineageId),
+          now,
+        );
+      const result = this.db
+        .prepare(
+          "UPDATE context_lineages SET current_runtime_session_id = ?, updated_at = ? WHERE context_lineage_id = ?",
+        )
+        .run(runtimeSessionId, now, lineageId);
+      if (result.changes !== 1) {
+        throw new Error(`context bindCurrentSession failed: no lineage ${lineageId}`);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
+  }
+
+  /**
+   * iris_agent#52 Recovery Reconciler API：把经过验证的历史 Runtime Session
+   * 解析回其 durable identity lineage。与生产路径（resolveLineageId，只认
+   * current）严格分离：
+   * - 只有本 data root 的 binding ledger 中存在该 Session（行级存在 +
+   *   checksum 完整性校验）才解析；
+   * - receipt 必须属于该 Session（receipt.sessionId === runtimeSessionId）
+   *   且携带格式合法的 content hash（实际 hash 重算由 Pi 恢复流程完成）；
+   * - 解析是只读的：绝不把旧 Session 重新变回 current，也不允许普通
+   *   post-rollover 写入使用本 API。
+   * 未知/伪造/损坏/被删除的 binding 一律 fail closed（typed error）。
+   */
+  resolveLineageForRecovery(
+    runtimeSessionId: string,
+    receipt: { sessionId: string; entryId: string; contentHash: string },
+  ): string {
+    if (receipt.sessionId !== runtimeSessionId) {
+      throw new Error(
+        `context resolveLineageForRecovery failed: receipt ${receipt.entryId} belongs to session ` +
+          `${receipt.sessionId} but the request is for ${runtimeSessionId} (fail closed)`,
+      );
+    }
+    if (!/^[0-9a-f]{64}$/.test(receipt.contentHash)) {
+      throw new Error(
+        `context resolveLineageForRecovery failed: receipt ${receipt.entryId} has a malformed content hash ` +
+          `(fail closed)`,
+      );
+    }
+    const row = this.db
+      .prepare(
+        "SELECT context_lineage_id, binding_role, binding_checksum FROM session_lineage_bindings WHERE runtime_session_id = ? LIMIT 1",
+      )
+      .get(runtimeSessionId) as
+      | { context_lineage_id: string; binding_role: string; binding_checksum: string }
+      | undefined;
+    if (row === undefined) {
+      throw new Error(
+        `context resolveLineageForRecovery failed: no binding for runtime session ${runtimeSessionId} in this data root ` +
+          `(fail closed: foreign or fabricated session)`,
+      );
+    }
+    const expected = this.bindingChecksum(runtimeSessionId, row.context_lineage_id);
+    if (expected !== row.binding_checksum) {
+      throw new Error(
+        `context resolveLineageForRecovery failed: binding for session ${runtimeSessionId} failed its checksum ` +
+          `(recorded ${row.binding_checksum}, expected ${expected}); refusing to resolve (fail closed)`,
+      );
+    }
+    return row.context_lineage_id;
   }
 
   getLineage(runtimeSessionId: string): ContextLineage | undefined {

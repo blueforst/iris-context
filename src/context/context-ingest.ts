@@ -20,7 +20,10 @@ import type { OriginEnvelope } from "../contracts/origin.js";
  */
 export interface ContextUnitStorePort {
   hasUnitForEvent(eventId: string): boolean;
-  insertUnit(unit: ContextMessageUnit): void;
+  insertUnit(
+    unit: ContextMessageUnit,
+    options?: { verifySessionBinding?: boolean },
+  ): void;
   updateUnitPairing(
     runtimeSessionId: string,
     contextSeq: number,
@@ -34,6 +37,22 @@ export interface ContextUnitStorePort {
   findBySourceEvent(eventId: string): ContextMessageUnit | undefined;
   lastUnpairedInputSeq(runtimeSessionId: string): number | undefined;
   maxContextSeq(runtimeSessionId: string): number;
+  /**
+   * iris_agent#52: lineage-direct variants for the Recovery Reconciler.
+   * The recovered Runtime Session is historical (not current), so the
+   * session-resolving methods would fail closed; the lineage id comes from
+   * ContextStore.resolveLineageForRecovery instead.
+   */
+  maxContextSeqByLineage(lineageId: string): number;
+  listUnitsByLineage(
+    lineageId: string,
+    options?: { afterContextSeq?: number; limit?: number; disposition?: UnitDispositionFilter },
+  ): ContextMessageUnit[];
+  updateUnitPairingByLineage(
+    lineageId: string,
+    contextSeq: number,
+    update: { companionEntryId: string; pairKey: string; paired: boolean; payload: AgentMessage },
+  ): void;
   close(): void;
 }
 
@@ -154,11 +173,23 @@ export class ContextIngest implements ContextIngestPort {
     private readonly units: ContextUnitStorePort,
     /** R2 (iris_agent#9)：identity-level lineage id（one per data root）。 */
     private readonly lineageId: string,
+    /**
+     * iris_agent#52: recovery mode for the Recovery Reconciler. When true,
+     * every unit-store query is addressed BY LINEAGE (no session resolution):
+     * the ingested Runtime Session is historical after rollover, so
+     * session-based resolution would fail closed. The lineage id is the one
+     * resolved by ContextStore.resolveLineageForRecovery (verified binding).
+     * Recovery mode NEVER makes the old session current again.
+     */
+    private readonly recovery: boolean = false,
   ) {}
 
   /** R2 (iris_agent#9)：该 lineage 的下一个 contextSeq（lineage 内全局单调，跨
-   * Runtime Session 连续——rollover 不重置）。 */
+   * Runtime Session 连续——rollover 不重置）。恢复模式按 lineage 直查。 */
   private nextContextSeq(runtimeSessionId: string): number {
+    if (this.recovery) {
+      return this.units.maxContextSeqByLineage(this.lineageId) + 1;
+    }
     return this.units.maxContextSeq(runtimeSessionId) + 1;
   }
 
@@ -187,33 +218,36 @@ export class ContextIngest implements ContextIngestPort {
 
       if (message.role === "user") {
         const seq = this.nextContextSeq(runtimeSessionId);
-        this.units.insertUnit({
-          lineageId: this.lineageId,
-          runtimeSessionId,
-          contextSeq: seq,
-          unitId: `input-${event.entryId ?? event.eventId}`,
-          sourceEventId: event.eventId,
-          runtimeEventId: event.eventId,
-          unitType: "input",
-          disposition: "include",
-          ...(event.entryId !== undefined ? { entryId: event.entryId } : {}),
-          ...(event.entrySeq !== undefined ? { entrySeq: event.entrySeq } : {}),
-          contentHash: event.contentHash ?? "",
-          // 插入时用 UNVERIFIED 占位：context.db 永不存 raw wire（reviewer A
-          // NB-2）；companion 到达时折叠为 provenance 文本。
-          payload: {
-            role: "user",
-            content: "[USER REQUEST | UNVERIFIED]",
-            timestamp: message.timestamp,
+        this.units.insertUnit(
+          {
+            lineageId: this.lineageId,
+            runtimeSessionId,
+            contextSeq: seq,
+            unitId: `input-${event.entryId ?? event.eventId}`,
+            sourceEventId: event.eventId,
+            runtimeEventId: event.eventId,
+            unitType: "input",
+            disposition: "include",
+            ...(event.entryId !== undefined ? { entryId: event.entryId } : {}),
+            ...(event.entrySeq !== undefined ? { entrySeq: event.entrySeq } : {}),
+            contentHash: event.contentHash ?? "",
+            // 插入时用 UNVERIFIED 占位：context.db 永不存 raw wire（reviewer A
+            // NB-2）；companion 到达时折叠为 provenance 文本。
+            payload: {
+              role: "user",
+              content: "[USER REQUEST | UNVERIFIED]",
+              timestamp: message.timestamp,
+            },
+            paired: false,
+            derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+            schemaVersion: "context-unit-v1",
+            ...(event.entryId !== undefined
+              ? { rawArchiveRef: `pi://session/${runtimeSessionId}/entry/${event.entryId}` }
+              : {}),
+            createdAt: event.occurredAt,
           },
-          paired: false,
-          derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
-          schemaVersion: "context-unit-v1",
-          ...(event.entryId !== undefined
-            ? { rawArchiveRef: `pi://session/${runtimeSessionId}/entry/${event.entryId}` }
-            : {}),
-          createdAt: event.occurredAt,
-        });
+          this.recovery ? { verifySessionBinding: false } : undefined,
+        );
         continue;
       }
 
@@ -244,12 +278,21 @@ export class ContextIngest implements ContextIngestPort {
           continue;
         }
         const folded = foldUserPayload(prevMessage as AgentMessage & { role: "user" }, message);
-        this.units.updateUnitPairing(runtimeSessionId, userUnit.contextSeq, {
-          companionEntryId: event.entryId ?? "",
-          pairKey: folded.pairKey,
-          paired: folded.paired,
-          payload: folded.payload,
-        });
+        if (this.recovery) {
+          this.units.updateUnitPairingByLineage(this.lineageId, userUnit.contextSeq, {
+            companionEntryId: event.entryId ?? "",
+            pairKey: folded.pairKey,
+            paired: folded.paired,
+            payload: folded.payload,
+          });
+        } else {
+          this.units.updateUnitPairing(runtimeSessionId, userUnit.contextSeq, {
+            companionEntryId: event.entryId ?? "",
+            pairKey: folded.pairKey,
+            paired: folded.paired,
+            payload: folded.payload,
+          });
+        }
         continue;
       }
 
@@ -263,27 +306,33 @@ export class ContextIngest implements ContextIngestPort {
         continue; // 其他 role（如 reasoning/compaction 标签）不建单元
       }
       const seq = this.nextContextSeq(runtimeSessionId);
-      this.units.insertUnit({
-        lineageId: this.lineageId,
-        runtimeSessionId,
-        contextSeq: seq,
-        unitId: `${unitType}-${event.entryId ?? event.eventId}`,
-        sourceEventId: event.eventId,
-        runtimeEventId: event.eventId,
-        unitType,
-        disposition: "include",
-        ...(event.entryId !== undefined ? { entryId: event.entryId } : {}),
-        ...(event.entrySeq !== undefined ? { entrySeq: event.entrySeq } : {}),
-        contentHash: event.contentHash ?? "",
-        payload: message,
-        paired: false,
-        derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
-        schemaVersion: "context-unit-v1",
-        ...(event.entryId !== undefined
-          ? { rawArchiveRef: `pi://session/${runtimeSessionId}/entry/${event.entryId}` }
-          : {}),
-        createdAt: event.occurredAt,
-      });
+      this.units.insertUnit(
+        {
+          lineageId: this.lineageId,
+          runtimeSessionId,
+          contextSeq: seq,
+          unitId: `${unitType}-${event.entryId ?? event.eventId}`,
+          sourceEventId: event.eventId,
+          runtimeEventId: event.eventId,
+          unitType,
+          disposition: "include",
+          ...(event.entryId !== undefined ? { entryId: event.entryId } : {}),
+          ...(event.entrySeq !== undefined ? { entrySeq: event.entrySeq } : {}),
+          contentHash: event.contentHash ?? "",
+          payload: message,
+          paired: false,
+          derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+          schemaVersion: "context-unit-v1",
+          ...(event.entryId !== undefined
+            ? { rawArchiveRef: `pi://session/${runtimeSessionId}/entry/${event.entryId}` }
+            : {}),
+          createdAt: event.occurredAt,
+        },
+        this.recovery ? { verifySessionBinding: false } : undefined,
+      );
+    }
+    if (this.recovery) {
+      return this.units.listUnitsByLineage(this.lineageId);
     }
     return this.units.listUnits(runtimeSessionId);
   }
