@@ -302,3 +302,171 @@ test("B2: job identity is deterministic (priority:session:runId)", () => {
   assert.ok(b?.jobId.startsWith("low:iris-runtime-2026-08-02-1:"));
   queue.finish(true);
 });
+
+// F5 (iris_agent#42): a running NON-finalizing job must never suppress a
+// finalizing request — the terminal transition must run after current work.
+test("F5: wrapup while a highest job runs registers exactly one successor promoted after finish", () => {
+  const queue = new HistorianQueue();
+  // Start a highest incremental for Session A.
+  queue.enqueue({
+    priority: "highest",
+    runtimeSessionId: SESSION_A,
+    boundary: snapshot(SESSION_A, 10),
+    sessionState: state(SESSION_A),
+  });
+  const running = queue.take();
+  assert.equal(running?.priority, "highest");
+
+  // Wrapup arrives while the incremental is running.
+  const closing: HistorianSessionState = { ...state(SESSION_A), status: "closing" };
+  assert.equal(
+    queue.enqueue({
+      priority: "normal",
+      runtimeSessionId: SESSION_A,
+      boundary: snapshot(SESSION_A, 20),
+      sessionState: closing,
+    }),
+    true,
+  );
+  // Not in pending (single-flight) but registered as successor.
+  assert.equal(queue.pendingCount(), 0);
+  assert.equal(queue.successorCount(), 1);
+
+  // The incremental completes; the successor is promoted to pending.
+  queue.finish(true);
+  assert.equal(queue.pendingCount(), 1);
+  assert.equal(queue.successorCount(), 0);
+  const promoted = queue.take();
+  assert.equal(promoted?.priority, "normal", "successor keeps its finalizing priority");
+  assert.equal(
+    promoted?.boundary.observedHeadEntrySeq,
+    20,
+    "successor carries the newest boundary",
+  );
+  assert.equal(promoted?.sessionState.status, "closing");
+  queue.finish(true);
+});
+
+test("a finalizing request while a FINALIZING job runs is a duplicate (no second successor)", () => {
+  const queue = new HistorianQueue();
+  queue.enqueue({
+    priority: "normal",
+    runtimeSessionId: SESSION_A,
+    boundary: snapshot(SESSION_A, 10),
+    sessionState: { ...state(SESSION_A), status: "closing" },
+  });
+  queue.take();
+  // Duplicate wrapup while the finalizer runs: must NOT register a
+  // successor (AC6 — no duplicate ContinuitySnapshot / transition).
+  queue.enqueue({
+    priority: "normal",
+    runtimeSessionId: SESSION_A,
+    boundary: snapshot(SESSION_A, 10),
+    sessionState: { ...state(SESSION_A), status: "closing" },
+  });
+  assert.equal(queue.successorCount(), 0);
+  queue.finish(true);
+  assert.equal(queue.pendingCount(), 0, "no duplicate finalizer after the running one completes");
+});
+
+test("requeue keeps the successor registered until the retry chain truly finishes", () => {
+  const queue = new HistorianQueue();
+  queue.enqueue({
+    priority: "highest",
+    runtimeSessionId: SESSION_A,
+    boundary: snapshot(SESSION_A, 10),
+    sessionState: state(SESSION_A),
+  });
+  const job = queue.take();
+  assert.ok(job !== undefined);
+  queue.enqueue({
+    priority: "normal",
+    runtimeSessionId: SESSION_A,
+    boundary: snapshot(SESSION_A, 20),
+    sessionState: { ...state(SESSION_A), status: "closing" },
+  });
+  // Failure → worker requeues the job (back to pending) and finishes with
+  // undefined: the successor must stay registered (not promoted, not lost).
+  queue.requeue(job);
+  queue.finish(undefined);
+  assert.equal(queue.pendingCount(), 1);
+  assert.equal(queue.successorCount(), 1, "successor survives a retry");
+  // Retry completes → successor promoted.
+  const retry = queue.take();
+  assert.ok(retry !== undefined);
+  queue.finish(true);
+  assert.equal(queue.successorCount(), 0);
+  assert.equal(queue.pendingCount(), 1);
+  const promoted = queue.take();
+  assert.equal(promoted?.priority, "normal", "the finalizer runs after the retry chain finishes");
+});
+
+test("non-finalizing requests while running are still suppressed (no successor)", () => {
+  const queue = new HistorianQueue();
+  queue.enqueue({
+    priority: "highest",
+    runtimeSessionId: SESSION_A,
+    boundary: snapshot(SESSION_A, 10),
+    sessionState: state(SESSION_A),
+  });
+  queue.take();
+  queue.enqueue({
+    priority: "highest",
+    runtimeSessionId: SESSION_A,
+    boundary: snapshot(SESSION_A, 20),
+    sessionState: state(SESSION_A),
+  });
+  assert.equal(queue.successorCount(), 0, "fresher incremental is redundant (runner re-freezes)");
+  queue.finish(true);
+  assert.equal(queue.pendingCount(), 0);
+});
+
+test("F5: successor and pending-merge paths coexist for different sessions", () => {
+  const queue = new HistorianQueue();
+  queue.enqueue({
+    priority: "highest",
+    runtimeSessionId: SESSION_A,
+    boundary: snapshot(SESSION_A),
+    sessionState: state(SESSION_A),
+  });
+  queue.enqueue({
+    priority: "highest",
+    runtimeSessionId: SESSION_B,
+    boundary: snapshot(SESSION_B),
+    sessionState: state(SESSION_B),
+  });
+  queue.take(); // A running
+  // A: wrapup while running → registered successor.
+  queue.enqueue({
+    priority: "normal",
+    runtimeSessionId: SESSION_A,
+    boundary: snapshot(SESSION_A, 20),
+    sessionState: { ...state(SESSION_A), status: "closing" },
+  });
+  // B: wrapup while a highest job is PENDING → merged into pending with the
+  // finalizing priority winning (B1 merge rule), not a successor.
+  queue.enqueue({
+    priority: "normal",
+    runtimeSessionId: SESSION_B,
+    boundary: snapshot(SESSION_B, 20),
+    sessionState: { ...state(SESSION_B), status: "closing" },
+  });
+  assert.equal(queue.successorCount(), 1, "only the running-session wrapup is a successor");
+  assert.equal(queue.pendingCount(), 1, "B's wrapup merged with its pending highest job");
+
+  // A completes → A's successor promoted; B's merged finalizer still pending.
+  queue.finish(true);
+  assert.equal(queue.successorCount(), 0);
+  assert.equal(queue.pendingCount(), 2);
+  // Both pending jobs are finalizing (normal) — execution order between the
+  // two sessions is deterministic by jobId but not architecturally relevant;
+  // what matters is that BOTH run as finalizers and neither is lost.
+  const first = queue.take();
+  assert.equal(first?.priority, "normal", "first pending job is a finalizer");
+  queue.finish(true);
+  const second = queue.take();
+  assert.equal(second?.priority, "normal", "second pending job is a finalizer");
+  queue.finish(true);
+  assert.equal(queue.pendingCount(), 0);
+  assert.equal(queue.successorCount(), 0);
+});
