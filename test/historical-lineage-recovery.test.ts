@@ -27,7 +27,11 @@ import {
  * same global contextSeq, while Session B proceeds without a reset.
  */
 
-async function setupSlice(dataRoot: string, config = defaultAgentConfig(), now = "2026-08-05T00:00:00.000Z") {
+async function setupSlice(
+  dataRoot: string,
+  config = defaultAgentConfig(),
+  now = "2026-08-05T00:00:00.000Z",
+) {
   initializeDataRoot(dataRoot, config);
   const paths = resolveDataRootPaths(dataRoot, config);
   const epochStore = new RuntimeEpochStore(
@@ -95,7 +99,12 @@ test("c1: crash -> rollover -> restart recovers Session A into the SAME lineage 
     s.epochStore.close();
 
     // Restart: Session B becomes current via settled rollover (A stays closed).
-    const rolled = await rolloverActiveSession({ dataRoot, config: s.config, now: s.now, settledEpochId: s.epoch.epochId });
+    const rolled = await rolloverActiveSession({
+      dataRoot,
+      config: s.config,
+      now: s.now,
+      settledEpochId: s.epoch.epochId,
+    });
     assert.notEqual(rolled.newSessionId, s.epoch.runtimeSessionId);
 
     // Recovery reconciler resolves A (historical binding) and replays exactly
@@ -135,7 +144,11 @@ test("c1: crash -> rollover -> restart recovers Session A into the SAME lineage 
     // Session B continues on the same lineage with the NEXT global contextSeq
     // (no reset): open B's session, ingest a new event, its contextSeq must be
     // reconciled.units[0].contextSeq + 1.
-    const { repo: repoB, session: sessionB } = await openOrCreateSession(dataRoot, s.config, rolled.newSessionId);
+    const { repo: repoB, session: sessionB } = await openOrCreateSession(
+      dataRoot,
+      s.config,
+      rolled.newSessionId,
+    );
     try {
       const bMessage = userMessage("session B after rollover");
       const bHash = await computeMessageContentHash(bMessage);
@@ -284,24 +297,35 @@ test("c4: foreign, fabricated, deleted and checksum-corrupt bindings fail closed
   const store = ContextStore.open(paths.contextDb, { lineageId: "lineage-c4" });
   try {
     // 1) Unknown session (foreign data root / never bound): fail closed.
-    assert.throws(() => store.resolveLineageForRecovery("foreign-session", {
-      sessionId: "foreign-session",
-      entryId: "e",
-      contentHash: "c".repeat(64),
-    }), /no binding/);
+    assert.throws(
+      () =>
+        store.resolveLineageForRecovery("foreign-session", {
+          sessionId: "foreign-session",
+          entryId: "e",
+          contentHash: "c".repeat(64),
+        }),
+      /no binding/,
+    );
 
     // 2) Fabricated binding (direct row insert with a wrong checksum): fail
     //    closed on the integrity gate.
-    store.raw().prepare(
-      `INSERT INTO session_lineage_bindings
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO session_lineage_bindings
         (runtime_session_id, context_lineage_id, binding_role, bound_at, superseded_at, binding_checksum)
        VALUES (?, ?, 'current', ?, NULL, ?)`,
-    ).run("fabricated", "lineage-c4", "2026-08-05T00:00:00.000Z", "0".repeat(64));
-    assert.throws(() => store.resolveLineageForRecovery("fabricated", {
-      sessionId: "fabricated",
-      entryId: "e",
-      contentHash: "d".repeat(64),
-    }), /checksum/);
+      )
+      .run("fabricated", "lineage-c4", "2026-08-05T00:00:00.000Z", "0".repeat(64));
+    assert.throws(
+      () =>
+        store.resolveLineageForRecovery("fabricated", {
+          sessionId: "fabricated",
+          entryId: "e",
+          contentHash: "d".repeat(64),
+        }),
+      /checksum/,
+    );
 
     // 3) Legit binding then deleted (tampering): fail closed, never fall back.
     store.createLineage({
@@ -319,14 +343,19 @@ test("c4: foreign, fabricated, deleted and checksum-corrupt bindings fail closed
       contextSerializerVersion: "v1",
       carrierSchemaVersion: "v1",
     });
-    store.raw().prepare("DELETE FROM session_lineage_bindings WHERE runtime_session_id = ?").run(
-      epoch.runtimeSessionId,
+    store
+      .raw()
+      .prepare("DELETE FROM session_lineage_bindings WHERE runtime_session_id = ?")
+      .run(epoch.runtimeSessionId);
+    assert.throws(
+      () =>
+        store.resolveLineageForRecovery(epoch.runtimeSessionId, {
+          sessionId: epoch.runtimeSessionId,
+          entryId: "e",
+          contentHash: "e".repeat(64),
+        }),
+      /no binding/,
     );
-    assert.throws(() => store.resolveLineageForRecovery(epoch.runtimeSessionId, {
-      sessionId: epoch.runtimeSessionId,
-      entryId: "e",
-      contentHash: "e".repeat(64),
-    }), /no binding/);
 
     // 4) Receipt identity mismatch: receipt for a DIFFERENT session.
     store.createLineage({
@@ -344,18 +373,26 @@ test("c4: foreign, fabricated, deleted and checksum-corrupt bindings fail closed
       contextSerializerVersion: "v1",
       carrierSchemaVersion: "v1",
     });
-    assert.throws(() => store.resolveLineageForRecovery("session-other", {
-      sessionId: "not-session-other",
-      entryId: "e",
-      contentHash: "f".repeat(64),
-    }), /belongs to session/);
+    assert.throws(
+      () =>
+        store.resolveLineageForRecovery("session-other", {
+          sessionId: "not-session-other",
+          entryId: "e",
+          contentHash: "f".repeat(64),
+        }),
+      /belongs to session/,
+    );
 
     // 5) Malformed content hash fails closed.
-    assert.throws(() => store.resolveLineageForRecovery("session-other", {
-      sessionId: "session-other",
-      entryId: "e",
-      contentHash: "not-a-hash",
-    }), /malformed content hash/);
+    assert.throws(
+      () =>
+        store.resolveLineageForRecovery("session-other", {
+          sessionId: "session-other",
+          entryId: "e",
+          contentHash: "not-a-hash",
+        }),
+      /malformed content hash/,
+    );
   } finally {
     store.close();
     epochStore.close();

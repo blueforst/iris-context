@@ -454,7 +454,9 @@ export class ContextStore implements ContextUnitStorePort {
       : this.countUnitsByLineage(unit.lineageId);
     if (count >= this.hardUnitsCap) {
       const error = new ContextBoundsExceededError(unit.runtimeSessionId, this.hardUnitsCap);
-      const lineage = verify ? this.getLineage(unit.runtimeSessionId) : this.getLineageByLineageId(unit.lineageId);
+      const lineage = verify
+        ? this.getLineage(unit.runtimeSessionId)
+        : this.getLineageByLineageId(unit.lineageId);
       if (lineage !== undefined) {
         this.setEmergencyState(unit.runtimeSessionId, "emergency_fail_closed", error.message);
       }
@@ -1010,8 +1012,7 @@ export class ContextStore implements ContextUnitStorePort {
         "SELECT context_lineage_id, binding_role, binding_checksum FROM session_lineage_bindings WHERE runtime_session_id = ? LIMIT 1",
       )
       .get(runtimeSessionId) as
-      | { context_lineage_id: string; binding_role: string; binding_checksum: string }
-      | undefined;
+      { context_lineage_id: string; binding_role: string; binding_checksum: string } | undefined;
     if (row === undefined) {
       throw new Error(
         `context resolveLineageForRecovery failed: no binding for runtime session ${runtimeSessionId} in this data root ` +

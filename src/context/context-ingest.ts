@@ -20,10 +20,7 @@ import type { OriginEnvelope } from "../contracts/origin.js";
  */
 export interface ContextUnitStorePort {
   hasUnitForEvent(eventId: string): boolean;
-  insertUnit(
-    unit: ContextMessageUnit,
-    options?: { verifySessionBinding?: boolean },
-  ): void;
+  insertUnit(unit: ContextMessageUnit, options?: { verifySessionBinding?: boolean }): void;
   updateUnitPairing(
     runtimeSessionId: string,
     contextSeq: number,
