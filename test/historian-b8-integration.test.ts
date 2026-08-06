@@ -249,3 +249,183 @@ test("B8: recomp maintenance enqueues at manual priority (lowest)", async () => 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// F5 (iris_agent#42): a durable `closing` transition must ALWAYS have a
+// guaranteed finalization path. These tests drive the real manager/store/queue
+// (not queue internals only) and assert the durable state machine.
+test("F5: wrapup racing a RUNNING incremental still finalizes (no closing wedge)", async () => {
+  const { manager, store, dir } = managerFixture([
+    u("u-1", null, "please read the file"),
+    c("c-1", "u-1"),
+    assistantText("a-1", "c-1", "I will read it."),
+    u("u-2", "a-1", "thanks", 5),
+    c("c-2", "u-2", 6),
+  ]);
+  try {
+    // Enqueue a highest incremental and TAKE it (simulating it is running).
+    await manager.triggerIncremental(SESSION);
+    const queue = manager.getQueue();
+    const running = queue.take();
+    assert.equal(running?.priority, "highest", "incremental is running");
+
+    // Rollover requests wrapup while the incremental is still running.
+    const wrapped = await manager.enqueueWrapup(SESSION);
+    assert.equal(wrapped, true, "wrapup must be accepted while a job runs");
+    assert.equal(queue.successorCount(), 1, "terminal successor registered");
+    // Durable state already says closing.
+    assert.equal(store.getSessionState(SESSION)?.status, "closing");
+
+    // The incremental finishes; the wrapup successor must run and finalize.
+    queue.finish(true);
+    await manager.pumpOnce();
+    assert.equal(queue.successorCount(), 0, "successor consumed");
+    const finalState = store.getSessionState(SESSION);
+    assert.ok(
+      finalState?.status === "closed" || finalState?.status === "closed_incomplete",
+      `session must leave closing, got ${finalState?.status}`,
+    );
+    assert.equal(
+      store.listContinuitySnapshots(SESSION, 10).length,
+      1,
+      "exactly one ContinuitySnapshot",
+    );
+  } finally {
+    manager.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("F5: recover() re-enqueues closing sessions (durable intent survives crash)", async () => {
+  const { manager, store, dir } = managerFixture([
+    u("u-1", null, "please read the file"),
+    c("c-1", "u-1"),
+    assistantText("a-1", "c-1", "I will read it."),
+  ]);
+  try {
+    // Persist closing WITHOUT any queue job (crash after closing persist,
+    // before successor registration / finalizer ran).
+    await manager.enqueueWrapup(SESSION);
+    const queue = manager.getQueue();
+    // Simulate the lost successor: drain pending without running the finalizer
+    // and without the durable state reaching closed.
+    while (queue.pendingCount() > 0) {
+      queue.take();
+      queue.finish(true);
+    }
+    assert.equal(store.getSessionState(SESSION)?.status, "closing", "durable closing remains");
+
+    // Restart: a fresh manager over the SAME store recovers the closing session.
+    const port = new SessionHistoryReadPort({
+      readRawEntries: async () => [
+        u("u-1", null, "please read the file"),
+        c("c-1", "u-1"),
+        assistantText("a-1", "c-1", "I will read it."),
+      ],
+    });
+    const restarted = new HistorianManager({
+      store,
+      readPort: port,
+      modelProviderProfile: "opencode/deepseek-v4-flash",
+    });
+    await restarted.recover();
+    assert.ok(
+      restarted.getQueue().pendingCount() >= 1,
+      "closing session re-enqueued for finalization",
+    );
+    await restarted.pumpOnce();
+    const finalState = store.getSessionState(SESSION);
+    assert.ok(
+      finalState?.status === "closed" || finalState?.status === "closed_incomplete",
+      `recover() must finalize closing sessions, got ${finalState?.status}`,
+    );
+    restarted.close();
+  } finally {
+    manager.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("F5: duplicate wrapup never produces a second ContinuitySnapshot", async () => {
+  const { manager, store, dir } = managerFixture([
+    u("u-1", null, "hello"),
+    c("c-1", "u-1"),
+    assistantText("a-1", "c-1", "hi back"),
+  ]);
+  try {
+    await manager.enqueueWrapup(SESSION);
+    await manager.pumpOnce();
+    assert.equal(
+      store.listContinuitySnapshots(SESSION, 10).length,
+      1,
+      "first wrapup wrote one snapshot",
+    );
+
+    // Duplicate wrapup (e.g. recovery re-enqueue after crash): the terminal
+    // transition is idempotent — no second snapshot, status stays closed.
+    const again = await manager.enqueueWrapup(SESSION);
+    assert.equal(again, true);
+    await manager.pumpOnce();
+    assert.equal(
+      store.listContinuitySnapshots(SESSION, 10).length,
+      1,
+      "duplicate wrapup must not duplicate the snapshot",
+    );
+  } finally {
+    manager.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("F5: wrapup of a session whose head is an in-flight tool arc still terminates closing", async () => {
+  // Assistant issued a toolCall (seq 1) whose toolResult never arrived → the
+  // ENTIRE head is inside the protected tail (eligibleThroughEntrySeq=0,
+  // verified: toolCall@1 + custom@2 freezes with eligibleThrough=0): nothing
+  // is snapshot-able, but the durable closing must STILL terminate to closed
+  // (BLOCKING-2: previously stranded closing forever, recover() spinning).
+  const toolCallEntry: SessionTreeEntry = {
+    type: "message",
+    id: "a-tool-1",
+    parentId: null,
+    timestamp: new Date(1).toISOString(),
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call-1", name: "read", args: "{}" }],
+      api: "x",
+      provider: "m",
+      model: "v",
+      timestamp: 1,
+    },
+  } as unknown as SessionTreeEntry;
+  const { manager, store, dir } = managerFixture([toolCallEntry, c("c-1", "a-tool-1", 2)]);
+  try {
+    await manager.enqueueWrapup(SESSION);
+    // The freeze sees the in-flight arc: eligibleThroughEntrySeq stays 0, so
+    // the wrapup has nothing to snapshot — but it must still finalize.
+    await manager.pumpOnce();
+    const state = store.getSessionState(SESSION);
+    assert.ok(
+      state?.status === "closed" || state?.status === "closed_incomplete",
+      `in-flight-arc wrapup must terminate closing, got ${state?.status}`,
+    );
+    // And recovery after restart must not spin forever.
+    const port = new SessionHistoryReadPort({
+      readRawEntries: async () => [toolCallEntry, c("c-1", "a-tool-1", 2)],
+    });
+    const restarted = new HistorianManager({
+      store,
+      readPort: port,
+      modelProviderProfile: "opencode/deepseek-v4-flash",
+    });
+    await restarted.recover();
+    await restarted.pumpOnce();
+    const finalState = store.getSessionState(SESSION);
+    assert.ok(
+      finalState?.status === "closed" || finalState?.status === "closed_incomplete",
+      `recovered in-flight-arc session must terminate, got ${finalState?.status}`,
+    );
+    restarted.close();
+  } finally {
+    manager.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

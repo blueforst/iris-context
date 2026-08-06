@@ -45,6 +45,13 @@ export const HISTORIAN_PRIORITY_ORDER: Record<HistorianJobPriority, number> = {
   manual: 3,
 };
 
+/** Finalizing priorities: wrapup (normal) and recovery (low) both run the
+ * terminal closing → closed / closed_incomplete transition. They must never
+ * be suppressed by a running non-finalizing job (F5, iris_agent#42). */
+export function isFinalizing(priority: HistorianJobPriority): boolean {
+  return priority === "normal" || priority === "low";
+}
+
 /** The unit of work the worker executes. */
 export interface HistorianJob {
   priority: HistorianJobPriority;
@@ -77,6 +84,8 @@ export interface QueueStats {
   dropped: number;
   completed: number;
   failedPermanent: number;
+  /** F5 (iris_agent#42): registered terminal successors awaiting a running job. */
+  successors: number;
 }
 
 type JobHandler = (job: HistorianJob) => Promise<HistorianJobResult>;
@@ -96,6 +105,18 @@ export class HistorianQueue {
 
   private pending: HistorianJob[] = [];
   private running: HistorianJob | null = null;
+  /**
+   * F5 (iris_agent#42): per-Session terminal-successor slot. When a
+   * FINALIZING request (normal wrapup / low recovery) arrives while the same
+   * Session has a NON-finalizing job running, the queue must not suppress it:
+   * the runner re-freezes on each pass, so a fresher incremental is
+   * redundant, but a finalization transition (closing → closed /
+   * closed_incomplete with its ContinuitySnapshot) is NOT — it must run after
+   * the current work. At most one successor per Session is retained (the
+   * newest boundary wins); it is promoted to pending when the running job
+   * finishes.
+   */
+  private successors = new Map<string, HistorianJob>();
   private dropped = 0;
   private completed = 0;
   private failedPermanent = 0;
@@ -126,7 +147,6 @@ export class HistorianQueue {
       // pending wrapup 升级为 highest → worker 走 runner 路径提交 cursor、
       // wrapup 任务丢失 → 会话卡死 closing（recover 只恢复 closed/closed_
       // incomplete）且无 ContinuitySnapshot 的 wedge 复发。
-      const isFinalizing = (p: HistorianJobPriority): boolean => p === "normal" || p === "low";
       if (isFinalizing(existing.priority) || isFinalizing(job.priority)) {
         // 任一是终结性任务 → 合并结果必须是终结性任务（取已有的，否则取新的）。
         existing.priority = isFinalizing(existing.priority) ? existing.priority : job.priority;
@@ -139,16 +159,38 @@ export class HistorianQueue {
       return true;
     }
     if (this.running?.runtimeSessionId === job.runtimeSessionId) {
-      // The runner re-freezes on each pass, so a queued copy is unnecessary.
+      // F5 (iris_agent#42): a running NON-finalizing job must not suppress a
+      // finalizing request. The runner re-freezes on each pass, so a queued
+      // copy of a fresher incremental is unnecessary — but a terminal
+      // transition (wrapup/recovery) is required work: retain exactly one
+      // finalizing successor (newest boundary wins) and run it after the
+      // current job finishes. When the RUNNING job is itself finalizing, the
+      // new finalizing request is a duplicate (the running finalizer is the
+      // terminal transition) and must NOT register a successor — otherwise a
+      // repeated wrapup would run the terminal transition twice and produce
+      // a duplicate ContinuitySnapshot (iris_agent#42 AC6).
+      if (isFinalizing(job.priority) && !isFinalizing(this.running.priority)) {
+        this.successors.set(job.runtimeSessionId, {
+          priority: job.priority,
+          runtimeSessionId: job.runtimeSessionId,
+          jobId: `${job.priority}:${job.runtimeSessionId}:${this.nextRunId++}`,
+          attempt: 0,
+          boundary: job.boundary,
+          sessionState: job.sessionState,
+        });
+      }
       return true;
     }
     const full = this.pending.length >= this.maxQueuedJobs;
     if (full) {
-      // Drop the LOWEST-priority pending job (never the new one) unless the
-      // new one is manual maintenance (always droppable in favor of data).
+      // Drop the LOWEST-priority pending job (never the new one, and NEVER a
+      // finalizing job) unless the new one is manual maintenance (always
+      // droppable in favor of data). F5 (iris_agent#42 AC g): a terminal
+      // finalizer (normal wrapup / low recovery) must never be evicted by
+      // capacity pressure — the durable closing transition would be lost.
       const dropIndex = this.pending
         .map((j, index) => ({ j, index }))
-        .filter(({ j }) => j.priority !== "manual")
+        .filter(({ j }) => j.priority !== "manual" && !isFinalizing(j.priority))
         .sort(
           (a, b) => HISTORIAN_PRIORITY_ORDER[b.j.priority] - HISTORIAN_PRIORITY_ORDER[a.j.priority],
         )[0];
@@ -158,6 +200,8 @@ export class HistorianQueue {
       } else if (job.priority === "manual") {
         return false; // manual maintenance is droppable; refuse silently
       }
+      // No non-finalizing candidate to evict: allow the finalizing job in
+      // (bounded by evicting nothing; the finalizer is required work).
     }
     const attempt = 0;
     const candidate: HistorianJob = {
@@ -212,11 +256,23 @@ export class HistorianQueue {
     return true;
   }
 
-  /** Mark the currently running job as finished. ok=true counts a success;
+  /**
+   * Mark the currently running job as finished. ok=true counts a success;
    * ok=false counts a permanent failure; undefined clears `running` for a
-   * requeued job (it moved back to pending — not a completion). */
+   * requeued job (it moved back to pending — not a completion).
+   *
+   * F5 (iris_agent#42): after the running job truly completes (ok true or
+   * false), a registered terminal successor for the same Session is promoted
+   * to pending so the finalizer (closing → closed / closed_incomplete) is
+   * guaranteed to run exactly once more. A successor is only registered when
+   * the running job is non-finalizing (a finalizing job IS the terminal
+   * transition). On requeue (ok === undefined) the job moved back to pending
+   * and is not a completion, so the successor stays registered until the
+   * retry chain truly finishes.
+   */
   finish(ok: boolean | undefined): void {
-    if (this.running === null) {
+    const finished = this.running;
+    if (finished === null) {
       return;
     }
     this.running = null;
@@ -224,6 +280,30 @@ export class HistorianQueue {
       this.completed += 1;
     } else if (ok === false) {
       this.failedPermanent += 1;
+    }
+    if (ok !== undefined) {
+      const successor = this.successors.get(finished.runtimeSessionId);
+      if (successor !== undefined) {
+        this.successors.delete(finished.runtimeSessionId);
+        // F5 (iris_agent#42 AC g): promotion must never overflow the bound at
+        // the cost of the finalizer — evict the lowest-priority NON-finalizing
+        // pending job when full instead of dropping or overflowing the
+        // successor.
+        if (this.pending.length >= this.maxQueuedJobs) {
+          const evictIndex = this.pending
+            .map((j, index) => ({ j, index }))
+            .filter(({ j }) => !isFinalizing(j.priority))
+            .sort(
+              (a, b) =>
+                HISTORIAN_PRIORITY_ORDER[b.j.priority] - HISTORIAN_PRIORITY_ORDER[a.j.priority],
+            )[0];
+          if (evictIndex !== undefined) {
+            this.pending.splice(evictIndex.index, 1);
+            this.dropped += 1;
+          }
+        }
+        this.pending.push(successor);
+      }
     }
   }
 
@@ -245,7 +325,13 @@ export class HistorianQueue {
       dropped: this.dropped,
       completed: this.completed,
       failedPermanent: this.failedPermanent,
+      successors: this.successors.size,
     };
+  }
+
+  /** F5 (iris_agent#42): number of registered terminal successors. */
+  successorCount(): number {
+    return this.successors.size;
   }
 
   now(): number {
