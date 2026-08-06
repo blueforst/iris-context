@@ -34,6 +34,7 @@ const M1_PLACEHOLDER = "<session-history-since>(no new content)</session-history
 
 function makeLineageInput(): Parameters<ContextStore["createLineage"]>[0] {
   return {
+    lineageId: "identity-test",
     runtimeSessionId: SESSION,
     contextSourceSnapshotId: "src-1",
     epochId: SESSION,
@@ -51,7 +52,7 @@ function makeLineageInput(): Parameters<ContextStore["createLineage"]>[0] {
 
 function makeStore(): { store: ContextStore; dir: string } {
   const dir = mkdtempSync(join(tmpdir(), "iris-history-port-"));
-  return { store: ContextStore.open(join(dir, "context.db")), dir };
+  return { store: ContextStore.open(join(dir, "context.db"), { lineageId: "identity-test" }), dir };
 }
 
 function closeStore(store: ContextStore, dir: string): void {

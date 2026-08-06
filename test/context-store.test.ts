@@ -174,7 +174,7 @@ test("context-store: materialization on a missing lineage fails closed (no parti
         lastSafeUserAnchorEntrySeq: 1,
         atMs: 1,
       });
-    }, /fail closed/);
+    }, /fail-closed|fail closed/);
     assert.equal(store.getLineage("no-such-lineage"), undefined);
   } finally {
     store.close();
@@ -318,7 +318,9 @@ test("context-store: a different identity/data root gets a separate lineage", ()
   const { store } = makeStore();
   try {
     store.createLineage(makeLineageInput("iris-runtime-2026-08-01-1", "identity-main"));
-    store.createLineage(makeLineageInput("iris-runtime-2026-08-01-1", "identity-other"));
+    // A different data root has its own runtime session id; its lineage is
+    // independent and never inherits the other identity's state.
+    store.createLineage(makeLineageInput("iris-runtime-2026-08-02-1", "identity-other"));
     store.materializeM0ByContextSeq({
       runtimeSessionId: "iris-runtime-2026-08-01-1",
       m0Body: "main-m0",

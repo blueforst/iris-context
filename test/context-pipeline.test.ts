@@ -72,7 +72,7 @@ function assistantEntry(
 function storeFixture(): { store: ContextStore; path: string } {
   const dir = mkdtempSync(join(tmpdir(), "iris-pipeline-"));
   const path = join(dir, "context.db");
-  return { store: ContextStore.open(path), path };
+  return { store: ContextStore.open(path, { lineageId: "identity-test" }), path };
 }
 
 function baseInput(entries: SessionTreeEntry[]) {
@@ -97,6 +97,7 @@ function baseInput(entries: SessionTreeEntry[]) {
 
 function seedLineage(store: ContextStore, runtimeSessionId = "iris-runtime-2026-08-01-1") {
   store.createLineage({
+    lineageId: "identity-test",
     runtimeSessionId,
     contextSourceSnapshotId: "src-1",
     epochId: runtimeSessionId,
@@ -225,7 +226,7 @@ test("pipeline: applyContextPass persists a HARD materialization durably", () =>
     assert.ok(lineage.m1Body !== null);
     // Reopen: persisted.
     store.close();
-    const reopened = ContextStore.open(path);
+    const reopened = ContextStore.open(path, { lineageId: "identity-test" });
     try {
       const reloaded = reopened.getLineage("iris-runtime-2026-08-01-1");
       assert.ok(reloaded);

@@ -10,6 +10,28 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ContextMessageUnit, UnitDispositionFilter } from "../contracts/context-units.js";
 import type { ContextUnitStorePort } from "./context-ingest.js";
 
+/**
+ * F4 (iris_agent#9 / feature 4.1): typed failure for lineage resolution on the
+ * normal production write path. An unknown, stale, wrong-data-root or
+ * corrupted runtimeSessionId binding must NEVER silently fall back to the
+ * store's default lineage (that would write identity-level semantic units
+ * under the wrong identity). Recovery flows use the explicit reconciliation
+ * API (resolveLineageIdOrNull) instead; they must not reuse this error path.
+ */
+export class ContextLineageResolutionError extends Error {
+  readonly code = "context_lineage_resolution" as const;
+  readonly runtimeSessionId: string;
+  constructor(runtimeSessionId: string) {
+    super(
+      `No durable context lineage is bound to runtime session ${runtimeSessionId}; ` +
+        "refusing to resolve it to a default lineage (fail-closed). " +
+        "Bind the session explicitly (createLineage) or use the reconciliation API.",
+    );
+    this.name = "ContextLineageResolutionError";
+    this.runtimeSessionId = runtimeSessionId;
+  }
+}
+
 interface UnitRow {
   context_lineage_id: string;
   context_seq: number;
@@ -423,17 +445,26 @@ export class ContextStore implements ContextUnitStorePort {
       throw error;
     }
     const disposition = count >= this.maxUnitsPerSession ? "exclude" : unit.disposition;
+    // F4 (iris_agent#9 / feature 4.3): the unit carries its identity-level
+    // lineageId explicitly — write under THAT id, never a session-derived
+    // lookup. The session binding is still validated fail-closed first so an
+    // unknown/stale/wrong-data-root session cannot write into ANY lineage,
+    // even one supplied by the caller.
+    const boundLineageId = this.resolveLineageId(unit.runtimeSessionId);
+    if (unit.lineageId !== boundLineageId) {
+      throw new ContextLineageResolutionError(unit.runtimeSessionId);
+    }
     this.db
       .prepare(
         `INSERT INTO context_units (
-           context_lineage_id, context_seq, unit_id, runtime_event_id, source_event_id,
-           unit_type, disposition, entry_id, entry_seq, content_hash, payload,
-           companion_entry_id, pair_key, paired, derivation_refs, schema_version,
-           raw_archive_ref, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          context_lineage_id, context_seq, unit_id, runtime_event_id, source_event_id,
+          unit_type, disposition, entry_id, entry_seq, content_hash, payload,
+          companion_entry_id, pair_key, paired, derivation_refs, schema_version,
+          raw_archive_ref, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-        this.resolveLineageId(unit.runtimeSessionId),
+        boundLineageId,
         unit.contextSeq,
         unit.unitId,
         unit.runtimeEventId ?? null,
@@ -636,6 +667,19 @@ export class ContextStore implements ContextUnitStorePort {
   createLineage(input: CreateLineageInput): ContextLineage {
     const now = new Date().toISOString();
     const lineageId = input.lineageId ?? input.runtimeSessionId;
+    // F4 (iris_agent#9 / 4.1): a runtime session may be the current binding of
+    // at most ONE lineage. Duplicate current binding would make session→
+    // lineage resolution ambiguous and must fail closed.
+    const existingSessionBinding = this.db
+      .prepare(
+        "SELECT context_lineage_id AS id FROM context_lineages WHERE current_runtime_session_id = ? LIMIT 1",
+      )
+      .get(input.runtimeSessionId) as { id: string } | undefined;
+    if (existingSessionBinding !== undefined && existingSessionBinding.id !== lineageId) {
+      throw new Error(
+        `context createLineage failed: runtime session ${input.runtimeSessionId} is already the current binding of lineage ${existingSessionBinding.id} (cannot bind ${lineageId})`,
+      );
+    }
     const row: LineageRow = {
       context_lineage_id: lineageId,
       current_runtime_session_id: input.runtimeSessionId,
@@ -781,10 +825,14 @@ export class ContextStore implements ContextUnitStorePort {
    * R2 (iris_agent#9)：把调用方的 runtimeSessionId（attribution）解析为
    * identity-level lineage id。解析优先级：
    *   1) context_lineages.context_lineage_id 精确匹配（显式 id / 测试）；
-   *   2) context_lineages.current_runtime_session_id 反查（生产路径）；
-   *   3) 构造时绑定的 this.lineageId（单根开发环境）。
-   * 任何一层命中即返回；都不命中返回构造默认（fail-open 到单根语义，
-   * 调用方随后按该 id 写 units —— 与 0004 迁移后的 identity 语义一致）。
+   *   2) context_lineages.current_runtime_session_id 反查（生产路径）。
+   *
+   * F4 (iris_agent#9 / feature 4.1) fail-closed：都不命中时抛出
+   * {@link ContextLineageResolutionError}，绝不静默回退到构造默认 lineage。
+   * 未知 Session、rollover 后的过期 Session、错误 data root 或损坏绑定都
+   * 会在写入 identity-level 语义单元之前被拒绝。恢复流程必须走
+   * {@link ContextStore.resolveLineageIdOrNull}（显式 reconciliation API），
+   * 不得复用本方法或绕过 fail-closed 守卫。
    */
   private resolveLineageId(runtimeSessionId: string): string {
     const byId = this.db
@@ -803,7 +851,25 @@ export class ContextStore implements ContextUnitStorePort {
     if (bySession !== undefined) {
       return bySession.id;
     }
-    return this.lineageId;
+    throw new ContextLineageResolutionError(runtimeSessionId);
+  }
+
+  /**
+   * F4 (iris_agent#9 / feature 4.1) reconciliation API：与
+   * {@link ContextStore.resolveLineageId} 相同的解析规则，但未知 Session
+   * 返回 null 而非抛错。仅供恢复/审计流程显式使用（启动 reconciliation、
+   * 诊断工具）；正常生产写路径禁止调用本方法作为 fallback —— 它们必须用
+   * resolveLineageId 的 fail-closed 语义。
+   */
+  resolveLineageIdOrNull(runtimeSessionId: string): string | null {
+    try {
+      return this.resolveLineageId(runtimeSessionId);
+    } catch (error) {
+      if (error instanceof ContextLineageResolutionError) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   /**

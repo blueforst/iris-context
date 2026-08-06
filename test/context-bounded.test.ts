@@ -239,9 +239,13 @@ test("r2-p3: hard cap throws typed error and records emergency state (fail-close
 test("r2-p3: ingest surfaces hard-cap failure as typed error; rows before throw preserved", () => {
   const dir = tempDir();
   const ledger = RuntimeEventLedger.open(join(dir, "runtime-ledger.db"));
-  const store = ContextStore.open(join(dir, "context.db"), { maxUnitsPerSession: 1 });
+  const store = ContextStore.open(join(dir, "context.db"), {
+    maxUnitsPerSession: 1,
+    lineageId: "identity-test",
+  });
   const ingest = new ContextIngest(ledger, store, store.lineageId);
   try {
+    store.createLineage(makeLineageInput());
     // 软 cap=1（第 2 个单元 exclude），硬 cap=2（第 3 个单元写入时抛错）。
     for (let seq = 1; seq <= 3; seq += 1) {
       ledger.ingest(sampleEvent({ entryId: `e-${seq}`, payload: assistantWire(`m${seq}`) }));
