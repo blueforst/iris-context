@@ -17,11 +17,11 @@
     "fork": {
       "repository": "blueforst/pi",
       "baselineCommit": "ab5f8d88ee1d400c0c8fb5c50ac10b2f4a4851d1",
-      "seamCommit": "11afaec199eec1efcbb2e0d5dfeba26599341e19",
-      "seamTree": "a0f79e0a56d3f7e3afb120800312bf6ac9633a61",
+      "seamCommit": "93e7f52b8b1f0127b19bd03874441e8549b0b5ad",
+      "seamTree": "1bc88a1a17adc98a31c84dc385ab03339fdadbd5",
       "acceptedRuntimeRepository": "blueforst/pi",
-      "acceptedRuntimeCommit": "8327023a93830e1fb4ef9315c5d1885b167c00c1",
-      "acceptedRuntimeTree": "1822b6a01890ec0a51f0773c107bb20ab70a599e",
+      "acceptedRuntimeCommit": "66a3ea14616a438f47d3121979c0581c22ea64bb",
+      "acceptedRuntimeTree": "a6bdb67ab97a087e3e0285746462545780ea19b3",
       "upstreamBaseCommit": "e741cb05ca7c1c7bc5a9664c99697df32de9fac6",
       "upstreamAuditBaselineCommit": "b4f293684bba718d59cc1157679bcf6157b3a7f5",
       "adoptionStatus": "file_link_local_development"
@@ -32,7 +32,9 @@
     "release": "v0.33.0",
     "commit": "48ab531d8fa98af2f463db2e4d9f8ffdd63d765e",
     "authoritativePath": "packages/plugin/src/hooks/magic-context",
-    "explicitlyNotAdopted": ["experimental.memory_mural"]
+    "explicitlyNotAdopted": [
+      "experimental.memory_mural"
+    ]
   },
   "memoryContracts": {
     "package": "iris-memory-contracts",
