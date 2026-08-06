@@ -183,11 +183,14 @@ export class HistorianQueue {
     }
     const full = this.pending.length >= this.maxQueuedJobs;
     if (full) {
-      // Drop the LOWEST-priority pending job (never the new one) unless the
-      // new one is manual maintenance (always droppable in favor of data).
+      // Drop the LOWEST-priority pending job (never the new one, and NEVER a
+      // finalizing job) unless the new one is manual maintenance (always
+      // droppable in favor of data). F5 (iris_agent#42 AC g): a terminal
+      // finalizer (normal wrapup / low recovery) must never be evicted by
+      // capacity pressure — the durable closing transition would be lost.
       const dropIndex = this.pending
         .map((j, index) => ({ j, index }))
-        .filter(({ j }) => j.priority !== "manual")
+        .filter(({ j }) => j.priority !== "manual" && !isFinalizing(j.priority))
         .sort(
           (a, b) => HISTORIAN_PRIORITY_ORDER[b.j.priority] - HISTORIAN_PRIORITY_ORDER[a.j.priority],
         )[0];
@@ -197,6 +200,8 @@ export class HistorianQueue {
       } else if (job.priority === "manual") {
         return false; // manual maintenance is droppable; refuse silently
       }
+      // No non-finalizing candidate to evict: allow the finalizing job in
+      // (bounded by evicting nothing; the finalizer is required work).
     }
     const attempt = 0;
     const candidate: HistorianJob = {
@@ -280,6 +285,23 @@ export class HistorianQueue {
       const successor = this.successors.get(finished.runtimeSessionId);
       if (successor !== undefined) {
         this.successors.delete(finished.runtimeSessionId);
+        // F5 (iris_agent#42 AC g): promotion must never overflow the bound at
+        // the cost of the finalizer — evict the lowest-priority NON-finalizing
+        // pending job when full instead of dropping or overflowing the
+        // successor.
+        if (this.pending.length >= this.maxQueuedJobs) {
+          const evictIndex = this.pending
+            .map((j, index) => ({ j, index }))
+            .filter(({ j }) => !isFinalizing(j.priority))
+            .sort(
+              (a, b) =>
+                HISTORIAN_PRIORITY_ORDER[b.j.priority] - HISTORIAN_PRIORITY_ORDER[a.j.priority],
+            )[0];
+          if (evictIndex !== undefined) {
+            this.pending.splice(evictIndex.index, 1);
+            this.dropped += 1;
+          }
+        }
         this.pending.push(successor);
       }
     }

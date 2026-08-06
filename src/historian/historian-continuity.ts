@@ -195,6 +195,38 @@ export function runWrapup(input: WrapupInput): WrapupResult {
   }
 
   if (input.eligibleEntries.length === 0 && (input.state.processedThroughEntrySeq ?? 0) === 0) {
+    // F5 (iris_agent#42 BLOCKING-2): nothing to snapshot, but if the Session
+    // is CLOSING the terminal transition must still complete — a durable
+    // closing must never strand without a final state. A session whose head
+    // is entirely inside the protected tail (eligibleThroughEntrySeq=0, e.g.
+    // an in-flight tool arc at freeze time) has no snapshot content, but its
+    // wrapup still terminates closing → closed (no snapshot written). Keeps
+    // the caller's transaction semantics (commit:false writes, caller
+    // commits; commit:true wraps its own transaction).
+    if (input.state.status === "closing") {
+      const write = (): void => {
+        store.upsertSessionState({
+          runtimeSessionId,
+          processedThroughEntrySeq: input.state.processedThroughEntrySeq,
+          status: "closed",
+          observedHeadEntrySeq: boundary.observedHeadEntrySeq,
+          updatedAt: new Date((input.nowMs ?? (() => Date.now()))()).toISOString(),
+        });
+      };
+      if (input.commit === false) {
+        write();
+      } else {
+        store.begin();
+        try {
+          write();
+          store.commit();
+        } catch (error) {
+          store.rollback();
+          throw error;
+        }
+      }
+      return { snapshot: null, status: "closed" };
+    }
     return { snapshot: null, status: "nothing_to_snapshot" };
   }
 

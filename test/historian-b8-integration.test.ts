@@ -375,3 +375,64 @@ test("F5: duplicate wrapup never produces a second ContinuitySnapshot", async ()
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("F5: wrapup of a session whose head is an in-flight tool arc still terminates closing", async () => {
+  // Assistant issued a toolCall whose toolResult never arrived → the head is
+  // entirely inside the protected tail (eligibleThroughEntrySeq=0): nothing
+  // is snapshot-able, but the durable closing must STILL terminate to closed
+  // (BLOCKING-2: previously stranded closing forever, recover() spinning).
+  const toolCallEntry: SessionTreeEntry = {
+    type: "message",
+    id: "a-tool-1",
+    parentId: "c-1",
+    timestamp: new Date(4).toISOString(),
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call-1", name: "read", args: "{}" }],
+      api: "x",
+      provider: "m",
+      model: "v",
+      timestamp: 4,
+    },
+  } as unknown as SessionTreeEntry;
+  const { manager, store, dir } = managerFixture([
+    u("u-1", null, "please read the file"),
+    c("c-1", "u-1"),
+    toolCallEntry,
+  ]);
+  try {
+    await manager.enqueueWrapup(SESSION);
+    // The freeze sees the in-flight arc: eligibleThroughEntrySeq stays 0, so
+    // the wrapup has nothing to snapshot — but it must still finalize.
+    await manager.pumpOnce();
+    const state = store.getSessionState(SESSION);
+    assert.ok(
+      state?.status === "closed" || state?.status === "closed_incomplete",
+      `in-flight-arc wrapup must terminate closing, got ${state?.status}`,
+    );
+    // And recovery after restart must not spin forever.
+    const port = new SessionHistoryReadPort({
+      readRawEntries: async () => [
+        u("u-1", null, "please read the file"),
+        c("c-1", "u-1"),
+        toolCallEntry,
+      ],
+    });
+    const restarted = new HistorianManager({
+      store,
+      readPort: port,
+      modelProviderProfile: "opencode/deepseek-v4-flash",
+    });
+    await restarted.recover();
+    await restarted.pumpOnce();
+    const finalState = store.getSessionState(SESSION);
+    assert.ok(
+      finalState?.status === "closed" || finalState?.status === "closed_incomplete",
+      `recovered in-flight-arc session must terminate, got ${finalState?.status}`,
+    );
+    restarted.close();
+  } finally {
+    manager.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
