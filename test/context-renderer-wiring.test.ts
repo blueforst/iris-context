@@ -35,6 +35,7 @@ const HARD_SIGNALS = {
 
 function makeLineageInput(): Parameters<ContextStore["createLineage"]>[0] {
   return {
+    lineageId: "identity-test",
     runtimeSessionId: SESSION,
     contextSourceSnapshotId: "src-1",
     epochId: SESSION,
@@ -61,7 +62,7 @@ interface Fixture {
 function makeFixture(): Fixture {
   const dir = mkdtempSync(join(tmpdir(), "iris-renderer-wiring-"));
   const ledger = RuntimeEventLedger.open(join(dir, "runtime-ledger.db"));
-  const store = ContextStore.open(join(dir, "context.db"));
+  const store = ContextStore.open(join(dir, "context.db"), { lineageId: "identity-test" });
   store.createLineage(makeLineageInput());
   const ingest = new ContextIngest(ledger, store, store.lineageId);
   const renderer = new ContextRenderer(store);

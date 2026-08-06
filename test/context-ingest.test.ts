@@ -85,7 +85,26 @@ function setup(dir: string): {
   ingest: ContextIngest;
 } {
   const ledger = RuntimeEventLedger.open(join(dir, "runtime-ledger.db"));
-  const store = ContextStore.open(join(dir, "context.db"));
+  const store = ContextStore.open(join(dir, "context.db"), { lineageId: "identity-test" });
+  // F4 (iris_agent#9 / 4.1): the production write path requires an explicit
+  // lineage binding for the runtime session before any unit can be written;
+  // fail-closed resolution throws for unknown sessions instead of falling
+  // back to a default lineage.
+  store.createLineage({
+    lineageId: "identity-test",
+    runtimeSessionId: "session-1",
+    contextSourceSnapshotId: "src-session-1",
+    epochId: "epoch-1",
+    personaSnapshotId: "persona-1",
+    declarationVersion: "v1",
+    providerProfileId: "mock",
+    canonicalSystemPrompt: "system",
+    systemProjectionHash: "sys-hash",
+    preparedAt: "2026-08-05T00:00:00.000Z",
+    materializationId: "mat-1",
+    contextSerializerVersion: "iris-context-golden-v1",
+    carrierSchemaVersion: "1",
+  });
   const ingest = new ContextIngest(ledger, store, store.lineageId);
   return { ledger, store, ingest };
 }
@@ -123,6 +142,23 @@ test("r2: lifecycle events never become units", () => {
   const dir = tempDir();
   try {
     const { ledger, store, ingest } = setup(dir);
+    // F4: lifecycle-only session has its own lineage binding; no units are
+    // ever written for it.
+    store.createLineage({
+      lineageId: "identity-s",
+      runtimeSessionId: "s",
+      contextSourceSnapshotId: "src-s",
+      epochId: "epoch-s",
+      personaSnapshotId: "persona-1",
+      declarationVersion: "v1",
+      providerProfileId: "mock",
+      canonicalSystemPrompt: "system",
+      systemProjectionHash: "sys-hash",
+      preparedAt: "2026-08-05T00:00:00.000Z",
+      materializationId: "mat-s",
+      contextSerializerVersion: "iris-context-golden-v1",
+      carrierSchemaVersion: "1",
+    });
     ledger.ingest({
       type: "turn_committed",
       runtimeSessionId: "s",
@@ -300,7 +336,24 @@ test("r2: empty context.db initializes cleanly; 0001-0004 applied and idempotent
   const dir = tempDir();
   try {
     const store = ContextStore.open(join(dir, "context.db"));
-    assert.deepEqual(store.listUnits("any-session"), []);
+    // F4: unknown session on the read path fails closed too — no silent
+    // default-lineage fallback. The migration gate checks the DB shape.
+    store.createLineage({
+      lineageId: "identity-test",
+      runtimeSessionId: "session-1",
+      contextSourceSnapshotId: "src",
+      epochId: "epoch",
+      personaSnapshotId: "persona",
+      declarationVersion: "v1",
+      providerProfileId: "mock",
+      canonicalSystemPrompt: "s",
+      systemProjectionHash: "h",
+      preparedAt: "2026-08-05T00:00:00.000Z",
+      materializationId: "m",
+      contextSerializerVersion: "iris-context-golden-v1",
+      carrierSchemaVersion: "1",
+    });
+    assert.deepEqual(store.listUnits("session-1"), []);
     store.close();
     const reopened = ContextStore.open(join(dir, "context.db"));
     reopened.close();
