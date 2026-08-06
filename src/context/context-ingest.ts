@@ -178,7 +178,7 @@ export class ContextIngest implements ContextIngestPort {
      * resolved by ContextStore.resolveLineageForRecovery (verified binding).
      * Recovery mode NEVER makes the old session current again.
      */
-    private readonly recovery: boolean = false,
+    private readonly recovery = false,
   ) {}
 
   /** R2 (iris_agent#9)：该 lineage 的下一个 contextSeq（lineage 内全局单调，跨
