@@ -458,7 +458,16 @@ export class ContextStore implements ContextUnitStorePort {
         ? this.getLineage(unit.runtimeSessionId)
         : this.getLineageByLineageId(unit.lineageId);
       if (lineage !== undefined) {
-        this.setEmergencyState(unit.runtimeSessionId, "emergency_fail_closed", error.message);
+        // iris_agent#52: recovery mode passes the lineage id explicitly so a
+        // historical session's hard-cap failure records the emergency state
+        // WITHOUT session resolution (which would fail closed and MASK the
+        // ContextBoundsExceededError - review finding).
+        this.setEmergencyState(
+          unit.runtimeSessionId,
+          "emergency_fail_closed",
+          error.message,
+          verify ? undefined : unit.lineageId,
+        );
       }
       throw error;
     }
@@ -935,6 +944,21 @@ export class ContextStore implements ContextUnitStorePort {
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      // iris_agent#52: a runtime session may be the current binding of at most
+      // ONE lineage (same invariant createLineage enforces). Without this
+      // guard, bindCurrentSession could give a session a SECOND current
+      // binding on another lineage, making recovery resolution ambiguous
+      // (review finding: probe-ambiguity).
+      const existingOther = this.db
+        .prepare(
+          "SELECT context_lineage_id AS id FROM session_lineage_bindings WHERE runtime_session_id = ? AND binding_role = 'current' AND context_lineage_id != ? LIMIT 1",
+        )
+        .get(runtimeSessionId, lineageId) as { id: string } | undefined;
+      if (existingOther !== undefined) {
+        throw new Error(
+          `context bindCurrentSession failed: runtime session ${runtimeSessionId} is already the current binding of lineage ${existingOther.id} (cannot bind ${lineageId})`,
+        );
+      }
       const previous = this.db
         .prepare(
           "SELECT runtime_session_id FROM session_lineage_bindings WHERE context_lineage_id = ? AND binding_role = 'current' LIMIT 1",
@@ -1007,18 +1031,28 @@ export class ContextStore implements ContextUnitStorePort {
           `(fail closed)`,
       );
     }
-    const row = this.db
+    const rows = this.db
       .prepare(
-        "SELECT context_lineage_id, binding_role, binding_checksum FROM session_lineage_bindings WHERE runtime_session_id = ? LIMIT 1",
+        "SELECT context_lineage_id, binding_role, binding_checksum FROM session_lineage_bindings WHERE runtime_session_id = ? ORDER BY bound_at",
       )
-      .get(runtimeSessionId) as
-      { context_lineage_id: string; binding_role: string; binding_checksum: string } | undefined;
-    if (row === undefined) {
+      .all(runtimeSessionId) as
+      { context_lineage_id: string; binding_role: string; binding_checksum: string }[];
+    if (rows.length === 0) {
       throw new Error(
         `context resolveLineageForRecovery failed: no binding for runtime session ${runtimeSessionId} in this data root ` +
           `(fail closed: foreign or fabricated session)`,
       );
     }
+    if (rows.length > 1) {
+      // Defensive ambiguity gate: a session must never resolve to more than
+      // one lineage (bindCurrentSession/createLineage enforce a single
+      // current binding, so this can only happen via external tampering).
+      throw new Error(
+        `context resolveLineageForRecovery failed: runtime session ${runtimeSessionId} has ${rows.length} bindings ` +
+          `(${rows.map((r) => r.context_lineage_id).join(", ")}); refusing to resolve ambiguously (fail closed)`,
+      );
+    }
+    const row = rows[0]!;
     const expected = this.bindingChecksum(runtimeSessionId, row.context_lineage_id);
     if (expected !== row.binding_checksum) {
       throw new Error(
@@ -1253,6 +1287,7 @@ export class ContextStore implements ContextUnitStorePort {
     runtimeSessionId: string,
     state: ContextLineage["emergencyState"],
     error: string | null,
+    lineageIdOverride?: string,
   ): void {
     const now = new Date().toISOString();
     const result = this.db
@@ -1260,7 +1295,7 @@ export class ContextStore implements ContextUnitStorePort {
         `UPDATE context_lineages SET emergency_state = ?, last_transform_error = ?, updated_at = ?
          WHERE context_lineage_id = ?`,
       )
-      .run(state, error, now, this.resolveLineageId(runtimeSessionId));
+      .run(state, error, now, lineageIdOverride ?? this.resolveLineageId(runtimeSessionId));
     if (result.changes !== 1) {
       throw new Error(`context setEmergencyState failed: no lineage for ${runtimeSessionId}`);
     }

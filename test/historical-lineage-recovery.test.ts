@@ -283,6 +283,139 @@ test("c3: binding ledger keeps the full append-only history with integrity check
   }
 });
 
+test("c5: single-current-binding guard, ambiguity fail-closed and unmasked hard-cap error (review findings)", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-c5-"));
+  const config = defaultAgentConfig();
+  initializeDataRoot(dataRoot, config);
+  const paths = resolveDataRootPaths(dataRoot, config);
+  const epochStore = new RuntimeEpochStore(
+    paths.epochRegistryDb,
+    config.runtime_sessions.session_id_prefix,
+    config.runtime_sessions.timezone,
+  );
+  const epoch = epochStore.ensureActive("2026-08-05T00:00:00.000Z");
+  const store = ContextStore.open(paths.contextDb, { lineageId: "lineage-c5", maxUnitsPerSession: 10 });
+  try {
+    store.createLineage({
+      lineageId: "lineage-c5",
+      runtimeSessionId: epoch.runtimeSessionId,
+      contextSourceSnapshotId: "snap",
+      epochId: epoch.epochId,
+      personaSnapshotId: "persona-default-v1",
+      declarationVersion: "decl-v1",
+      providerProfileId: "profile",
+      canonicalSystemPrompt: "sys",
+      systemProjectionHash: "hash",
+      preparedAt: "2026-08-05T00:00:00.000Z",
+      materializationId: "mat",
+      contextSerializerVersion: "v1",
+      carrierSchemaVersion: "v1",
+    });
+
+    // Review finding (probe-ambiguity): a session that is the CURRENT binding
+    // of one lineage must not be bindable as current of a second lineage.
+    store.createLineage({
+      lineageId: "lineage-c5-other",
+      runtimeSessionId: "some-other-session",
+      contextSourceSnapshotId: "snap",
+      epochId: epoch.epochId,
+      personaSnapshotId: "persona-default-v1",
+      declarationVersion: "decl-v1",
+      providerProfileId: "profile",
+      canonicalSystemPrompt: "sys",
+      systemProjectionHash: "hash",
+      preparedAt: "2026-08-05T00:00:00.000Z",
+      materializationId: "mat",
+      contextSerializerVersion: "v1",
+      carrierSchemaVersion: "v1",
+    });
+    assert.throws(
+      () => store.bindCurrentSession("lineage-c5-other", epoch.runtimeSessionId),
+      /already the current binding of lineage lineage-c5/,
+    );
+
+    // Ambiguity fail-closed: two binding rows for one session (external
+    // tampering) must throw instead of resolving arbitrarily.
+    store.raw().prepare(
+      `INSERT INTO session_lineage_bindings
+        (runtime_session_id, context_lineage_id, binding_role, bound_at, superseded_at, binding_checksum)
+       VALUES (?, ?, 'historical', ?, NULL, ?)`,
+    ).run(
+      "some-other-session",
+      "lineage-c5",
+      "2026-08-05T00:00:00.000Z",
+      "0".repeat(64),
+    );
+    assert.throws(
+      () =>
+        store.resolveLineageForRecovery("some-other-session", {
+          sessionId: "some-other-session",
+          entryId: "e",
+          contentHash: "f".repeat(64),
+        }),
+      /has 2 bindings|checksum/,
+      "ambiguous or corrupt bindings must fail closed",
+    );
+
+    // Review finding (P7): recovery-mode hard-cap insert must surface
+    // ContextBoundsExceededError, NOT mask it with a session-resolution
+    // failure when recording the emergency state. (hard cap = 2x soft cap.)
+    const hard = ContextStore.open(paths.contextDb, { lineageId: "lineage-c5", maxUnitsPerSession: 1 });
+    try {
+      for (let i = 1; i <= 2; i += 1) {
+        hard.insertUnit(
+          {
+            lineageId: "lineage-c5",
+            runtimeSessionId: "some-other-session",
+            contextSeq: i,
+            unitId: `u${i}`,
+            sourceEventId: `evt-${i}`,
+            runtimeEventId: `evt-${i}`,
+            unitType: "assistant",
+            disposition: "include",
+            contentHash: "c".repeat(64),
+            payload: { role: "assistant", content: [{ type: "text", text: "x" }] } as never,
+            paired: false,
+            derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+            schemaVersion: "context-unit-v1",
+            createdAt: "2026-08-05T00:00:00.000Z",
+          },
+          { verifySessionBinding: false },
+        );
+      }
+      assert.throws(
+        () =>
+          hard.insertUnit(
+            {
+              lineageId: "lineage-c5",
+              runtimeSessionId: "some-other-session",
+              contextSeq: 3,
+              unitId: "u3",
+              sourceEventId: "evt-3",
+              runtimeEventId: "evt-3",
+              unitType: "assistant",
+              disposition: "include",
+              contentHash: "c".repeat(64),
+              payload: { role: "assistant", content: [{ type: "text", text: "x" }] } as never,
+              paired: false,
+              derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+              schemaVersion: "context-unit-v1",
+              createdAt: "2026-08-05T00:00:00.000Z",
+            },
+            { verifySessionBinding: false },
+          ),
+        /hard cap exceeded/,
+        "recovery-mode hard-cap failure must surface ContextBoundsExceededError",
+      );
+    } finally {
+      hard.close();
+    }
+  } finally {
+    store.close();
+    epochStore.close();
+  }
+});
+
 test("c4: foreign, fabricated, deleted and checksum-corrupt bindings fail closed", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "iris-c4-"));
   const config = defaultAgentConfig();
