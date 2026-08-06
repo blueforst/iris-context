@@ -204,6 +204,14 @@ export class HistorianManager {
       status: "active" as const,
       updatedAt: new Date(this.nowMs()).toISOString(),
     };
+    // F5 (iris_agent#42 AC6): an already-finalized Session must not be moved
+    // back to closing. Duplicate wrapup requests (e.g. a rollover racing a
+    // completed finalization, or recovery re-enqueue) are idempotent no-ops —
+    // the terminal transition already ran; re-writing closing would let the
+    // next wrapup produce a SECOND ContinuitySnapshot.
+    if (durable.status === "closed" || durable.status === "closed_incomplete") {
+      return true;
+    }
     const closing: HistorianSessionState = {
       ...durable,
       status: "closing",
@@ -220,7 +228,13 @@ export class HistorianManager {
   }
 
   /** Startup recovery: re-enqueue `low` retries for closed sessions whose
-   * snapshots are unconsumed, plus any retry_wait outbox rows. */
+   * snapshots are unconsumed, plus any retry_wait outbox rows. F5
+   * (iris_agent#42): `closing` sessions are ALSO recovered — a durable
+   * closing transition must always have a guaranteed execution path, so a
+   * crash after persisting closing but before the finalizer ran re-enqueues
+   * the wrapup at `normal` (the terminal transition itself is idempotent:
+   * runWrapup only writes closing → closed / closed_incomplete and its
+   * ContinuitySnapshot atomically). */
   async recover(): Promise<void> {
     const sessions = this.store.listSessions();
     for (const session of sessions) {
@@ -229,6 +243,19 @@ export class HistorianManager {
         if (frozen !== null && !frozen.nothingNew) {
           this.queue.enqueue({
             priority: "low",
+            runtimeSessionId: session.runtimeSessionId,
+            boundary: frozen.snapshot,
+            sessionState: session,
+          });
+        }
+      } else if (session.status === "closing") {
+        // Durable closing intent: the wrapup must be re-enqueued (a running
+        // non-finalizing job at crash time may have suppressed the successor,
+        // or the successor never ran before the crash).
+        const frozen = await this.freezeCurrent(session.runtimeSessionId);
+        if (frozen !== null) {
+          this.queue.enqueue({
+            priority: "normal",
             runtimeSessionId: session.runtimeSessionId,
             boundary: frozen.snapshot,
             sessionState: session,

@@ -93,7 +93,7 @@ export interface WrapupInput {
 
 export interface WrapupResult {
   snapshot: ContinuitySnapshot | null;
-  status: "closed" | "closed_incomplete" | "nothing_to_snapshot";
+  status: "closed" | "closed_incomplete" | "nothing_to_snapshot" | "already_finalized";
 }
 
 /** Build the ContinuitySnapshot from the frozen final head (PURE). */
@@ -184,6 +184,15 @@ export function buildContinuitySnapshot(input: WrapupInput): ContinuitySnapshot 
 /** Finalize a Session and persist its ContinuitySnapshot (B6 wrapup). */
 export function runWrapup(input: WrapupInput): WrapupResult {
   const { store, runtimeSessionId, boundary } = input;
+
+  // F5 (iris_agent#42 AC6) idempotency guard: a Session that is already
+  // closed / closed_incomplete has already run its terminal transition.
+  // Duplicate wrapup requests (recovery re-enqueue, repeated wrapup after a
+  // crash between the final transaction and queue cleanup) must NOT write a
+  // second ContinuitySnapshot or re-run the transition.
+  if (input.state.status === "closed" || input.state.status === "closed_incomplete") {
+    return { snapshot: null, status: "already_finalized" };
+  }
 
   if (input.eligibleEntries.length === 0 && (input.state.processedThroughEntrySeq ?? 0) === 0) {
     return { snapshot: null, status: "nothing_to_snapshot" };
