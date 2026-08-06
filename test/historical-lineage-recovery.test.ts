@@ -332,12 +332,9 @@ test("c5: single-current-binding guard, ambiguity fail-closed and unmasked hard-
       contextSerializerVersion: "v1",
       carrierSchemaVersion: "v1",
     });
-    assert.throws(
-      () => {
-        store.bindCurrentSession("lineage-c5-other", epoch.runtimeSessionId);
-      },
-      /already the current binding of lineage lineage-c5/,
-    );
+    assert.throws(() => {
+      store.bindCurrentSession("lineage-c5-other", epoch.runtimeSessionId);
+    }, /already the current binding of lineage lineage-c5/);
 
     // Ambiguity fail-closed: two binding rows for one session (external
     // tampering) must throw instead of resolving arbitrarily.
@@ -391,7 +388,7 @@ test("c5: single-current-binding guard, ambiguity fail-closed and unmasked hard-
         );
       }
       assert.throws(
-        () =>
+        () => {
           hard.insertUnit(
             {
               lineageId: "lineage-c5",
@@ -410,7 +407,8 @@ test("c5: single-current-binding guard, ambiguity fail-closed and unmasked hard-
               createdAt: "2026-08-05T00:00:00.000Z",
             },
             { verifySessionBinding: false },
-          ),
+          );
+        },
         /hard cap exceeded/,
         "recovery-mode hard-cap failure must surface ContextBoundsExceededError",
       );

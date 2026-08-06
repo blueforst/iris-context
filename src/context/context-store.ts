@@ -1058,7 +1058,9 @@ export class ContextStore implements ContextUnitStorePort {
     const row = rows[0];
     if (row === undefined) {
       // Unreachable after the length checks above; keep the type narrow.
-      throw new Error(`context resolveLineageForRecovery failed: no binding for ${runtimeSessionId}`);
+      throw new Error(
+        `context resolveLineageForRecovery failed: no binding for ${runtimeSessionId}`,
+      );
     }
     const expected = this.bindingChecksum(runtimeSessionId, row.context_lineage_id);
     if (expected !== row.binding_checksum) {
