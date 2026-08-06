@@ -40,7 +40,13 @@ test("capability gate: the production SQLite session satisfies crash-recoverable
   const { repo, session } = await openOrCreateSession(dataRoot, config, epoch.runtimeSessionId);
   try {
     const { models, model, providerProfileId } = await composeProvider("mock");
-    const prepared = prepareContextSources(sampleAgentInput(), epoch.runtimeSessionId, epoch.epochId, config, "2026-08-05T00:00:00.000Z");
+    const prepared = prepareContextSources(
+      sampleAgentInput(),
+      epoch.runtimeSessionId,
+      epoch.epochId,
+      config,
+      "2026-08-05T00:00:00.000Z",
+    );
     // Must NOT throw: SQLite journal is crash-recoverable.
     const { harness } = createIrisHarness({
       session,
