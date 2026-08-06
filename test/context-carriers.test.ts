@@ -113,7 +113,8 @@ test("carriers: materializationId change invalidates the carrier", () => {
 
 test("carriers: buildCarriersFromLineage returns undefined when m0 never materialized", () => {
   const lineage: ContextLineage = {
-    runtimeSessionId: "iris-runtime-2026-08-01-1",
+    lineageId: "identity-test",
+    currentRuntimeSessionId: "iris-runtime-2026-08-01-1",
     contextSourceSnapshotId: "src-1",
     epochId: "e1",
     personaSnapshotId: "p1",
@@ -153,7 +154,8 @@ test("carriers: buildCarriersFromLineage returns undefined when m0 never materia
 
 test("carriers: reload/restart rebuilds byte-identical carriers from lineage", () => {
   const lineage: ContextLineage = {
-    runtimeSessionId: "iris-runtime-2026-08-01-1",
+    lineageId: "identity-test",
+    currentRuntimeSessionId: "iris-runtime-2026-08-01-1",
     contextSourceSnapshotId: "src-1",
     epochId: "e1",
     personaSnapshotId: "p1",
@@ -175,7 +177,7 @@ test("carriers: reload/restart rebuilds byte-identical carriers from lineage", (
     cachedM0ModelKey: "model-v1",
     cachedM0ProviderProfileId: "mock",
     lastResponseTime: 1_785_000_000_000,
-    representedThroughEntrySeq: 5,
+    representedThroughEntrySeq: 0,
     representedThroughContextSeq: 5,
     protectedTailStartEntrySeq: 3,
     lastSafeUserAnchorEntrySeq: 2,

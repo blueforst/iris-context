@@ -14,7 +14,8 @@ import type { ContextLineage } from "../src/context/context-store.js";
 
 function makeLineage(overrides: Partial<ContextLineage> = {}): ContextLineage {
   return {
-    runtimeSessionId: "iris-runtime-2026-08-01-1",
+    lineageId: "identity-test",
+    currentRuntimeSessionId: "iris-runtime-2026-08-01-1",
     contextSourceSnapshotId: "src-1",
     epochId: "e1",
     personaSnapshotId: "persona-1",
@@ -36,7 +37,7 @@ function makeLineage(overrides: Partial<ContextLineage> = {}): ContextLineage {
     cachedM0ModelKey: "model-v1",
     cachedM0ProviderProfileId: "mock",
     lastResponseTime: 500,
-    representedThroughEntrySeq: 10,
+    representedThroughEntrySeq: 0,
     representedThroughContextSeq: 10,
     protectedTailStartEntrySeq: 5,
     lastSafeUserAnchorEntrySeq: 3,

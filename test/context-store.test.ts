@@ -14,8 +14,12 @@ function makeStore(): { store: ContextStore; path: string } {
   return { store: ContextStore.open(path), path };
 }
 
-function makeLineageInput(runtimeSessionId = "iris-runtime-2026-08-01-1") {
+function makeLineageInput(
+  runtimeSessionId = "iris-runtime-2026-08-01-1",
+  lineageId = "identity-test",
+) {
   return {
+    lineageId,
     runtimeSessionId,
     contextSourceSnapshotId: `src-${runtimeSessionId}`,
     epochId: "iris-runtime-2026-08-01-1",
@@ -35,14 +39,14 @@ test("context-store: empty DB initializes cleanly and lineage can be created", (
   const { store, path } = makeStore();
   try {
     const lineage = store.createLineage(makeLineageInput());
-    assert.equal(lineage.runtimeSessionId, "iris-runtime-2026-08-01-1");
+    assert.equal(lineage.currentRuntimeSessionId, "iris-runtime-2026-08-01-1");
     assert.equal(lineage.emergencyState, "ok");
-    assert.equal(lineage.representedThroughEntrySeq, 0);
+    assert.equal(lineage.representedThroughContextSeq, 0);
     // Re-open proves durability.
     store.close();
     const reopened = ContextStore.open(path);
     try {
-      const loaded = reopened.getLineage("iris-runtime-2026-08-01-1");
+      const loaded = reopened.getLineage("identity-test");
       assert.equal(loaded?.materializationId, "mat-1");
       assert.equal(loaded?.m0Body, null, "never materialized");
     } finally {
@@ -61,14 +65,14 @@ test("context-store: repeated open is idempotent (no double migration)", () => {
     // Second open must not fail and must not re-apply migrations.
     const again = ContextStore.open(path);
     try {
-      const lineage = again.getLineage("iris-runtime-2026-08-01-1");
+      const lineage = again.getLineage("identity-test");
       assert.ok(lineage);
       const db = new DatabaseSync(path);
       try {
         const count = (
           db.prepare("SELECT COUNT(*) AS c FROM schema_migrations").get() as { c: number }
         ).c;
-        assert.equal(count, 3, "0001 + 0002 + 0003 applied once, never re-applied");
+        assert.equal(count, 4, "0001..0004 applied once, never re-applied");
       } finally {
         db.close();
       }
@@ -102,7 +106,7 @@ test("context-store: HARD materializeM0 commits m0+m1 atomically and persists", 
     store.close();
     const reopened = ContextStore.open(path);
     try {
-      const lineage = reopened.getLineage("iris-runtime-2026-08-01-1");
+      const lineage = reopened.getLineage("identity-test");
       assert.equal(lineage?.m0Body, "<session-history></session-history>");
       assert.equal(lineage?.m0MaterializedAt, 1_785_000_000_000);
       assert.equal(lineage?.representedThroughEntrySeq, 42);
@@ -141,7 +145,7 @@ test("context-store: SOFT materializeM1 updates m1 only, m0 untouched", () => {
       representedThroughEntrySeq: 50,
       atMs: 2_000,
     });
-    const lineage = store.getLineage("iris-runtime-2026-08-01-1");
+    const lineage = store.getLineage("identity-test");
     assert.equal(lineage?.m0Body, "m0-baseline", "m0 must be byte-identical");
     assert.equal(lineage?.m0ContentHash, "h0");
     assert.equal(lineage?.m1Body, "m1-v2");
@@ -171,7 +175,7 @@ test("context-store: materialization on a missing lineage fails closed (no parti
         atMs: 1,
       });
     }, /fail closed/);
-    assert.equal(store.getLineage("no-such-session"), undefined);
+    assert.equal(store.getLineage("no-such-lineage"), undefined);
   } finally {
     store.close();
   }
@@ -190,7 +194,7 @@ test("context-store: deferred operations preserve ordering via monotonic cursor"
     assert.ok((ops[1]?.seq ?? 0) > (ops[0]?.seq ?? 0));
     // Cursor advances independently.
     store.setDeferredSignalCursor("iris-runtime-2026-08-01-1", 5);
-    assert.equal(store.getLineage("iris-runtime-2026-08-01-1")?.deferredSignalCursor, 5);
+    assert.equal(store.getLineage("identity-test")?.deferredSignalCursor, 5);
   } finally {
     store.close();
   }
@@ -201,13 +205,13 @@ test("context-store: LKG slots upsert and reload", () => {
   try {
     store.createLineage(makeLineageInput());
     store.captureLkgSlot({
-      runtimeSessionId: "iris-runtime-2026-08-01-1",
+      lineageId: "identity-test",
       slotKey: "prefix",
       lkgJson: '{"jsonPrefix":"[]"}',
       capturedAt: "2026-08-01T12:00:00.000Z",
     });
     store.captureLkgSlot({
-      runtimeSessionId: "iris-runtime-2026-08-01-1",
+      lineageId: "identity-test",
       slotKey: "prefix",
       lkgJson: '{"jsonPrefix":"[1]"}',
       capturedAt: "2026-08-01T12:00:01.000Z",
@@ -215,9 +219,9 @@ test("context-store: LKG slots upsert and reload", () => {
     store.close();
     const reopened = ContextStore.open(path);
     try {
-      const slot = reopened.getLkgSlot("iris-runtime-2026-08-01-1", "prefix");
+      const slot = reopened.getLkgSlot("identity-test", "prefix");
       assert.equal(slot?.lkgJson, '{"jsonPrefix":"[1]"}', "upsert overwrites");
-      assert.equal(reopened.getLkgSlot("iris-runtime-2026-08-01-1", "other"), undefined);
+      assert.equal(reopened.getLkgSlot("identity-test", "other"), undefined);
     } finally {
       reopened.close();
     }
@@ -267,7 +271,7 @@ test("context-store: emergency state persists and fails closed on read", () => {
     store.close();
     const reopened = ContextStore.open(path);
     try {
-      const lineage = reopened.getLineage("iris-runtime-2026-08-01-1");
+      const lineage = reopened.getLineage("identity-test");
       assert.equal(lineage?.emergencyState, "emergency_fail_closed");
       assert.equal(lineage?.lastTransformError, "transform exploded");
     } finally {
@@ -278,14 +282,14 @@ test("context-store: emergency state persists and fails closed on read", () => {
   }
 });
 
-test("context-store: separate runtime sessions keep fully isolated lineages (rollover)", () => {
+test("context-store: rollover binds the SAME lineage to the new session and preserves state", () => {
   const { store } = makeStore();
   try {
     const sessionA = "iris-runtime-2026-08-01-1";
     const sessionB = "iris-runtime-2026-08-02-1";
-    store.createLineage(makeLineageInput(sessionA));
-    store.createLineage(makeLineageInput(sessionB));
-    store.materializeM0({
+    // v13: one identity/data root → one lineage → many Runtime Sessions.
+    store.createLineage(makeLineageInput(sessionA, "identity-main"));
+    store.materializeM0ByContextSeq({
       runtimeSessionId: sessionA,
       m0Body: "A-m0",
       m1Body: "A-m1",
@@ -294,16 +298,41 @@ test("context-store: separate runtime sessions keep fully isolated lineages (rol
       cachedM0SystemHash: "sys-A",
       cachedM0ModelKey: "model-A",
       cachedM0ProviderProfileId: "mock",
-      representedThroughEntrySeq: 10,
-      protectedTailStartEntrySeq: 5,
-      lastSafeUserAnchorEntrySeq: 3,
+      representedThroughContextSeq: 7,
       atMs: 1_000,
     });
-    // B's lineage must NOT inherit A's m0/LKG/mutations (fresh lineage).
-    const b = store.getLineage(sessionB);
-    assert.equal(b?.m0Body, null, "rollover must NOT inherit old m0");
-    assert.equal(b?.representedThroughEntrySeq, 0);
-    assert.equal(store.getLkgSlot(sessionB, "prefix"), undefined);
+    // Rollover: bind the same lineage to the new session — state must survive.
+    store.bindCurrentSession("identity-main", sessionB);
+    const lineage = store.getLineageByLineageId("identity-main");
+    assert.equal(lineage?.currentRuntimeSessionId, sessionB);
+    assert.equal(lineage?.m0Body, "A-m0", "rollover must preserve m0");
+    assert.equal(lineage?.representedThroughContextSeq, 7, "rollover must preserve watermark");
+    // New session resolves to the same lineage (identity-level), not a fresh one.
+    assert.equal(store.getLineage(sessionB)?.lineageId, "identity-main");
+  } finally {
+    store.close();
+  }
+});
+
+test("context-store: a different identity/data root gets a separate lineage", () => {
+  const { store } = makeStore();
+  try {
+    store.createLineage(makeLineageInput("iris-runtime-2026-08-01-1", "identity-main"));
+    store.createLineage(makeLineageInput("iris-runtime-2026-08-01-1", "identity-other"));
+    store.materializeM0ByContextSeq({
+      runtimeSessionId: "iris-runtime-2026-08-01-1",
+      m0Body: "main-m0",
+      m1Body: "main-m1",
+      m0ContentHash: "m0",
+      m1ContentHash: "m1",
+      cachedM0SystemHash: "s",
+      cachedM0ModelKey: "k",
+      cachedM0ProviderProfileId: "mock",
+      representedThroughContextSeq: 3,
+      atMs: 1_000,
+    });
+    const other = store.getLineageByLineageId("identity-other");
+    assert.equal(other?.m0Body, null, "other identity must NOT inherit m0");
   } finally {
     store.close();
   }
@@ -325,6 +354,7 @@ test("context-store: SIGKILL crash leaves a reopenable, consistent DB", async ()
     import { ContextStore } from ${JSON.stringify(storeModuleUrl)};
     const store = ContextStore.open(process.argv[2]);
     store.createLineage({
+      lineageId: "identity-test",
       runtimeSessionId: "iris-runtime-2026-08-01-1",
       contextSourceSnapshotId: "src-1",
       epochId: "e1",
@@ -385,7 +415,7 @@ test("context-store: SIGKILL crash leaves a reopenable, consistent DB", async ()
     // partial), and the ledger is readable.
     const reopened = ContextStore.open(path);
     try {
-      const lineage = reopened.getLineage("iris-runtime-2026-08-01-1");
+      const lineage = reopened.getLineage("identity-test");
       assert.ok(lineage, "lineage must be readable after SIGKILL");
       assert.ok(
         lineage.m0Body === null || lineage.m0Body === "m0-after-crash",

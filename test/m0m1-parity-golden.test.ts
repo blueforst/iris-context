@@ -145,7 +145,7 @@ function makeFixture(): Fixture {
   const ledger = RuntimeEventLedger.open(join(dir, "runtime-ledger.db"));
   const store = ContextStore.open(join(dir, "context.db"));
   store.createLineage(makeLineageInput());
-  const ingest = new ContextIngest(ledger, store);
+  const ingest = new ContextIngest(ledger, store, store.lineageId);
   const renderer = new ContextRenderer(store);
   return { dir, store, ledger, ingest, renderer };
 }

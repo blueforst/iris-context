@@ -152,7 +152,15 @@ export class ContextIngest implements ContextIngestPort {
   constructor(
     private readonly ledger: RuntimeEventIngestPort,
     private readonly units: ContextUnitStorePort,
+    /** R2 (iris_agent#9)：identity-level lineage id（one per data root）。 */
+    private readonly lineageId: string,
   ) {}
+
+  /** R2 (iris_agent#9)：该 lineage 的下一个 contextSeq（lineage 内全局单调，跨
+   * Runtime Session 连续——rollover 不重置）。 */
+  private nextContextSeq(runtimeSessionId: string): number {
+    return this.units.maxContextSeq(runtimeSessionId) + 1;
+  }
 
   ensureUnitsUpTo(
     runtimeSessionId: string,
@@ -178,12 +186,14 @@ export class ContextIngest implements ContextIngestPort {
       }
 
       if (message.role === "user") {
-        const seq = this.units.maxContextSeq(runtimeSessionId) + 1;
+        const seq = this.nextContextSeq(runtimeSessionId);
         this.units.insertUnit({
+          lineageId: this.lineageId,
           runtimeSessionId,
           contextSeq: seq,
           unitId: `input-${event.entryId ?? event.eventId}`,
           sourceEventId: event.eventId,
+          runtimeEventId: event.eventId,
           unitType: "input",
           disposition: "include",
           ...(event.entryId !== undefined ? { entryId: event.entryId } : {}),
@@ -198,6 +208,10 @@ export class ContextIngest implements ContextIngestPort {
           },
           paired: false,
           derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+          schemaVersion: "context-unit-v1",
+          ...(event.entryId !== undefined
+            ? { rawArchiveRef: `pi://session/${runtimeSessionId}/entry/${event.entryId}` }
+            : {}),
           createdAt: event.occurredAt,
         });
         continue;
@@ -248,12 +262,14 @@ export class ContextIngest implements ContextIngestPort {
       if (unitType === null) {
         continue; // 其他 role（如 reasoning/compaction 标签）不建单元
       }
-      const seq = this.units.maxContextSeq(runtimeSessionId) + 1;
+      const seq = this.nextContextSeq(runtimeSessionId);
       this.units.insertUnit({
+        lineageId: this.lineageId,
         runtimeSessionId,
         contextSeq: seq,
         unitId: `${unitType}-${event.entryId ?? event.eventId}`,
         sourceEventId: event.eventId,
+        runtimeEventId: event.eventId,
         unitType,
         disposition: "include",
         ...(event.entryId !== undefined ? { entryId: event.entryId } : {}),
@@ -262,6 +278,10 @@ export class ContextIngest implements ContextIngestPort {
         payload: message,
         paired: false,
         derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+        schemaVersion: "context-unit-v1",
+        ...(event.entryId !== undefined
+          ? { rawArchiveRef: `pi://session/${runtimeSessionId}/entry/${event.entryId}` }
+          : {}),
         createdAt: event.occurredAt,
       });
     }

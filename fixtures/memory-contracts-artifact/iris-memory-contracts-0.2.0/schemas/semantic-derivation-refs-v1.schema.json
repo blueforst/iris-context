@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:semantic-derivation-refs:v1",
+  "title": "SemanticDerivationRefsV1",
+  "description": "Derivation references that let the Memory service validate wire consistency and suppress echo without reconstructing Agent Context.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["memoryRefs", "compartmentIds", "sourceContextUnitIds"],
+  "properties": {
+    "memoryRefs": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "maxLength": 128},
+      "maxItems": 256
+    },
+    "compartmentIds": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "maxLength": 128},
+      "maxItems": 256
+    },
+    "workSnapshotVersion": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "sourceContextUnitIds": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "maxLength": 128},
+      "maxItems": 256
+    }
+  }
+}

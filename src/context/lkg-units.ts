@@ -170,7 +170,7 @@ export function captureUnitsLkg(store: ContextStore, input: UnitsLkgCaptureInput
     prefixMessages: input.prefixMessages,
   };
   store.captureLkgSlot({
-    runtimeSessionId: input.runtimeSessionId,
+    lineageId: input.runtimeSessionId,
     slotKey: LKG_UNITS_SLOT_KEY,
     lkgJson: JSON.stringify(payload),
     capturedAt: new Date(payload.capturedAt).toISOString(),

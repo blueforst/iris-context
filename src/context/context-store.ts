@@ -11,9 +11,10 @@ import type { ContextMessageUnit, UnitDispositionFilter } from "../contracts/con
 import type { ContextUnitStorePort } from "./context-ingest.js";
 
 interface UnitRow {
-  runtime_session_id: string;
+  context_lineage_id: string;
   context_seq: number;
   unit_id: string;
+  runtime_event_id: string | null;
   source_event_id: string;
   unit_type: string;
   disposition: string;
@@ -25,6 +26,8 @@ interface UnitRow {
   pair_key: string | null;
   paired: number;
   derivation_refs: string;
+  schema_version: string;
+  raw_archive_ref: string | null;
   created_at: string;
 }
 
@@ -34,7 +37,7 @@ interface UnitRow {
  * if the on-disk schema_migrations.max(version) is NEWER than this constant
  * (a newer binary wrote state this binary cannot read).
  */
-export const LATEST_MIGRATION_VERSION = "0003_represented_through";
+export const LATEST_MIGRATION_VERSION = "0004_identity_lineage";
 
 /**
  * R2-P3：每 session 的 context_units 软 cap（语义 ledger 有界化的第一级）。
@@ -74,10 +77,21 @@ export class ContextBoundsExceededError extends Error {
 export interface ContextStoreOpenOptions {
   /** 每 session 软 cap（超限单元标记 disposition="exclude"）。缺省 = MAX_UNITS_PER_SESSION。 */
   maxUnitsPerSession?: number;
+  /**
+   * R2 (iris_agent#9)：identity-level lineage id。一个 Iris identity/data
+   * root 恰好一条 durable Context lineage（one lineage → many bounded
+   * Runtime Sessions）。调用方（vertical-slice/host）从 data root 派生稳定
+   * id（如 sha256(dataRoot) 前缀）。缺省时用 "identity-default"（单根
+   * 开发环境语义）。legacy session-scoped 行已被 0004 quarantine，永不读取。
+   */
+  lineageId?: string;
 }
 
 export interface ContextLineage {
-  runtimeSessionId: string;
+  /** R2 (iris_agent#9)：identity-level lineage id（one per data root）。 */
+  lineageId: string;
+  /** 当前绑定的 Pi Runtime Session（rollover 时更新，lineage 不换）。 */
+  currentRuntimeSessionId: string;
   contextSourceSnapshotId: string;
   epochId: string;
   personaSnapshotId: string;
@@ -102,6 +116,7 @@ export interface ContextLineage {
   cachedM0ModelKey: string | null;
   cachedM0ProviderProfileId: string | null;
   lastResponseTime: number | null;
+  /** v12 legacy narrow mapping（entrySeq 空间）；v13 权威是 contextSeq。 */
   representedThroughEntrySeq: number;
   /** R2-P1：Provider Renderer 的 context_seq 空间 watermark（ContextMessageUnit
    * 序号，非 Session entrySeq）。m0 物化前缀覆盖到该 seq；其后的单元是 live
@@ -120,6 +135,11 @@ export interface ContextLineage {
 }
 
 export interface CreateLineageInput {
+  /** R2 (iris_agent#9)：identity-level lineage id（one per data root）。
+   * 缺省 = runtimeSessionId（兼容旧调用方/测试；生产由调用方从 data root
+   * 派生稳定 id）。 */
+  lineageId?: string;
+  /** 创建时绑定的首个 Pi Runtime Session。 */
   runtimeSessionId: string;
   contextSourceSnapshotId: string;
   epochId: string;
@@ -186,7 +206,8 @@ export interface MaterializeM1ByContextSeqInput {
 }
 
 interface LineageRow {
-  runtime_session_id: string;
+  context_lineage_id: string;
+  current_runtime_session_id: string;
   context_source_snapshot_id: string;
   epoch_id: string;
   persona_snapshot_id: string;
@@ -227,7 +248,8 @@ interface LineageRow {
 
 function rowToLineage(row: LineageRow): ContextLineage {
   const base: ContextLineage = {
-    runtimeSessionId: row.runtime_session_id,
+    lineageId: row.context_lineage_id,
+    currentRuntimeSessionId: row.current_runtime_session_id,
     contextSourceSnapshotId: row.context_source_snapshot_id,
     epochId: row.epoch_id,
     personaSnapshotId: row.persona_snapshot_id,
@@ -267,14 +289,15 @@ function rowToLineage(row: LineageRow): ContextLineage {
 
 export interface DeferredOperation {
   seq: number;
-  runtimeSessionId: string;
+  lineageId: string;
   opKind: string;
   opPayload: string;
   enqueuedAt: string;
 }
 
 export interface LkgSlot {
-  runtimeSessionId: string;
+  /** R2 (iris_agent#9)：identity-level lineage id。 */
+  lineageId: string;
   slotKey: string;
   lkgJson: string;
   capturedAt: string;
@@ -299,10 +322,13 @@ export class ContextStore implements ContextUnitStorePort {
   private readonly maxUnitsPerSession: number;
   /** R2-P3：每 session 硬 cap（超限 → 抛 ContextBoundsExceededError，fail-closed）。 */
   private readonly hardUnitsCap: number;
+  /** R2 (iris_agent#9)：identity-level lineage id（one per data root）。 */
+  readonly lineageId: string;
   private closed = false;
 
   private constructor(db: DatabaseSync, options: ContextStoreOpenOptions) {
     this.db = db;
+    this.lineageId = options.lineageId ?? "identity-default";
     this.maxUnitsPerSession = options.maxUnitsPerSession ?? MAX_UNITS_PER_SESSION;
     this.hardUnitsCap = 2 * this.maxUnitsPerSession;
   }
@@ -400,15 +426,17 @@ export class ContextStore implements ContextUnitStorePort {
     this.db
       .prepare(
         `INSERT INTO context_units (
-           runtime_session_id, context_seq, unit_id, source_event_id, unit_type,
-           disposition, entry_id, entry_seq, content_hash, payload,
-           companion_entry_id, pair_key, paired, derivation_refs, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           context_lineage_id, context_seq, unit_id, runtime_event_id, source_event_id,
+           unit_type, disposition, entry_id, entry_seq, content_hash, payload,
+           companion_entry_id, pair_key, paired, derivation_refs, schema_version,
+           raw_archive_ref, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-        unit.runtimeSessionId,
+        this.resolveLineageId(unit.runtimeSessionId),
         unit.contextSeq,
         unit.unitId,
+        unit.runtimeEventId ?? null,
         unit.sourceEventId,
         unit.unitType,
         disposition,
@@ -420,6 +448,8 @@ export class ContextStore implements ContextUnitStorePort {
         unit.pairKey ?? null,
         unit.paired ? 1 : 0,
         JSON.stringify(unit.derivationRefs),
+        unit.schemaVersion,
+        unit.rawArchiveRef ?? null,
         unit.createdAt,
       );
   }
@@ -433,14 +463,14 @@ export class ContextStore implements ContextUnitStorePort {
       .prepare(
         `UPDATE context_units SET
            companion_entry_id = ?, pair_key = ?, paired = ?, payload = ?
-         WHERE runtime_session_id = ? AND context_seq = ?`,
+         WHERE context_lineage_id = ? AND context_seq = ?`,
       )
       .run(
         update.companionEntryId,
         update.pairKey,
         update.paired ? 1 : 0,
         JSON.stringify(update.payload),
-        runtimeSessionId,
+        this.resolveLineageId(runtimeSessionId),
         contextSeq,
       );
     if (result.changes !== 1) {
@@ -465,8 +495,8 @@ export class ContextStore implements ContextUnitStorePort {
     // 候选）时显式传 disposition: "all"。
     const disposition = options.disposition ?? "include";
     const afterContextSeq = options.afterContextSeq;
-    let sql = "SELECT * FROM context_units WHERE runtime_session_id = ?";
-    const params: Array<string | number> = [runtimeSessionId];
+    let sql = "SELECT * FROM context_units WHERE context_lineage_id = ?";
+    const params: Array<string | number> = [this.resolveLineageId(runtimeSessionId)];
     if (disposition !== "all") {
       sql += " AND disposition = ?";
       params.push(disposition);
@@ -481,11 +511,46 @@ export class ContextStore implements ContextUnitStorePort {
     return rows.slice(0, limit).map((row) => this.rowToUnit(row));
   }
 
+  /**
+   * R3 (anti-echo)：按 lineage 内 entrySeq 闭区间 [fromEntrySeq, toEntrySeq]
+   * 读取单元（窄归档映射;entry_seq IS NULL 的单元不参与）。供 Historian
+   * 把 Session-scoped safe prefix 映射到 Context 单元视图。
+   */
+  listUnitsByEntrySeqRange(
+    lineageId: string,
+    fromEntrySeq: number,
+    toEntrySeq: number,
+  ): ContextMessageUnit[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM context_units WHERE context_lineage_id = ? AND entry_seq BETWEEN ? AND ? ORDER BY context_seq",
+      )
+      .all(lineageId, fromEntrySeq, toEntrySeq) as unknown as UnitRow[];
+    return rows.map((row) => this.rowToUnit(row));
+  }
+  /**
+   * R3 (anti-echo)：按 lineage 内闭区间 [fromContextSeq, toContextSeq] 读取
+   * 全部单元（含 reference_only / exclude —— Historian 需要完整分类视图）。
+   * 供 ContextHistoryReadPort.listUnitsForHistorian 消费（values-only）。
+   */
+  listUnitsByLineageRange(
+    lineageId: string,
+    fromContextSeq: number,
+    toContextSeq: number,
+  ): ContextMessageUnit[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM context_units WHERE context_lineage_id = ? AND context_seq BETWEEN ? AND ? ORDER BY context_seq",
+      )
+      .all(lineageId, fromContextSeq, toContextSeq) as unknown as UnitRow[];
+    return rows.map((row) => this.rowToUnit(row));
+  }
+
   /** R2-P3：该 session 的 context_units 行数（软/硬 cap 判定基准，含 excluded）。 */
   private countUnits(runtimeSessionId: string): number {
     const row = this.db
-      .prepare("SELECT COUNT(*) AS count FROM context_units WHERE runtime_session_id = ?")
-      .get(runtimeSessionId) as { count: number };
+      .prepare("SELECT COUNT(*) AS count FROM context_units WHERE context_lineage_id = ?")
+      .get(this.resolveLineageId(runtimeSessionId)) as { count: number };
     return row.count;
   }
 
@@ -493,9 +558,9 @@ export class ContextStore implements ContextUnitStorePort {
     const row = this.db
       .prepare(
         `SELECT MAX(context_seq) AS seq FROM context_units
-         WHERE runtime_session_id = ? AND unit_type = 'input' AND paired = 0`,
+         WHERE context_lineage_id = ? AND unit_type = 'input' AND paired = 0`,
       )
-      .get(runtimeSessionId) as { seq: number | null } | undefined;
+      .get(this.resolveLineageId(runtimeSessionId)) as { seq: number | null } | undefined;
     const seq = row?.seq;
     return seq ?? undefined;
   }
@@ -510,9 +575,9 @@ export class ContextStore implements ContextUnitStorePort {
   maxContextSeq(runtimeSessionId: string): number {
     const row = this.db
       .prepare(
-        "SELECT COALESCE(MAX(context_seq), 0) AS seq FROM context_units WHERE runtime_session_id = ?",
+        "SELECT COALESCE(MAX(context_seq), 0) AS seq FROM context_units WHERE context_lineage_id = ?",
       )
-      .get(runtimeSessionId) as { seq: number };
+      .get(this.resolveLineageId(runtimeSessionId)) as { seq: number };
     return row.seq;
   }
 
@@ -532,18 +597,21 @@ export class ContextStore implements ContextUnitStorePort {
     const row = this.db
       .prepare(
         `SELECT MAX(entry_seq) AS seq FROM context_units
-         WHERE runtime_session_id = ? AND context_seq <= ? AND entry_seq IS NOT NULL`,
+         WHERE context_lineage_id = ? AND context_seq <= ? AND entry_seq IS NOT NULL`,
       )
-      .get(runtimeSessionId, watermark) as { seq: number | null } | undefined;
+      .get(this.resolveLineageId(runtimeSessionId), watermark) as
+      { seq: number | null } | undefined;
     return row?.seq ?? null;
   }
 
   private rowToUnit(row: UnitRow): ContextMessageUnit {
     return {
-      runtimeSessionId: row.runtime_session_id,
+      lineageId: row.context_lineage_id,
+      runtimeSessionId: row.context_lineage_id,
       contextSeq: row.context_seq,
       unitId: row.unit_id,
       sourceEventId: row.source_event_id,
+      ...(row.runtime_event_id !== null ? { runtimeEventId: row.runtime_event_id } : {}),
       unitType: row.unit_type as ContextMessageUnit["unitType"],
       disposition: row.disposition as ContextMessageUnit["disposition"],
       ...(row.entry_id !== null ? { entryId: row.entry_id } : {}),
@@ -554,6 +622,8 @@ export class ContextStore implements ContextUnitStorePort {
       ...(row.pair_key !== null ? { pairKey: row.pair_key } : {}),
       paired: row.paired === 1,
       derivationRefs: JSON.parse(row.derivation_refs) as ContextMessageUnit["derivationRefs"],
+      schemaVersion: row.schema_version,
+      ...(row.raw_archive_ref !== null ? { rawArchiveRef: row.raw_archive_ref } : {}),
       createdAt: row.created_at,
     };
   }
@@ -565,8 +635,10 @@ export class ContextStore implements ContextUnitStorePort {
 
   createLineage(input: CreateLineageInput): ContextLineage {
     const now = new Date().toISOString();
+    const lineageId = input.lineageId ?? input.runtimeSessionId;
     const row: LineageRow = {
-      runtime_session_id: input.runtimeSessionId,
+      context_lineage_id: lineageId,
+      current_runtime_session_id: input.runtimeSessionId,
       context_source_snapshot_id: input.contextSourceSnapshotId,
       epoch_id: input.epochId,
       persona_snapshot_id: input.personaSnapshotId,
@@ -607,8 +679,8 @@ export class ContextStore implements ContextUnitStorePort {
     this.db
       .prepare(
         `INSERT INTO context_lineages (
-          runtime_session_id, context_source_snapshot_id, epoch_id, persona_snapshot_id,
-          declaration_version, continuity_seed_id, runtime_recovery_notice_id,
+          context_lineage_id, current_runtime_session_id, context_source_snapshot_id, epoch_id,
+          persona_snapshot_id, declaration_version, continuity_seed_id, runtime_recovery_notice_id,
           stable_memory_pool_version, provider_profile_id, canonical_system_prompt,
           system_projection_hash, prepared_at, materialization_id,
           context_serializer_version, carrier_schema_version,
@@ -621,10 +693,11 @@ export class ContextStore implements ContextUnitStorePort {
           cleared_reasoning_through_tag, tool_reclaim_watermark,
           mutation_replay_watermark, deferred_signal_cursor,
           emergency_state, last_transform_error, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-        row.runtime_session_id,
+        row.context_lineage_id,
+        row.current_runtime_session_id,
         row.context_source_snapshot_id,
         row.epoch_id,
         row.persona_snapshot_id,
@@ -665,11 +738,72 @@ export class ContextStore implements ContextUnitStorePort {
     return rowToLineage(row);
   }
 
-  getLineage(runtimeSessionId: string): ContextLineage | undefined {
+  /**
+   * R2 (iris_agent#9)：按 identity-level lineage id 查询（one per data root）。
+   * rollover 只更新 current_runtime_session_id，不创建新 lineage。
+   */
+  getLineageByLineageId(lineageId: string): ContextLineage | undefined {
     const row = this.db
-      .prepare("SELECT * FROM context_lineages WHERE runtime_session_id = ?")
-      .get(runtimeSessionId) as LineageRow | undefined;
+      .prepare("SELECT * FROM context_lineages WHERE context_lineage_id = ?")
+      .get(lineageId) as LineageRow | undefined;
     return row === undefined ? undefined : rowToLineage(row);
+  }
+
+  /**
+   * R2 (iris_agent#9)：把 lineage 绑定到新的 Pi Runtime Session（rollover
+   * 路径）。仅更新 current_runtime_session_id；lineage 的 m0/m1/watermark/
+   * replay 状态全部保留。绑定不存在的 lineage → throw（fail-closed）。
+   */
+  bindCurrentSession(lineageId: string, runtimeSessionId: string): void {
+    const result = this.db
+      .prepare(
+        "UPDATE context_lineages SET current_runtime_session_id = ?, updated_at = ? WHERE context_lineage_id = ?",
+      )
+      .run(runtimeSessionId, new Date().toISOString(), lineageId);
+    if (result.changes !== 1) {
+      throw new Error(`context bindCurrentSession failed: no lineage ${lineageId}`);
+    }
+  }
+
+  getLineage(runtimeSessionId: string): ContextLineage | undefined {
+    // R2: lineage 是 identity-level；查询按 lineageId。兼容旧调用方（按
+    // session 查询）：先精确匹配 lineage_id（测试/显式 id），再按当前绑定
+    // session 反查。rollover 后旧 session 不再 current，正常路径只查当前。
+    const row = this.db
+      .prepare(
+        "SELECT * FROM context_lineages WHERE context_lineage_id = ? OR current_runtime_session_id = ? LIMIT 1",
+      )
+      .get(runtimeSessionId, runtimeSessionId) as LineageRow | undefined;
+    return row === undefined ? undefined : rowToLineage(row);
+  }
+
+  /**
+   * R2 (iris_agent#9)：把调用方的 runtimeSessionId（attribution）解析为
+   * identity-level lineage id。解析优先级：
+   *   1) context_lineages.context_lineage_id 精确匹配（显式 id / 测试）；
+   *   2) context_lineages.current_runtime_session_id 反查（生产路径）；
+   *   3) 构造时绑定的 this.lineageId（单根开发环境）。
+   * 任何一层命中即返回；都不命中返回构造默认（fail-open 到单根语义，
+   * 调用方随后按该 id 写 units —— 与 0004 迁移后的 identity 语义一致）。
+   */
+  private resolveLineageId(runtimeSessionId: string): string {
+    const byId = this.db
+      .prepare(
+        "SELECT context_lineage_id AS id FROM context_lineages WHERE context_lineage_id = ? LIMIT 1",
+      )
+      .get(runtimeSessionId) as { id: string } | undefined;
+    if (byId !== undefined) {
+      return byId.id;
+    }
+    const bySession = this.db
+      .prepare(
+        "SELECT context_lineage_id AS id FROM context_lineages WHERE current_runtime_session_id = ? LIMIT 1",
+      )
+      .get(runtimeSessionId) as { id: string } | undefined;
+    if (bySession !== undefined) {
+      return bySession.id;
+    }
+    return this.lineageId;
   }
 
   /**
@@ -689,7 +823,7 @@ export class ContextStore implements ContextUnitStorePort {
            protected_tail_start_entry_seq = ?,
            last_safe_user_anchor_entry_seq = ?,
            updated_at = ?
-         WHERE runtime_session_id = ?`,
+         WHERE context_lineage_id = ?`,
       )
       .run(
         input.m0Body,
@@ -705,7 +839,7 @@ export class ContextStore implements ContextUnitStorePort {
         input.protectedTailStartEntrySeq,
         input.lastSafeUserAnchorEntrySeq,
         now,
-        input.runtimeSessionId,
+        this.resolveLineageId(input.runtimeSessionId),
       );
     if (result.changes !== 1) {
       throw new Error(
@@ -723,7 +857,7 @@ export class ContextStore implements ContextUnitStorePort {
            m1_body = ?, m1_content_hash = ?, m1_updated_at = ?,
            represented_through_entry_seq = ?,
            updated_at = ?
-         WHERE runtime_session_id = ?`,
+         WHERE context_lineage_id = ?`,
       )
       .run(
         input.m1Body,
@@ -731,7 +865,7 @@ export class ContextStore implements ContextUnitStorePort {
         input.atMs,
         input.representedThroughEntrySeq,
         now,
-        input.runtimeSessionId,
+        this.resolveLineageId(input.runtimeSessionId),
       );
     if (result.changes !== 1) {
       throw new Error(
@@ -758,7 +892,7 @@ export class ContextStore implements ContextUnitStorePort {
            cached_m0_provider_profile_id = ?,
            represented_through_context_seq = ?,
            updated_at = ?
-         WHERE runtime_session_id = ?`,
+         WHERE context_lineage_id = ?`,
       )
       .run(
         input.m0Body,
@@ -772,7 +906,7 @@ export class ContextStore implements ContextUnitStorePort {
         input.cachedM0ProviderProfileId,
         input.representedThroughContextSeq,
         now,
-        input.runtimeSessionId,
+        this.resolveLineageId(input.runtimeSessionId),
       );
     if (result.changes !== 1) {
       throw new Error(
@@ -793,9 +927,15 @@ export class ContextStore implements ContextUnitStorePort {
         `UPDATE context_lineages SET
            m1_body = ?, m1_content_hash = ?, m1_updated_at = ?,
            updated_at = ?
-         WHERE runtime_session_id = ?`,
+         WHERE context_lineage_id = ?`,
       )
-      .run(input.m1Body, input.m1ContentHash, input.atMs, now, input.runtimeSessionId);
+      .run(
+        input.m1Body,
+        input.m1ContentHash,
+        input.atMs,
+        now,
+        this.resolveLineageId(input.runtimeSessionId),
+      );
     if (result.changes !== 1) {
       throw new Error(
         `context materializeM1ByContextSeq failed: no lineage for ${input.runtimeSessionId} (fail closed)`,
@@ -813,9 +953,9 @@ export class ContextStore implements ContextUnitStorePort {
       .prepare(
         `UPDATE context_lineages SET
            represented_through_context_seq = ?, updated_at = ?
-         WHERE runtime_session_id = ?`,
+         WHERE context_lineage_id = ?`,
       )
-      .run(representedThroughContextSeq, now, runtimeSessionId);
+      .run(representedThroughContextSeq, now, this.resolveLineageId(runtimeSessionId));
     if (result.changes !== 1) {
       throw new Error(
         `context updateRepresentedThrough failed: no lineage for ${runtimeSessionId}`,
@@ -832,9 +972,9 @@ export class ContextStore implements ContextUnitStorePort {
     const result = this.db
       .prepare(
         `UPDATE context_lineages SET emergency_state = ?, last_transform_error = ?, updated_at = ?
-         WHERE runtime_session_id = ?`,
+         WHERE context_lineage_id = ?`,
       )
-      .run(state, error, now, runtimeSessionId);
+      .run(state, error, now, this.resolveLineageId(runtimeSessionId));
     if (result.changes !== 1) {
       throw new Error(`context setEmergencyState failed: no lineage for ${runtimeSessionId}`);
     }
@@ -859,14 +999,14 @@ export class ContextStore implements ContextUnitStorePort {
         `UPDATE context_lineages SET
            cleared_reasoning_through_tag = ?, tool_reclaim_watermark = ?,
            mutation_replay_watermark = ?, updated_at = ?
-         WHERE runtime_session_id = ?`,
+         WHERE context_lineage_id = ?`,
       )
       .run(
         watermarks.clearedReasoningThroughTag,
         watermarks.toolReclaimWatermark,
         watermarks.mutationReplayWatermark,
         now,
-        runtimeSessionId,
+        this.resolveLineageId(runtimeSessionId),
       );
     if (result.changes !== 1) {
       throw new Error(`context persistWatermarks failed: no lineage for ${runtimeSessionId}`);
@@ -887,13 +1027,13 @@ export class ContextStore implements ContextUnitStorePort {
     const result = this.db
       .prepare(
         `INSERT INTO context_deferred_operations
-           (runtime_session_id, op_kind, op_payload, enqueued_at, consumed_after_cursor)
+           (context_lineage_id, op_kind, op_payload, enqueued_at, consumed_after_cursor)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(runtimeSessionId, opKind, opPayload, now, cursor);
+      .run(this.resolveLineageId(runtimeSessionId), opKind, opPayload, now, cursor);
     return {
       seq: Number(result.lastInsertRowid),
-      runtimeSessionId,
+      lineageId: this.resolveLineageId(runtimeSessionId),
       opKind,
       opPayload,
       enqueuedAt: now,
@@ -903,18 +1043,18 @@ export class ContextStore implements ContextUnitStorePort {
   listDeferredOperations(runtimeSessionId: string): DeferredOperation[] {
     const rows = this.db
       .prepare(
-        "SELECT seq, runtime_session_id, op_kind, op_payload, enqueued_at FROM context_deferred_operations WHERE runtime_session_id = ? ORDER BY seq",
+        "SELECT seq, context_lineage_id, op_kind, op_payload, enqueued_at FROM context_deferred_operations WHERE context_lineage_id = ? ORDER BY seq",
       )
-      .all(runtimeSessionId) as unknown as Array<{
+      .all(this.resolveLineageId(runtimeSessionId)) as unknown as Array<{
       seq: number;
-      runtime_session_id: string;
+      context_lineage_id: string;
       op_kind: string;
       op_payload: string;
       enqueued_at: string;
     }>;
     return rows.map((row) => ({
       seq: row.seq,
-      runtimeSessionId: row.runtime_session_id,
+      lineageId: row.context_lineage_id,
       opKind: row.op_kind,
       opPayload: row.op_payload,
       enqueuedAt: row.enqueued_at,
@@ -925,38 +1065,40 @@ export class ContextStore implements ContextUnitStorePort {
     const now = new Date().toISOString();
     this.db
       .prepare(
-        "UPDATE context_lineages SET deferred_signal_cursor = ?, updated_at = ? WHERE runtime_session_id = ?",
+        "UPDATE context_lineages SET deferred_signal_cursor = ?, updated_at = ? WHERE context_lineage_id = ?",
       )
-      .run(cursor, now, runtimeSessionId);
+      .run(cursor, now, this.resolveLineageId(runtimeSessionId));
   }
 
   captureLkgSlot(slot: LkgSlot): void {
     const result = this.db
       .prepare(
-        `INSERT INTO context_lkg_slots (runtime_session_id, slot_key, lkg_json, captured_at)
+        `INSERT INTO context_lkg_slots (context_lineage_id, slot_key, lkg_json, captured_at)
          VALUES (?, ?, ?, ?)
-         ON CONFLICT (runtime_session_id, slot_key) DO UPDATE SET
+         ON CONFLICT (context_lineage_id, slot_key) DO UPDATE SET
            lkg_json = excluded.lkg_json, captured_at = excluded.captured_at`,
       )
-      .run(slot.runtimeSessionId, slot.slotKey, slot.lkgJson, slot.capturedAt);
+      .run(slot.lineageId, slot.slotKey, slot.lkgJson, slot.capturedAt);
     if (result.changes === 0) {
-      throw new Error(`context captureLkgSlot failed for ${slot.runtimeSessionId}/${slot.slotKey}`);
+      throw new Error(`context captureLkgSlot failed for ${slot.lineageId}/${slot.slotKey}`);
     }
   }
 
   getLkgSlot(runtimeSessionId: string, slotKey: string): LkgSlot | undefined {
+    // LKG 是 lineage 级状态：参数是 lineageId（identity-level），直接精确
+    // 匹配，不走 resolveLineageId（避免对不存在 lineage 回退默认键）。
     const row = this.db
       .prepare(
-        "SELECT runtime_session_id, slot_key, lkg_json, captured_at FROM context_lkg_slots WHERE runtime_session_id = ? AND slot_key = ?",
+        "SELECT context_lineage_id, slot_key, lkg_json, captured_at FROM context_lkg_slots WHERE context_lineage_id = ? AND slot_key = ?",
       )
       .get(runtimeSessionId, slotKey) as
-      | { runtime_session_id: string; slot_key: string; lkg_json: string; captured_at: string }
+      | { context_lineage_id: string; slot_key: string; lkg_json: string; captured_at: string }
       | undefined;
     if (row === undefined) {
       return undefined;
     }
     return {
-      runtimeSessionId: row.runtime_session_id,
+      lineageId: row.context_lineage_id,
       slotKey: row.slot_key,
       lkgJson: row.lkg_json,
       capturedAt: row.captured_at,

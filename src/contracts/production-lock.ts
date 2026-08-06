@@ -17,8 +17,12 @@ export interface ProductionLock {
     fork: {
       repository: string;
       baselineCommit: string;
-      upstreamBaseCommit: string;
       seamCommit: string;
+      seamTree: string;
+      acceptedRuntimeRepository: string;
+      acceptedRuntimeCommit: string;
+      acceptedRuntimeTree: string;
+      upstreamBaseCommit: string;
       upstreamAuditBaselineCommit: string;
       adoptionStatus: string;
     };

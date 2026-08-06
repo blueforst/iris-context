@@ -1,0 +1,5 @@
+{
+  "schemaVersion": "expansion-request-v1",
+  "memoryRef": "mem_fixture_001",
+  "maxTokens": 0
+}

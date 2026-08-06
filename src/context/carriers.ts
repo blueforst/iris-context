@@ -155,7 +155,7 @@ export function buildCarriersFromLineage(lineage: ContextLineage): BuiltCarrier 
     return undefined;
   }
   return buildCarriers({
-    runtimeSessionId: lineage.runtimeSessionId,
+    runtimeSessionId: lineage.currentRuntimeSessionId,
     materializationId: lineage.materializationId,
     providerProfileId: lineage.cachedM0ProviderProfileId ?? lineage.providerProfileId,
     m0Body: lineage.m0Body,

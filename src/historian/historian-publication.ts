@@ -11,11 +11,14 @@
 import { createHash } from "node:crypto";
 
 import type { HistorianBoundarySnapshot, SequencedSessionEntry } from "../contracts/historian.js";
+import type { ContextHistoryReadPort } from "../context/history-read-port.js";
 import type { HistorianStore } from "./historian-store.js";
 import type { RunnerCommitHook } from "./historian-runner.js";
 import type { HistorianAnalysisView } from "./historian-analysis.js";
 import type { ValidationOutcome } from "./historian-analysis.js";
 import { buildCompartment } from "./historian-compartment.js";
+import type { HistorianUnitView } from "./anti-echo.js";
+import type { BuiltCompartment } from "./historian-compartment.js";
 import {
   deriveMemoryAssessments,
   type InvocationMemoryRecallProjection,
@@ -48,6 +51,27 @@ import {
  * runner's BEGIN..COMMIT, so a throw rolls the whole transaction back.
  */
 
+/** 确定性 RFC-4122 UUID(sha1(namespace || name),version 5 + variant 10)。
+ * 满足 0.2.0 schema 的 format: uuid,且跨重启稳定(publication 幂等键)。 */
+export function deterministicUuid(name: string): string {
+  const NAMESPACE = "6ba7b811-9dad-11d1-80b4-00c04fd430c8"; // DNS namespace
+  const nsBytes = [...Buffer.from(NAMESPACE.replaceAll("-", ""), "hex")];
+  const nameBytes = [...Buffer.from(name, "utf8")];
+  const digest = createHash("sha1")
+    .update(Buffer.from([...nsBytes, ...nameBytes]))
+    .digest();
+  const bytes = Array.from(digest.subarray(0, 16));
+  const b6 = bytes[6];
+  const b8 = bytes[8];
+  if (b6 === undefined || b8 === undefined) {
+    throw new Error("deterministicUuid: digest too short");
+  }
+  bytes[6] = (b6 & 0x0f) | 0x50; // version 5
+  bytes[8] = (b8 & 0x3f) | 0x80; // variant 10
+  const hex = bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
 export type OutboxState = "pending" | "delivering" | "retry_wait" | "delivered" | "quarantined";
 
 export interface PublicationRecord {
@@ -75,6 +99,8 @@ export interface OutboxRow {
   publicationId: string;
   runtimeSessionId: string;
   payloadHash: string;
+  /** R4:完整 historian-publication-v2 envelope(投递到 iris_memory)。 */
+  payloadJson: string | null;
   state: OutboxState;
   attemptCount: number;
   lastErrorCode: string | null;
@@ -85,6 +111,13 @@ export interface OutboxRow {
 
 export interface PublicationServiceOptions {
   store: HistorianStore;
+  /**
+   * R3 (anti-echo)：Context lineage 窄读取端口。提供时,commitSafePrefix
+   * 会把 Session-safe-prefix 的 entrySeq 范围映射到 Context 单元视图并
+   * 传入 buildCompartment → EvidenceSet 携带 evidenceBasis/derivedOnly。
+   * 缺省 = 旧行为(无 anti-echo 分类,向后兼容)。
+   */
+  historyPort?: ContextHistoryReadPort;
   nowMs?: () => number;
   /** Router claim lease TTL (ms). Default 60s. */
   claimLeaseMs?: number;
@@ -111,12 +144,14 @@ export class PublicationService {
   private readonly nowMs: () => number;
   private readonly claimLeaseMs: number;
   private readonly recallProjections: InvocationMemoryRecallProjection[];
+  private readonly historyPort: ContextHistoryReadPort | undefined;
 
   constructor(options: PublicationServiceOptions) {
     this.store = options.store;
     this.nowMs = options.nowMs ?? (() => Date.now());
     this.claimLeaseMs = options.claimLeaseMs ?? 60_000;
     this.recallProjections = options.recallProjections ?? [];
+    this.historyPort = options.historyPort;
   }
 
   /**
@@ -140,6 +175,23 @@ export class PublicationService {
 
     // Build the immutable compartment from the VERIFIED safe prefix.
     const nextSequence = this.store.maxCompartmentSequence(runtimeSessionId) + 1;
+
+    // R3 (anti-echo):把 Session-safe-prefix 的 entrySeq 范围映射到 Context
+    // 单元窄视图,使 EvidenceSet 携带 evidenceBasis/derivedOnly(derived-only
+    // 内容不产生新 Evidence)。historyPort 未接线 → unitViews 缺省,保持旧
+    // 行为(向后兼容)。
+    let unitViews: HistorianUnitView[] | undefined;
+    if (this.historyPort !== undefined && safePrefix.length > 0) {
+      const first = safePrefix[0];
+      const last = safePrefix[safePrefix.length - 1];
+      if (first !== undefined && last !== undefined) {
+        unitViews = this.historyPort.listUnitsForHistorianByEntrySeq(
+          runtimeSessionId,
+          first.entrySeq,
+          last.entrySeq,
+        );
+      }
+    }
     const built = buildCompartment({
       runtimeSessionId,
       compartmentSequence: nextSequence,
@@ -147,6 +199,7 @@ export class PublicationService {
       eligibleEntries: safePrefix,
       analysis,
       commitThroughEntrySeq: outcome.commitThroughEntrySeq,
+      ...(unitViews !== undefined ? { unitViews } : {}),
     });
     if (built === null) {
       // No eligible entries in the safe prefix — nothing to publish. This is
@@ -219,6 +272,7 @@ export class PublicationService {
       publicationId,
       runtimeSessionId,
       payloadHash: outputHash,
+      payloadJson: this.buildPublicationEnvelope(built, nextSequence, now, unitViews),
       state: "pending",
       attemptCount: 0,
       lastErrorCode: null,
@@ -226,6 +280,77 @@ export class PublicationService {
       createdAt: now,
       updatedAt: now,
     });
+  }
+
+  /**
+   * R4 (iris_memory#6):构建 historian-publication-v2 envelope —— Memory
+   * Client 投递到 iris_memory /historian/publications 的完整 payload。
+   * 字段与 iris-memory-contracts 0.2.0 的 historian-publication-v2 schema
+   * 对齐(evidenceBasis/derivedOnly 来自 anti-echo 分类)。
+   */
+  private buildPublicationEnvelope(
+    built: BuiltCompartment,
+    publicationSequence: number,
+    now: string,
+    unitViews?: HistorianUnitView[],
+  ): string {
+    const evidence = built.evidence;
+    const basis =
+      evidence.evidenceBasis !== undefined
+        ? evidence.evidenceBasis.map((ref) => ({
+            contextUnitId: ref.contextUnitId,
+            contextSeq: ref.contextSeq,
+            runtimeEventId: ref.runtimeEventId,
+            contentHash: ref.contentHash,
+            historianDisposition: ref.historianDisposition,
+            ...(ref.derivationRefs !== undefined ? { derivationRefs: ref.derivationRefs } : {}),
+          }))
+        : [];
+    // contextRange 覆盖本批 Context 单元(unitViews 优先;退化到 basis;
+    // 两者皆空 = 纯 derived-only 批,仍给合法最小范围 1..1,绝不为 0)。
+    const rangeSeqs = (unitViews ?? []).map((u) => u.contextSeq);
+    const fromContextSeq =
+      rangeSeqs.length > 0
+        ? Math.min(...rangeSeqs)
+        : basis.length > 0
+          ? Math.min(...basis.map((b) => b.contextSeq))
+          : 1;
+    const toContextSeq =
+      rangeSeqs.length > 0
+        ? Math.max(...rangeSeqs)
+        : basis.length > 0
+          ? Math.max(...basis.map((b) => b.contextSeq))
+          : 1;
+    const envelope = {
+      schemaVersion: "historian-publication-v2",
+      // 0.2.0 schema 要求 format: uuid;确定性派生(sha256 of
+      // session:seq)保证跨重启稳定、可被 iris_memory 强校验通过。
+      publicationId: deterministicUuid(
+        `iris:historian-publication:${built.compartment.runtimeSessionId}:${publicationSequence}`,
+      ),
+      sourceSequence: publicationSequence,
+      publishedAt: now,
+      payloadHash: createHash("sha256")
+        .update(
+          `${built.compartment.sourceRangeHash}:${basis.map((b) => b.contextUnitId).join(",")}`,
+          "utf8",
+        )
+        .digest("hex"),
+      contextRange: {
+        contextLineageId: `identity-${built.compartment.runtimeSessionId}`,
+        fromContextSeq,
+        toContextSeq,
+        rangeHash: built.compartment.sourceRangeHash,
+      },
+      semanticSourceVersion: "context-unit-v1",
+      compartmentCount: 1,
+      segmentCount: built.segments.length,
+      evidenceCount: basis.length,
+      evidenceBasis: basis,
+      derivedOnly: evidence.derivedOnly ?? basis.length === 0,
+      summary: built.compartment.content.slice(0, 4000),
+    };
+    return JSON.stringify(envelope);
   }
 
   /** publicationSequence = MAX(publication_sequence)+1 (in-transaction). */
@@ -259,7 +384,7 @@ export class PublicationService {
     const rows = this.store
       .raw()
       .prepare(
-        "SELECT outbox_sequence, publication_id, runtime_session_id, payload_hash, state, " +
+        "SELECT outbox_sequence, publication_id, runtime_session_id, payload_hash, payload_json, state, " +
           "attempt_count, last_error_code, claim_leased_until, created_at, updated_at " +
           "FROM publication_outbox " +
           "WHERE state IN ('pending','retry_wait','delivering') AND " +
@@ -271,6 +396,7 @@ export class PublicationService {
       publication_id: string;
       runtime_session_id: string;
       payload_hash: string;
+      payload_json: string | null;
       state: OutboxState;
       attempt_count: number;
       last_error_code: string | null;
@@ -292,6 +418,7 @@ export class PublicationService {
       publicationId: row.publication_id,
       runtimeSessionId: row.runtime_session_id,
       payloadHash: row.payload_hash,
+      payloadJson: row.payload_json,
       state: "delivering",
       attemptCount: row.attempt_count,
       lastErrorCode: row.last_error_code,

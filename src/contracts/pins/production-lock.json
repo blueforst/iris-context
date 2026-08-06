@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 1,
-  "documentedAt": "2026-08-04",
+  "schemaVersion": 2,
+  "documentedAt": "2026-08-05",
   "toolchain": {
     "node": ">=22.19.0",
     "nodeCiExact": "22.19.0",
@@ -17,7 +17,11 @@
     "fork": {
       "repository": "blueforst/pi",
       "baselineCommit": "ab5f8d88ee1d400c0c8fb5c50ac10b2f4a4851d1",
-      "seamCommit": "e18f7dd1457ea4a5987b4d44d0c41e0dfa48cedd",
+      "seamCommit": "5e93510b9c8ce7dd3e8a512fde4f8e1c9d68a60f",
+      "seamTree": "5a16381b3f5cfbe910b390e2e8f85a877d35def8",
+      "acceptedRuntimeRepository": "blueforst/pi",
+      "acceptedRuntimeCommit": "e209e56163fac2992e8aaf0fbcd67cb4fb663c84",
+      "acceptedRuntimeTree": "771b1634ac4a257b1fce2318966cf4400f5af4c2",
       "upstreamBaseCommit": "e741cb05ca7c1c7bc5a9664c99697df32de9fac6",
       "upstreamAuditBaselineCommit": "b4f293684bba718d59cc1157679bcf6157b3a7f5",
       "adoptionStatus": "file_link_local_development"
@@ -32,8 +36,8 @@
   },
   "memoryContracts": {
     "package": "iris-memory-contracts",
-    "version": "0.1.1",
-    "manifestSha256": "2cb22deb5efded5a112dbb38c19506e6185ad328a973f7a96d9e66faf59a761b",
+    "version": "0.2.0",
+    "manifestSha256": "f0f3c0969ad7f0dfc18e551ffbf6c96ff97adc105d00b3e38b7b5496d34e292d",
     "owner": "blueforst/iris_memory"
   },
   "graphitiNeo4j": {

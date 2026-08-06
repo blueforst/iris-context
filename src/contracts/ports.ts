@@ -54,3 +54,16 @@ export interface ToolExecutionPort {
     isError: boolean;
   }>;
 }
+
+/**
+ * R4 (iris_agent#9):Memory Client —— 投递 Historian publication 到
+ * iris_memory 并接收 durable acceptance receipt。Agent 只经此窄端口
+ * 与 memory 服务交互(不读其数据库、不连接 Neo4j)。
+ */
+export type PublicationDeliveryOutcome =
+  | { ok: true; receiptHash: string }
+  | { ok: false; error: "rejected" | "unavailable" | `http_${number}` };
+
+export interface MemoryClientPort {
+  deliverPublication(publication: unknown): Promise<PublicationDeliveryOutcome>;
+}
