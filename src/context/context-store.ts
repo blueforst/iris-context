@@ -1035,8 +1035,11 @@ export class ContextStore implements ContextUnitStorePort {
       .prepare(
         "SELECT context_lineage_id, binding_role, binding_checksum FROM session_lineage_bindings WHERE runtime_session_id = ? ORDER BY bound_at",
       )
-      .all(runtimeSessionId) as
-      { context_lineage_id: string; binding_role: string; binding_checksum: string }[];
+      .all(runtimeSessionId) as {
+      context_lineage_id: string;
+      binding_role: string;
+      binding_checksum: string;
+    }[];
     if (rows.length === 0) {
       throw new Error(
         `context resolveLineageForRecovery failed: no binding for runtime session ${runtimeSessionId} in this data root ` +

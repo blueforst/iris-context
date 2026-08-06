@@ -294,7 +294,10 @@ test("c5: single-current-binding guard, ambiguity fail-closed and unmasked hard-
     config.runtime_sessions.timezone,
   );
   const epoch = epochStore.ensureActive("2026-08-05T00:00:00.000Z");
-  const store = ContextStore.open(paths.contextDb, { lineageId: "lineage-c5", maxUnitsPerSession: 10 });
+  const store = ContextStore.open(paths.contextDb, {
+    lineageId: "lineage-c5",
+    maxUnitsPerSession: 10,
+  });
   try {
     store.createLineage({
       lineageId: "lineage-c5",
@@ -336,16 +339,14 @@ test("c5: single-current-binding guard, ambiguity fail-closed and unmasked hard-
 
     // Ambiguity fail-closed: two binding rows for one session (external
     // tampering) must throw instead of resolving arbitrarily.
-    store.raw().prepare(
-      `INSERT INTO session_lineage_bindings
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO session_lineage_bindings
         (runtime_session_id, context_lineage_id, binding_role, bound_at, superseded_at, binding_checksum)
        VALUES (?, ?, 'historical', ?, NULL, ?)`,
-    ).run(
-      "some-other-session",
-      "lineage-c5",
-      "2026-08-05T00:00:00.000Z",
-      "0".repeat(64),
-    );
+      )
+      .run("some-other-session", "lineage-c5", "2026-08-05T00:00:00.000Z", "0".repeat(64));
     assert.throws(
       () =>
         store.resolveLineageForRecovery("some-other-session", {
@@ -360,7 +361,10 @@ test("c5: single-current-binding guard, ambiguity fail-closed and unmasked hard-
     // Review finding (P7): recovery-mode hard-cap insert must surface
     // ContextBoundsExceededError, NOT mask it with a session-resolution
     // failure when recording the emergency state. (hard cap = 2x soft cap.)
-    const hard = ContextStore.open(paths.contextDb, { lineageId: "lineage-c5", maxUnitsPerSession: 1 });
+    const hard = ContextStore.open(paths.contextDb, {
+      lineageId: "lineage-c5",
+      maxUnitsPerSession: 1,
+    });
     try {
       for (let i = 1; i <= 2; i += 1) {
         hard.insertUnit(
