@@ -333,7 +333,9 @@ test("c5: single-current-binding guard, ambiguity fail-closed and unmasked hard-
       carrierSchemaVersion: "v1",
     });
     assert.throws(
-      () => store.bindCurrentSession("lineage-c5-other", epoch.runtimeSessionId),
+      () => {
+        store.bindCurrentSession("lineage-c5-other", epoch.runtimeSessionId);
+      },
       /already the current binding of lineage lineage-c5/,
     );
 
@@ -348,12 +350,13 @@ test("c5: single-current-binding guard, ambiguity fail-closed and unmasked hard-
       )
       .run("some-other-session", "lineage-c5", "2026-08-05T00:00:00.000Z", "0".repeat(64));
     assert.throws(
-      () =>
+      () => {
         store.resolveLineageForRecovery("some-other-session", {
           sessionId: "some-other-session",
           entryId: "e",
           contentHash: "f".repeat(64),
-        }),
+        });
+      },
       /has 2 bindings|checksum/,
       "ambiguous or corrupt bindings must fail closed",
     );
