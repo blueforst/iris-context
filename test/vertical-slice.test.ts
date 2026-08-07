@@ -10,8 +10,10 @@ import type { CustomMessage, SessionTreeEntry } from "@earendil-works/pi-agent-c
 import { defaultAgentConfig } from "../src/config/load.js";
 import { IRIS_INPUT_META_CONTENT, IRIS_INPUT_META_CUSTOM_TYPE } from "../src/contracts/context.js";
 import { ContextStore } from "../src/context/context-store.js";
-import { createContextHistoryReadPort } from "../src/context/history-read-port.js";
-import type { RuntimeSessionHistoryReadPort } from "../src/contracts/historian.js";
+import {
+  createContextHistoryReadPort,
+  type ContextHistoryReadPort,
+} from "../src/context/history-read-port.js";
 import type { LineageBoundaryInput } from "../src/historian/historian-boundary.js";
 import { HistorianManager } from "../src/historian/historian-manager.js";
 import { HistorianStore } from "../src/historian/historian-store.js";
@@ -44,11 +46,30 @@ class RecordingHistorianManager extends HistorianManager {
   }
 }
 
-/** 空 Session 的 raw 读端口（mock；真实 freeze 不在此测试中执行）。 */
-function emptyReadPort(): RuntimeSessionHistoryReadPort {
+/** iris_agent#66: minimal Context claim port for the recording manager
+ * (construction requires it; the recording manager never runs jobs). */
+function emptyHistoryPort(): ContextHistoryReadPort {
   return {
-    async readEntries() {
-      return { entries: [], nextCursor: 0, endOfSession: true, gap: null };
+    getMaterializedBoundary() {
+      return {
+        representedThroughContextSeq: 0,
+        representedThroughEntrySeq: 0,
+        m0ContentHash: null,
+        lineageStatus: "ok",
+        providerProfileId: "mock",
+      };
+    },
+    listUnitsForHistorian() {
+      return [];
+    },
+    listUnitsForHistorianByEntrySeq() {
+      return [];
+    },
+    claimUnitsForHistorian() {
+      return [];
+    },
+    lineageId() {
+      return "identity-slice";
     },
   };
 }
@@ -168,9 +189,9 @@ test("R3-P1 vertical slice: wired historianManager triggers enqueueIncremental o
   try {
     const manager = new RecordingHistorianManager({
       store: historianStore,
-      readPort: emptyReadPort(),
       modelProviderProfile: "mock-iris-provider-v1",
       nowMs: () => 1_785_000_000_000,
+      historyPort: emptyHistoryPort(),
     });
     const result = await runMinimalSlice({
       dataRoot,

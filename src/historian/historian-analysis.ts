@@ -66,6 +66,14 @@ export interface ValidateRangeInput {
   runtimeSessionId: string;
   boundary: HistorianBoundarySnapshot;
   eligibleEntries: SequencedSessionEntry[];
+  /**
+   * iris_agent#66: the durable cursor + 1 — the SAME start anchor the freeze
+   * used for sourceRangeHash. Kept explicit so the range-hash invariant is
+   * anchored to the cursor, not to whichever entry happens to be first in a
+   * claim window (derived-only units can leave entrySeq gaps). Required by
+   * validateRange; buildAnalysisView does not need it.
+   */
+  unprocessedFromEntrySeq?: number;
 }
 
 /** Build the analysis view (pure). The range must already be ≤ snapshot. */
@@ -202,9 +210,15 @@ export function validateRange(input: ValidateRangeInput): ValidationOutcome {
   }
 
   // 2. Source range hash invariant: the frozen hash must match the range.
+  //    The hash start is the durable cursor + 1 (unprocessedFromEntrySeq) —
+  //    the SAME anchor the freeze used — NOT the first present entry's seq:
+  //    with Context-owned claim input (iris_agent#66) the claimed window can
+  //    legitimately start after a gap (derived-only units carry no entrySeq
+  //    and are skipped), so anchoring on the first entry would diverge from
+  //    the frozen hash on every cycle.
   const computedHash = rangeHash(
     runtimeSessionId,
-    eligibleEntries[0]?.entrySeq ?? 0,
+    input.unprocessedFromEntrySeq ?? eligibleEntries[0]?.entrySeq ?? 0,
     last?.entrySeq ?? 0,
     eligibleEntries,
   );

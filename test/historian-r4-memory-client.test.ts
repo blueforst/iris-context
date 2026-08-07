@@ -22,9 +22,8 @@ import {
   type HistorianManagerOptions,
 } from "../src/historian/historian-manager.js";
 import { HistorianStore } from "../src/historian/historian-store.js";
-import { FakeMemoryClient } from "../src/historian/memory-client.js";
+import { canonicalPayloadHash, FakeMemoryClient } from "../src/historian/memory-client.js";
 import type { MemoryClientPort } from "../src/contracts/ports.js";
-import { SessionHistoryReadPort } from "../src/historian/history-read-port.js";
 import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
 
 const SESSION = "iris-runtime-2026-08-01-1";
@@ -39,7 +38,6 @@ function fixture(): {
   const memory = new FakeMemoryClient();
   const manager = new HistorianManager({
     store,
-    readPort: new SessionHistoryReadPort({ readRawEntries: async () => [] }),
     modelProviderProfile: "mock",
     nowMs: () => Date.now(),
     historyPort: fakeHistoryPort(),
@@ -69,6 +67,7 @@ function fakeHistoryPort(): ContextHistoryReadPort {
         derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
       },
     ],
+    claimUnitsForHistorian: () => [],
     lineageId: () => "identity-r4",
   };
 }
@@ -154,11 +153,42 @@ const SAMPLE_ENVELOPE = {
   summary: "summary",
 };
 
+/** iris_agent#64:construct a receipt BOUND to the sample envelope
+ * (publicationId + canonical payload hash + contract version all match). */
+function boundReceipt(
+  receiptId: string,
+  overrides: Partial<Record<string, unknown>> = {},
+): NonNullable<
+  ReturnType<(typeof import("../src/historian/memory-client.js"))["parseBoundReceipt"]>
+> {
+  const receipt = {
+    schemaVersion: "acceptance-receipt-v1",
+    status: "accepted",
+    receiptId,
+    publicationId: SAMPLE_ENVELOPE.publicationId,
+    canonicalPayloadHash: canonicalPayloadHash(SAMPLE_ENVELOPE),
+    contractVersion: "0.2.0",
+    acceptedAt: "2026-08-06T00:00:01Z",
+  };
+  const merged = { ...receipt, ...overrides } as unknown as Record<string, string>;
+  return {
+    schemaVersion: "acceptance-receipt-v1",
+    status: "accepted",
+    receiptId: merged["receiptId"] ?? receiptId,
+    publicationId: merged["publicationId"],
+    canonicalPayloadHash: merged["canonicalPayloadHash"],
+    contractVersion: merged["contractVersion"],
+    acceptedAt: merged["acceptedAt"],
+  } as NonNullable<
+    ReturnType<(typeof import("../src/historian/memory-client.js"))["parseBoundReceipt"]>
+  >;
+}
+
 test("r4 memory client: success delivers with real receipt hash", async () => {
   const { store, manager, memory } = fixture();
   try {
     seedOutbox(store, SAMPLE_ENVELOPE);
-    memory.queue({ ok: true, receiptHash: "real-receipt-123" });
+    memory.queue({ ok: true, receipt: boundReceipt("real-receipt-123") });
     await manager.drainOutbox();
     const row = outboxState(store, `publication-${SESSION}-1`);
     assert.equal(row.state, "delivered");
@@ -169,14 +199,18 @@ test("r4 memory client: success delivers with real receipt hash", async () => {
   }
 });
 
-test("r4 memory client: conflict (409) is replay-safe delivered", async () => {
+test("r4 memory client: conflict (409) is a FAILURE, never delivered (iris_agent#64)", async () => {
   const { store, manager, memory } = fixture();
   try {
     seedOutbox(store, SAMPLE_ENVELOPE);
-    memory.queue({ ok: true, receiptHash: "conflict-replay" });
+    // The HttpMemoryClient maps 409 idempotency/sequence conflict to
+    // rejected; a conflict means the SAME key carried DIFFERENT content —
+    // an error signal, not a replay-safe success.
+    memory.queue({ ok: false, error: "rejected" });
     await manager.drainOutbox();
     const row = outboxState(store, `publication-${SESSION}-1`);
-    assert.equal(row.state, "delivered");
+    assert.notEqual(row.state, "delivered", "conflict must never authorize delivered");
+    assert.equal(row.state, "quarantined");
   } finally {
     store.close();
   }
@@ -204,7 +238,7 @@ test("r4 memory client: unavailable keeps row claimable (lease recovery)", async
     const row = outboxState(store, `publication-${SESSION}-1`);
     assert.equal(row.state, "delivering", "unavailable must not mark delivered");
     // lease 过期后重新 claim 并可再次投递成功
-    memory.queue({ ok: true, receiptHash: "second-try-receipt" });
+    memory.queue({ ok: true, receipt: boundReceipt("second-try-receipt") });
     const now = Date.now();
     store
       .raw()
@@ -225,7 +259,6 @@ test("r4 memory client: no client wired NEVER fabricates receipts (iris_agent#46
   try {
     const manager = new HistorianManager({
       store,
-      readPort: new SessionHistoryReadPort({ readRawEntries: async () => [] }),
       modelProviderProfile: "mock",
       nowMs: () => Date.now(),
       historyPort: fakeHistoryPort(),
@@ -258,7 +291,6 @@ test("r4 memory client: thrown client errors are caught (no unhandled rejection)
     } as unknown as MemoryClientPort;
     const manager = new HistorianManager({
       store,
-      readPort: new SessionHistoryReadPort({ readRawEntries: async () => [] }),
       modelProviderProfile: "mock",
       nowMs: () => Date.now(),
       historyPort: fakeHistoryPort(),
@@ -286,7 +318,6 @@ test("r4 memory client: fake/missing receipts cannot authorize outbox reclaim (i
   try {
     const manager = new HistorianManager({
       store,
-      readPort: new SessionHistoryReadPort({ readRawEntries: async () => [] }),
       modelProviderProfile: "mock",
       nowMs: () => Date.now(),
       historyPort: fakeHistoryPort(),
@@ -326,7 +357,13 @@ test("r4 memory client: envelope carries anti-echo basis and derivedOnly", async
       evidenceCount: 0,
     };
     seedOutbox(store, derivedEnvelope);
-    memory.queue({ ok: true, receiptHash: "r" });
+    memory.queue({
+      ok: true,
+      receipt: {
+        ...boundReceipt("r"),
+        canonicalPayloadHash: canonicalPayloadHash(derivedEnvelope),
+      },
+    });
     await manager.drainOutbox();
     assert.equal(memory.delivered.length, 1);
     const sent = memory.delivered[0] as {
@@ -442,6 +479,101 @@ test("r4 memory client: real envelope (from commitSafePrefix) validates against 
     assert.ok(range.fromContextSeq >= 1);
     assert.ok(range.toContextSeq >= 1);
     assert.ok(range.fromContextSeq <= range.toContextSeq);
+  } finally {
+    store.close();
+  }
+});
+
+test("r4 memory client: a receipt bound to a DIFFERENT publication cannot ACK this row (manager defensive check, iris_agent#64)", async () => {
+  const { store, manager, memory } = fixture();
+  try {
+    seedOutbox(store, SAMPLE_ENVELOPE);
+    // 客户端层面的绑定校验已过(这是 deliverOne 的防御性复查):receipt 的
+    // publicationId 是另一个 publication → 必须 fail closed 进 quarantine,
+    // 绝不 markDelivered。
+    memory.queue({
+      ok: true,
+      receipt: {
+        ...boundReceipt("wrong-pub-receipt"),
+        publicationId: "some-other-publication",
+      },
+    });
+    await manager.drainOutbox();
+    const row = outboxState(store, `publication-${SESSION}-1`);
+    assert.equal(row.state, "quarantined", "receipt for another publication quarantines");
+    assert.equal(row.delivered_receipt_hash, null, "no delivered binding persisted");
+  } finally {
+    store.close();
+  }
+});
+
+test("r4 memory client: delivered persists the FULL verified binding (receiptId + publicationId + canonical hash + contract version, iris_agent#64)", async () => {
+  const { store, manager, memory } = fixture();
+  try {
+    seedOutbox(store, SAMPLE_ENVELOPE);
+    const receipt = boundReceipt("bound-receipt-1");
+    memory.queue({ ok: true, receipt });
+    await manager.drainOutbox();
+    const row = store
+      .raw()
+      .prepare(
+        `SELECT state, delivered_receipt_hash, delivered_receipt_id,
+                delivered_receipt_schema_version, delivered_receipt_publication_id,
+                delivered_canonical_payload_hash, delivered_contract_version,
+                delivered_duplicate_replay
+         FROM publications WHERE publication_id = ?`,
+      )
+      .get(`publication-${SESSION}-1`) as {
+      state: string;
+      delivered_receipt_hash: string | null;
+      delivered_receipt_id: string | null;
+      delivered_receipt_schema_version: string | null;
+      delivered_receipt_publication_id: string | null;
+      delivered_canonical_payload_hash: string | null;
+      delivered_contract_version: string | null;
+      delivered_duplicate_replay: number;
+    };
+    assert.equal(row.state, "delivered");
+    assert.equal(row.delivered_receipt_hash, "bound-receipt-1");
+    assert.equal(row.delivered_receipt_id, "bound-receipt-1");
+    assert.equal(row.delivered_receipt_schema_version, "acceptance-receipt-v1");
+    assert.equal(row.delivered_receipt_publication_id, SAMPLE_ENVELOPE.publicationId);
+    assert.equal(row.delivered_canonical_payload_hash, canonicalPayloadHash(SAMPLE_ENVELOPE));
+    assert.equal(row.delivered_contract_version, "0.2.0");
+    assert.equal(row.delivered_duplicate_replay, 0);
+  } finally {
+    store.close();
+  }
+});
+
+test("r4 memory client: duplicate_replay receipt persists the duplicate marker (iris_agent#64)", async () => {
+  const { store, manager, memory } = fixture();
+  try {
+    seedOutbox(store, SAMPLE_ENVELOPE);
+    memory.queue({
+      ok: true,
+      receipt: {
+        ...boundReceipt("dup-receipt-1"),
+        schemaVersion: "duplicate-replay-receipt-v1",
+        status: "duplicate_replay",
+        originalAcceptedAt: "2026-08-06T00:00:02Z",
+      },
+    });
+    await manager.drainOutbox();
+    const row = store
+      .raw()
+      .prepare(
+        `SELECT state, delivered_receipt_schema_version, delivered_duplicate_replay
+         FROM publications WHERE publication_id = ?`,
+      )
+      .get(`publication-${SESSION}-1`) as {
+      state: string;
+      delivered_receipt_schema_version: string | null;
+      delivered_duplicate_replay: number;
+    };
+    assert.equal(row.state, "delivered", "duplicate replay is a valid delivered path");
+    assert.equal(row.delivered_receipt_schema_version, "duplicate-replay-receipt-v1");
+    assert.equal(row.delivered_duplicate_replay, 1);
   } finally {
     store.close();
   }

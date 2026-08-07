@@ -11,9 +11,10 @@
 import type {
   HistorianBoundarySnapshot,
   HistorianSessionState,
-  RuntimeSessionHistoryReadPort,
   SequencedSessionEntry,
 } from "../contracts/historian.js";
+import type { ContextHistoryReadPort } from "../context/history-read-port.js";
+import type { ContextMessageUnit } from "../contracts/context-units.js";
 import type { HistorianStore } from "./historian-store.js";
 import {
   buildAnalysisView,
@@ -21,6 +22,28 @@ import {
   type HistorianAnalysisView,
   type ValidationOutcome,
 } from "./historian-analysis.js";
+
+/**
+ * iris_agent#66: adapt a committed Context semantic unit to the runner's
+ * internal SequencedSessionEntry shape. The payload IS the canonical
+ * AgentMessage (role/content/toolCall), so the existing pure freeze/
+ * analysis functions keep working — but the SOURCE is now Context-owned
+ * committed units, never Pi Session transcript. The session id survives
+ * only as opaque attribution; semantic identity/order come from contextSeq
+ * (entrySeq is the narrow archive mapping).
+ */
+export function contextUnitToSequencedEntry(
+  runtimeSessionId: string,
+  unit: ContextMessageUnit,
+): SequencedSessionEntry {
+  return {
+    runtimeSessionId,
+    entrySeq: unit.entrySeq ?? 0,
+    entryId: unit.unitId,
+    entry: { type: "message", message: unit.payload },
+    contentHash: unit.contentHash,
+  };
+}
 
 /**
  * R3 Historian runner (issue #8 Phase B Feature B3).
@@ -61,7 +84,11 @@ export interface RunnerCommitHook {
 
 export interface HistorianRunnerOptions {
   store: HistorianStore;
-  readPort: RuntimeSessionHistoryReadPort;
+  /** iris_agent#66: the Context-owned history read/claim port — the ONLY
+   * normal semantic input (committed Context units, contextSeq order). Pi
+   * Session access is not wired here at all; it lives behind the explicitly
+   * separated recovery/audit interface. */
+  historyPort: ContextHistoryReadPort;
   /** Optional hook for the atomic publication transaction (B5). */
   commitHook?: RunnerCommitHook;
   pageSize?: number;
@@ -85,13 +112,13 @@ export function unprocessedFromEntrySeq(state: HistorianSessionState | undefined
 
 export class HistorianRunner {
   private readonly store: HistorianStore;
-  private readonly readPort: RuntimeSessionHistoryReadPort;
+  private readonly historyPort: ContextHistoryReadPort;
   private readonly commitHook: RunnerCommitHook | undefined;
   private readonly pageSize: number;
 
   constructor(options: HistorianRunnerOptions) {
     this.store = options.store;
-    this.readPort = options.readPort;
+    this.historyPort = options.historyPort;
     this.commitHook = options.commitHook;
     this.pageSize = options.pageSize ?? 256;
   }
@@ -147,7 +174,15 @@ export class HistorianRunner {
       boundary,
       eligibleEntries,
     });
-    const outcome = validateRange({ runtimeSessionId, boundary, eligibleEntries });
+    const outcome = validateRange({
+      runtimeSessionId,
+      boundary,
+      eligibleEntries,
+      // iris_agent#66: the range-hash anchor is the durable cursor + 1 (the
+      // freeze used the same anchor) — NOT the first present entry (claim
+      // windows can start after derived-only unit gaps).
+      unprocessedFromEntrySeq: fromEntrySeq,
+    });
     if (!outcome.ok) {
       return {
         committed: false,
@@ -202,33 +237,29 @@ export class HistorianRunner {
     afterEntrySeqExclusive: number,
     throughEntrySeqInclusive: number,
   ): Promise<SequencedSessionEntry[]> {
+    // iris_agent#66: the normal semantic input is committed Context units
+    // claimed through the Context-owned history port (contextSeq order,
+    // immutable, lineage-bound). Session ids/ranges survive only as opaque
+    // attribution; no Session transcript is scanned here.
+    const from = afterEntrySeqExclusive + 1;
+    const units = this.historyPort.claimUnitsForHistorian(
+      runtimeSessionId,
+      from,
+      throughEntrySeqInclusive,
+    );
     const out: SequencedSessionEntry[] = [];
-    let cursor = afterEntrySeqExclusive;
-    for (;;) {
-      const page = await this.readPort.readEntries({
-        runtimeSessionId,
-        afterEntrySeqExclusive: cursor,
-        limit: this.pageSize,
-      });
-      // Fail closed on a durable gap: the port surfaces gaps instead of
-      // guessing content; committing across one would silently skip bytes
-      // the Session actually wrote (B3 review #4 — the runner honors the
-      // gap instead of spanning it).
-      if (page.gap !== null) {
-        throw new Error(
-          `historian read gap ${page.gap.kind} at entrySeq ${page.gap.fromEntrySeq}-${page.gap.toEntrySeq}: ${page.gap.detail}`,
-        );
+    for (const unit of units) {
+      if (unit.entrySeq === undefined) {
+        // Derived-only units (no narrow archive mapping) carry no entrySeq;
+        // they are not part of the Session-scoped safe-prefix space. The
+        // semantic units themselves were already committed by Context ingest.
+        continue;
       }
-      for (const entry of page.entries) {
-        if (entry.entrySeq > throughEntrySeqInclusive) {
-          return out; // frozen ceiling — never widen
-        }
-        out.push(entry);
+      if (unit.entrySeq > throughEntrySeqInclusive) {
+        return out; // frozen ceiling — never widen
       }
-      if (page.endOfSession || page.entries.length === 0) {
-        return out;
-      }
-      cursor = page.nextCursor;
+      out.push(contextUnitToSequencedEntry(runtimeSessionId, unit));
     }
+    return out;
   }
 }

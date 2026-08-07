@@ -18,6 +18,7 @@ import type { HistorianAnalysisView } from "./historian-analysis.js";
 import type { ValidationOutcome } from "./historian-analysis.js";
 import { buildCompartment } from "./historian-compartment.js";
 import type { EvidenceBasisRef, HistorianUnitView } from "./anti-echo.js";
+import type { MemoryAcceptanceReceipt } from "../contracts/ports.js";
 import type { BuiltCompartment } from "./historian-compartment.js";
 import {
   deriveMemoryAssessments,
@@ -502,10 +503,12 @@ export class PublicationService {
     }));
   }
 
-  /** Mark a claimed publication delivered (Router ACK — the ONLY path to
-   * delivered; never delete, never pre-ack). The receipt hash is persisted
-   * for the delivery audit trail. */
-  markDelivered(input: { publicationId: string; receiptHash: string }): void {
+  /**
+   * iris_agent#64:delivered 只能由**验证过绑定身份**的 Memory receipt 授权
+   * (publicationId + canonicalPayloadHash + contractVersion 全部匹配)。
+   * 持久化完整绑定(不只是 hash),供 reclaim 授权与审计使用。
+   */
+  markDelivered(input: { publicationId: string; receipt: MemoryAcceptanceReceipt }): void {
     const now = new Date(this.nowMs()).toISOString();
     this.store
       .raw()
@@ -516,9 +519,28 @@ export class PublicationService {
     this.store
       .raw()
       .prepare(
-        "UPDATE publications SET state = 'delivered', delivered_at = ?, delivered_receipt_hash = ?, updated_at = ? WHERE publication_id = ?",
+        `UPDATE publications SET
+           state = 'delivered', delivered_at = ?, delivered_receipt_hash = ?,
+           delivered_receipt_id = ?, delivered_receipt_schema_version = ?,
+           delivered_receipt_publication_id = ?,
+           delivered_canonical_payload_hash = ?,
+           delivered_contract_version = ?,
+           delivered_duplicate_replay = ?,
+           updated_at = ?
+         WHERE publication_id = ?`,
       )
-      .run(now, input.receiptHash, now, input.publicationId);
+      .run(
+        now,
+        input.receipt.receiptId,
+        input.receipt.receiptId,
+        input.receipt.schemaVersion,
+        input.receipt.publicationId,
+        input.receipt.canonicalPayloadHash,
+        input.receipt.contractVersion,
+        input.receipt.status === "duplicate_replay" ? 1 : 0,
+        now,
+        input.publicationId,
+      );
   }
 
   /**

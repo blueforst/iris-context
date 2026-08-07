@@ -24,6 +24,15 @@ export interface CompartmentReleaseView {
   bustRepresentedAt: string | null;
   memoryDurableAckAt: string | null;
   memoryReceiptHash: string | null;
+  /**
+   * iris_agent#64:markDelivered 持久化的**已验证绑定 receipt** —— reclaim
+   * 授权必须看到绑定身份(publicationId + canonicalPayloadHash +
+   * contractVersion),不能只凭裸 opaque 字符串。
+   */
+  deliveredReceiptId: string | null;
+  deliveredReceiptPublicationId: string | null;
+  deliveredCanonicalPayloadHash: string | null;
+  deliveredContractVersion: string | null;
   shardId: string | null;
   shardVerifiedAt: string | null;
   reclaimedAt: string | null;
@@ -32,7 +41,9 @@ export interface CompartmentReleaseView {
 /**
  * 四条件是否全部满足(纯判定)。
  * - contextAck / bustRepresented / memoryDurableAck 必须有时间戳;
- * - memoryReceiptHash 必须存在(durable ACK 的凭据);
+ * - 已验证的绑定 receipt 必须存在(iris_agent#64:receiptId +
+ *   receiptPublicationId + canonicalPayloadHash + contractVersion 全部
+ *   持久化 —— 裸 hash 或空绑定不足以授权);
  * - shardVerifiedAt 必须有时间戳。
  * 任何条件缺失 → 不释放(fail-closed:宁可保留 hot rows,绝不提前释放)。
  */
@@ -41,8 +52,14 @@ export function isReclaimEligible(view: CompartmentReleaseView): boolean {
     view.contextAckedAt !== null &&
     view.bustRepresentedAt !== null &&
     view.memoryDurableAckAt !== null &&
-    view.memoryReceiptHash !== null &&
-    view.memoryReceiptHash.length > 0 &&
+    view.deliveredReceiptId !== null &&
+    view.deliveredReceiptId.length > 0 &&
+    view.deliveredReceiptPublicationId !== null &&
+    view.deliveredReceiptPublicationId.length > 0 &&
+    view.deliveredCanonicalPayloadHash !== null &&
+    view.deliveredCanonicalPayloadHash.length > 0 &&
+    view.deliveredContractVersion !== null &&
+    view.deliveredContractVersion.length > 0 &&
     view.shardVerifiedAt !== null &&
     view.reclaimedAt === null
   );

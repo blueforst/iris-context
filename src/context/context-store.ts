@@ -59,7 +59,7 @@ interface UnitRow {
  * if the on-disk schema_migrations.max(version) is NEWER than this constant
  * (a newer binary wrote state this binary cannot read).
  */
-export const LATEST_MIGRATION_VERSION = "0005_session_lineage_bindings";
+export const LATEST_MIGRATION_VERSION = "0006_binding_retention";
 
 /**
  * R2-P3：每 session 的 context_units 软 cap（语义 ledger 有界化的第一级）。
@@ -95,18 +95,70 @@ export class ContextBoundsExceededError extends Error {
   }
 }
 
+/**
+ * iris_agent#63: bounded historical Session→lineage binding ledger.
+ *
+ * Retention policy (documented here and in migration 0006; synchronized to
+ * the Notion deployment/Context docs):
+ *  - SOFT_LIMIT_HISTORICAL_BINDINGS: when the historical binding count
+ *    exceeds this, bindCurrentSession/createLineage opportunistically
+ *    reclaims reconciled bindings outside the retain window. Reclaim is
+ *    best-effort — a soft breach is NOT fail-closed (rollover must never be
+ *    blocked by audit bookkeeping).
+ *  - HARD_LIMIT_HISTORICAL_BINDINGS: when even after opportunistic reclaim
+ *    the historical count still exceeds this, binding a NEW current session
+ *    fails closed with a typed error. The ledger is therefore bounded: it
+ *    can never grow past HARD_LIMIT + RETAIN_RECENT_HISTORICAL_BINDINGS.
+ *  - RETAIN_RECENT_HISTORICAL_BINDINGS: the most recent historical bindings
+ *    are NEVER reclaimed (audit checkpoint + late-recovery margin — the
+ *    newest bindings are the ones most likely to still be needed by an
+ *    in-flight rollover/recovery window).
+ *
+ * Reclaim eligibility is tied to authoritative evidence, NOT wall-clock:
+ * a historical binding is reclaimable only after the Recovery Reconciler
+ * acknowledged the Session (acknowledgeSessionReconciled) — proving its
+ * pending Pi receipt window is fully consumed. Unacknowledged bindings stay
+ * resolvable forever. Pruned bindings are copied to
+ * session_lineage_bindings_audit before deletion (audit provenance kept),
+ * and resolution of a pruned session fails closed with the typed
+ * ContextLineageResolutionError — no old Session can become current again.
+ */
+export const SOFT_LIMIT_HISTORICAL_BINDINGS = 4_096;
+export const HARD_LIMIT_HISTORICAL_BINDINGS = 16_384;
+export const RETAIN_RECENT_HISTORICAL_BINDINGS = 64;
+
+/** iris_agent#63: typed fail-closed for an unbounded binding ledger. */
+export class ContextBindingLedgerExceededError extends Error {
+  constructor(readonly hardLimit: number) {
+    super(
+      `historical session->lineage binding ledger exceeded the hard limit ` +
+        `${hardLimit} even after opportunistic reclaim (fail closed); ` +
+        "resolve pending recovery windows or raise the limit",
+    );
+    this.name = "ContextBindingLedgerExceededError";
+  }
+}
+
 /** ContextStore.open 的构造选项（R2-P3 cap 注入：测试用极小值在少量单元内触发 cap 路径）。 */
 export interface ContextStoreOpenOptions {
   /** 每 session 软 cap（超限单元标记 disposition="exclude"）。缺省 = MAX_UNITS_PER_SESSION。 */
   maxUnitsPerSession?: number;
   /**
-   * R2 (iris_agent#9)：identity-level lineage id。一个 Iris identity/data
-   * root 恰好一条 durable Context lineage（one lineage → many bounded
-   * Runtime Sessions）。调用方（vertical-slice/host）从 data root 派生稳定
-   * id（如 sha256(dataRoot) 前缀）。缺省时用 "identity-default"（单根
-   * 开发环境语义）。legacy session-scoped 行已被 0004 quarantine，永不读取。
-   */
+   /** R2 (iris_agent#9)：identity-level lineage id。一个 Iris identity/data
+    * root 恰好一条 durable Context lineage（one lineage → many bounded
+    * Runtime Sessions）。调用方（vertical-slice/host）从 data root 派生稳定
+    * id（如 sha256(dataRoot) 前缀）。缺省时用 "identity-default"（单根
+    * 开发环境语义）。legacy session-scoped 行已被 0004 quarantine，永不读取。
+    */
   lineageId?: string;
+  /**
+   * iris_agent#63: binding-ledger retention bounds (test injection).
+   * Defaults are the production constants SOFT_LIMIT_HISTORICAL_BINDINGS /
+   * HARD_LIMIT_HISTORICAL_BINDINGS / RETAIN_RECENT_HISTORICAL_BINDINGS.
+   */
+  bindingSoftLimit?: number;
+  bindingHardLimit?: number;
+  bindingRetainRecent?: number;
 }
 
 export interface ContextLineage {
@@ -344,6 +396,10 @@ export class ContextStore implements ContextUnitStorePort {
   private readonly maxUnitsPerSession: number;
   /** R2-P3：每 session 硬 cap（超限 → 抛 ContextBoundsExceededError，fail-closed）。 */
   private readonly hardUnitsCap: number;
+  /** iris_agent#63: binding-ledger retention bounds (production constants by default). */
+  private readonly bindingSoftLimit: number;
+  private readonly bindingHardLimit: number;
+  private readonly bindingRetainRecent: number;
   /** R2 (iris_agent#9)：identity-level lineage id（one per data root）。 */
   readonly lineageId: string;
   private closed = false;
@@ -353,6 +409,9 @@ export class ContextStore implements ContextUnitStorePort {
     this.lineageId = options.lineageId ?? "identity-default";
     this.maxUnitsPerSession = options.maxUnitsPerSession ?? MAX_UNITS_PER_SESSION;
     this.hardUnitsCap = 2 * this.maxUnitsPerSession;
+    this.bindingSoftLimit = options.bindingSoftLimit ?? SOFT_LIMIT_HISTORICAL_BINDINGS;
+    this.bindingHardLimit = options.bindingHardLimit ?? HARD_LIMIT_HISTORICAL_BINDINGS;
+    this.bindingRetainRecent = options.bindingRetainRecent ?? RETAIN_RECENT_HISTORICAL_BINDINGS;
   }
 
   static open(contextDbPath: string, options: ContextStoreOpenOptions = {}): ContextStore {
@@ -919,6 +978,139 @@ export class ContextStore implements ContextUnitStorePort {
   }
 
   /**
+   * iris_agent#63: authoritative-evidence mark — the Recovery Reconciler
+   * calls this AFTER proving the Session's pending Pi receipt window is
+   * fully consumed (all receipts replayed/acked or none remained). Only
+   * bindings with reconciled_at set may ever be reclaimed. Idempotent.
+   */
+  acknowledgeSessionReconciled(runtimeSessionId: string): void {
+    this.db
+      .prepare(
+        `UPDATE session_lineage_bindings
+         SET reconciled_at = COALESCE(reconciled_at, ?)
+         WHERE runtime_session_id = ?`,
+      )
+      .run(new Date().toISOString(), runtimeSessionId);
+  }
+
+  /**
+   * iris_agent#63: reclaim reconciled historical bindings OUTSIDE the retain
+   * window (audit checkpoint / late-recovery margin). Each pruned row is
+   * copied to session_lineage_bindings_audit BEFORE deletion (audit
+   * provenance is never lost), then removed from the active ledger.
+   * Returns the number of rows pruned. Eligibility is evidence-based:
+   * reconciled_at IS NOT NULL is mandatory — an unacknowledged Session can
+   * still require recovery resolution and is never pruned.
+   * When called inside a caller-owned transaction (bindCurrentSession's
+   * rollover gate), pass transaction: "caller" so no nested BEGIN is issued.
+   */
+  reclaimReconciledBindings(
+    options: { retainRecent?: number; transaction?: "own" | "caller" } = {},
+  ): number {
+    const retain = options.retainRecent ?? this.bindingRetainRecent;
+    const ownTransaction = options.transaction !== "caller";
+    if (ownTransaction) {
+      this.db.exec("BEGIN IMMEDIATE");
+    }
+    try {
+      const prunable = this.db
+        .prepare(
+          `SELECT runtime_session_id, context_lineage_id, binding_role, bound_at, superseded_at,
+                  binding_checksum, reconciled_at
+           FROM session_lineage_bindings
+           WHERE binding_role = 'historical' AND reconciled_at IS NOT NULL
+             AND runtime_session_id NOT IN (
+               SELECT runtime_session_id FROM session_lineage_bindings
+               WHERE binding_role = 'historical'
+               ORDER BY superseded_at DESC NULLS LAST, bound_at DESC
+               LIMIT ?
+             )`,
+        )
+        .all(retain) as Array<{
+        runtime_session_id: string;
+        context_lineage_id: string;
+        binding_role: string;
+        bound_at: string;
+        superseded_at: string | null;
+        binding_checksum: string;
+        reconciled_at: string | null;
+      }>;
+      for (const row of prunable) {
+        this.db
+          .prepare(
+            `INSERT INTO session_lineage_bindings_audit
+              (runtime_session_id, context_lineage_id, binding_role, bound_at, superseded_at,
+               binding_checksum, reconciled_at, pruned_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            row.runtime_session_id,
+            row.context_lineage_id,
+            row.binding_role,
+            row.bound_at,
+            row.superseded_at,
+            row.binding_checksum,
+            row.reconciled_at,
+            new Date().toISOString(),
+          );
+        this.db
+          .prepare(
+            `DELETE FROM session_lineage_bindings
+             WHERE runtime_session_id = ? AND context_lineage_id = ? AND binding_role = 'historical'`,
+          )
+          .run(row.runtime_session_id, row.context_lineage_id);
+      }
+      if (ownTransaction) {
+        this.db.exec("COMMIT");
+      }
+      return prunable.length;
+    } catch (error) {
+      if (ownTransaction) {
+        this.db.exec("ROLLBACK");
+      }
+      throw error;
+    }
+  }
+
+  /** iris_agent#63: capacity metrics for the binding ledger (health/readiness). */
+  bindingLedgerStats(): {
+    total: number;
+    current: number;
+    historical: number;
+    reconciled: number;
+    reclaimable: number;
+    auditRows: number;
+  } {
+    const count = (sql: string): number => {
+      const row = this.db.prepare(sql).get() as { n: number };
+      return row.n;
+    };
+    const total = count("SELECT COUNT(*) AS n FROM session_lineage_bindings");
+    const current = count(
+      "SELECT COUNT(*) AS n FROM session_lineage_bindings WHERE binding_role = 'current'",
+    );
+    const historical = count(
+      "SELECT COUNT(*) AS n FROM session_lineage_bindings WHERE binding_role = 'historical'",
+    );
+    const reconciled = count(
+      "SELECT COUNT(*) AS n FROM session_lineage_bindings WHERE binding_role = 'historical' AND reconciled_at IS NOT NULL",
+    );
+    const retain = this.bindingRetainRecent;
+    const reclaimable = count(
+      `SELECT COUNT(*) AS n FROM session_lineage_bindings
+       WHERE binding_role = 'historical' AND reconciled_at IS NOT NULL
+         AND runtime_session_id NOT IN (
+           SELECT runtime_session_id FROM session_lineage_bindings
+           WHERE binding_role = 'historical'
+           ORDER BY superseded_at DESC NULLS LAST, bound_at DESC
+           LIMIT ${retain}
+         )`,
+    );
+    const auditRows = count("SELECT COUNT(*) AS n FROM session_lineage_bindings_audit");
+    return { total, current, historical, reconciled, reclaimable, auditRows };
+  }
+
+  /**
    * R2 (iris_agent#9)：按 identity-level lineage id 查询（one per data root）。
    * rollover 只更新 current_runtime_session_id，不创建新 lineage。
    */
@@ -944,6 +1136,32 @@ export class ContextStore implements ContextUnitStorePort {
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      // iris_agent#63: bounded ledger gate. Every rollover appends a new
+      // historical binding; before that, opportunistically reclaim
+      // reconciled bindings once the SOFT limit is breached, and fail
+      // closed (typed) if the HARD limit survives reclaim — the active
+      // ledger can never grow without bound. Retained recent bindings are
+      // never pruned, so the limit is a hard ceiling, not a watermark.
+      const historicalCount = (
+        this.db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM session_lineage_bindings WHERE binding_role = 'historical'",
+          )
+          .get() as { n: number }
+      ).n;
+      if (historicalCount >= this.bindingSoftLimit) {
+        this.reclaimReconciledBindings({ transaction: "caller" });
+        const afterReclaim = (
+          this.db
+            .prepare(
+              "SELECT COUNT(*) AS n FROM session_lineage_bindings WHERE binding_role = 'historical'",
+            )
+            .get() as { n: number }
+        ).n;
+        if (afterReclaim >= this.bindingHardLimit) {
+          throw new ContextBindingLedgerExceededError(this.bindingHardLimit);
+        }
+      }
       // iris_agent#52: a runtime session may be the current binding of at most
       // ONE lineage (same invariant createLineage enforces). Without this
       // guard, bindCurrentSession could give a session a SECOND current

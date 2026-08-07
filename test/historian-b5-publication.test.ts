@@ -30,13 +30,12 @@ import type { SessionTreeEntry } from "@earendil-works/pi-agent-core";
 import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
 
 import { freezeBoundary } from "../src/historian/historian-boundary.js";
-import { HistorianRunner } from "../src/historian/historian-runner.js";
+import { contextUnitToSequencedEntry, HistorianRunner } from "../src/historian/historian-runner.js";
 import {
   createPublicationCommitHook,
   PublicationService,
 } from "../src/historian/historian-publication.js";
 import { HistorianStore } from "../src/historian/historian-store.js";
-import { SessionHistoryReadPort } from "../src/historian/history-read-port.js";
 
 const SESSION = "iris-runtime-2026-08-01-1";
 
@@ -109,7 +108,7 @@ function storeFixture(): { store: HistorianStore; dir: string; service: Publicat
 }
 
 /** iris_agent#45: publication requires a Context read port (fail closed). */
-function stubHistoryPort(): ContextHistoryReadPort {
+function stubHistoryPort(texts?: string[]): ContextHistoryReadPort {
   return {
     getMaterializedBoundary() {
       return {
@@ -140,6 +139,36 @@ function stubHistoryPort(): ContextHistoryReadPort {
       }
       return units;
     },
+    claimUnitsForHistorian(_runtimeSessionId, fromEntrySeq, toEntrySeq) {
+      // iris_agent#66: full committed units (payload included) — the
+      // runner's normal semantic input.
+      const units: import("../src/contracts/context-units.js").ContextMessageUnit[] = [];
+      for (let seq = fromEntrySeq; seq <= toEntrySeq; seq++) {
+        units.push({
+          lineageId: "identity-stub",
+          runtimeSessionId: _runtimeSessionId,
+          contextSeq: seq,
+          unitId: `unit-${seq}`,
+          sourceEventId: `evt-${seq}`,
+          runtimeEventId: `evt-${seq}`,
+          unitType: "input",
+          disposition: "include",
+          entryId: `entry-${seq}`,
+          entrySeq: seq,
+          contentHash: "b".repeat(64),
+          payload: {
+            role: "user",
+            content: texts?.[seq - 1] ?? `content-${seq}`,
+            timestamp: 1,
+          },
+          paired: false,
+          derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+          schemaVersion: "context-unit-v1",
+          createdAt: "2026-08-01T00:00:00.000Z",
+        });
+      }
+      return units;
+    },
     lineageId() {
       return "identity-b5";
     },
@@ -151,14 +180,24 @@ async function runOneCycle(
   entries: SessionTreeEntry[],
   processedThroughEntrySeq = 0,
 ) {
-  const port = new SessionHistoryReadPort({ readRawEntries: async () => entries });
-  const page = await port.readEntries({ runtimeSessionId: SESSION, limit: 100 });
+  // iris_agent#66: the freeze head AND the runner input both come from the
+  // SAME Context claim path (committed units) — the frozen sourceRangeHash
+  // must match what the runner re-reads, or every cycle fails validation.
+  // The stub port's claimed window is capped at the fixture's entry count so
+  // the freeze head matches the test's notion of "the session so far".
+  const historyPort = stubHistoryPort();
+  const head = entries.length;
+  const claimed = historyPort.claimUnitsForHistorian(SESSION, 1, head);
+  const claimedEntries = claimed
+    .filter((unit) => unit.entrySeq !== undefined)
+    .map((unit) => contextUnitToSequencedEntry(SESSION, unit));
+  void entries;
   // R3-P1 适配：freezeBoundary 拆分为 { rawSeamInput, lineageBoundary? }。
   // 不传 lineageBoundary = 纯 raw 语义（与 R3-P0 分支行为一致）。
   const freeze = freezeBoundary({
     rawSeamInput: {
       runtimeSessionId: SESSION,
-      entries: page.entries,
+      entries: claimedEntries,
       processedThroughEntrySeq,
       tailMarginEntries: 0,
       modelProviderProfile: "opencode/deepseek-v4-flash",
@@ -167,8 +206,8 @@ async function runOneCycle(
   });
   const runner = new HistorianRunner({
     store,
-    readPort: port,
-    commitHook: createPublicationCommitHook({ store, historyPort: stubHistoryPort() }),
+    historyPort,
+    commitHook: createPublicationCommitHook({ store, historyPort }),
   });
   return runner.run({ runtimeSessionId: SESSION, boundary: freeze.snapshot });
 }
@@ -296,7 +335,18 @@ test("B5: outbox state machine — claim → delivering → delivered (Router AC
     const again = service.claimBatch({ batchSize: 10 });
     assert.equal(again.length, 0, "active lease suppresses re-claim");
 
-    service.markDelivered({ publicationId: pubId, receiptHash: "receipt-1" });
+    service.markDelivered({
+      publicationId: pubId,
+      receipt: {
+        schemaVersion: "acceptance-receipt-v1",
+        status: "accepted",
+        receiptId: "receipt-1",
+        publicationId: pubId,
+        canonicalPayloadHash: "a".repeat(64),
+        contractVersion: "0.2.0",
+        acceptedAt: "2026-08-01T00:00:00.000Z",
+      },
+    });
     const outbox = store
       .raw()
       .prepare("SELECT state FROM publication_outbox WHERE publication_id = ?")
@@ -405,13 +455,20 @@ test("B5: a publication with recall projections commits assessment deltas in the
       u("u-1", null, "the user confirms the deployment plan is correct"),
       c("c-1", "u-1"),
     ];
-    const port = new SessionHistoryReadPort({ readRawEntries: async () => entries });
-    const page = await port.readEntries({ runtimeSessionId: SESSION, limit: 100 });
+    // iris_agent#66: freeze head from the SAME Context claim path as the
+    // runner (stub port window capped at the fixture entry count). The
+    // assessment deltas depend on the REAL user text, so the stub serves
+    // the fixture message verbatim.
+    const hp = stubHistoryPort(["the user confirms the deployment plan is correct"]);
+    const claimedEntries = hp
+      .claimUnitsForHistorian(SESSION, 1, entries.length)
+      .filter((unit) => unit.entrySeq !== undefined)
+      .map((unit) => contextUnitToSequencedEntry(SESSION, unit));
     // R3-P1 适配：freezeBoundary 拆分为 { rawSeamInput }。
     const freeze = freezeBoundary({
       rawSeamInput: {
         runtimeSessionId: SESSION,
-        entries: page.entries,
+        entries: claimedEntries,
         processedThroughEntrySeq: 0,
         tailMarginEntries: 0,
         modelProviderProfile: "m",
@@ -420,10 +477,10 @@ test("B5: a publication with recall projections commits assessment deltas in the
     });
     const runner = new HistorianRunner({
       store,
-      readPort: port,
+      historyPort: hp,
       commitHook: createPublicationCommitHook({
         store,
-        historyPort: stubHistoryPort(),
+        historyPort: hp,
         recallProjections: [
           {
             invocationId: "inv-1",
@@ -466,13 +523,18 @@ test("B5: a publication commit-hook failure rolls back cursor + publication + ou
   const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
   try {
     const entries: SessionTreeEntry[] = [u("u-1", null, "hello"), c("c-1", "u-1")];
-    const port = new SessionHistoryReadPort({ readRawEntries: async () => entries });
-    const page = await port.readEntries({ runtimeSessionId: SESSION, limit: 100 });
+    // iris_agent#66: freeze head from the SAME Context claim path as the
+    // runner (stub port window capped at the fixture entry count).
+    const hp = stubHistoryPort();
+    const claimedEntries = hp
+      .claimUnitsForHistorian(SESSION, 1, entries.length)
+      .filter((unit) => unit.entrySeq !== undefined)
+      .map((unit) => contextUnitToSequencedEntry(SESSION, unit));
     // R3-P1 适配：freezeBoundary 拆分为 { rawSeamInput }。
     const freeze = freezeBoundary({
       rawSeamInput: {
         runtimeSessionId: SESSION,
-        entries: page.entries,
+        entries: claimedEntries,
         processedThroughEntrySeq: 0,
         tailMarginEntries: 0,
         modelProviderProfile: "m",
@@ -486,7 +548,11 @@ test("B5: a publication commit-hook failure rolls back cursor + publication + ou
         throw new Error("model/parse failure (simulated)");
       },
     };
-    const runner = new HistorianRunner({ store, readPort: port, commitHook: failingHook });
+    const runner = new HistorianRunner({
+      store,
+      historyPort: hp,
+      commitHook: failingHook,
+    });
     await assert.rejects(
       () => runner.run({ runtimeSessionId: SESSION, boundary: freeze.snapshot }),
       /model\/parse failure/,
@@ -574,7 +640,18 @@ test("B5: delivery pump crash window — claim survives reopen, lease expiry rec
       const recovered = freshService.claimBatch({ batchSize: 10 });
       assert.equal(recovered.length, 1, "expired lease recovered after reopen");
       assert.equal(recovered[0]?.publicationId, pubId);
-      freshService.markDelivered({ publicationId: pubId, receiptHash: "receipt-crash-1" });
+      freshService.markDelivered({
+        publicationId: pubId,
+        receipt: {
+          schemaVersion: "acceptance-receipt-v1",
+          status: "accepted",
+          receiptId: "receipt-crash-1",
+          publicationId: pubId,
+          canonicalPayloadHash: "a".repeat(64),
+          contractVersion: "0.2.0",
+          acceptedAt: "2026-08-01T00:00:00.000Z",
+        },
+      });
       const after = reopened
         .raw()
         .prepare("SELECT state, attempt_count FROM publication_outbox WHERE publication_id = ?")

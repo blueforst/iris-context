@@ -595,13 +595,17 @@ export class HistorianStore {
   listCompartmentReleaseViews(runtimeSessionId: string): CompartmentReleaseView[] {
     const rows = this.db
       .prepare(
-        `SELECT compartment_id, runtime_session_id, compartment_sequence, start_entry_seq,
-                end_entry_seq, publication_sequence, context_acked_at, bust_represented_at,
-                memory_durable_ack_at, memory_receipt_hash, shard_id, shard_verified_at,
-                reclaimed_at
-         FROM compartment_release_state
-         WHERE runtime_session_id = ? AND reclaimed_at IS NULL
-         ORDER BY compartment_sequence`,
+        `SELECT r.compartment_id, r.runtime_session_id, r.compartment_sequence,
+                r.start_entry_seq, r.end_entry_seq, r.publication_sequence,
+                r.context_acked_at, r.bust_represented_at,
+                r.memory_durable_ack_at, r.memory_receipt_hash,
+                r.shard_id, r.shard_verified_at, r.reclaimed_at,
+                p.delivered_receipt_publication_id, p.delivered_canonical_payload_hash,
+                p.delivered_receipt_id, p.delivered_contract_version
+         FROM compartment_release_state r
+         LEFT JOIN publications p ON p.publication_sequence = r.publication_sequence
+         WHERE r.runtime_session_id = ? AND r.reclaimed_at IS NULL
+         ORDER BY r.compartment_sequence`,
       )
       .all(runtimeSessionId) as unknown as Array<{
       compartment_id: string;
@@ -617,6 +621,10 @@ export class HistorianStore {
       shard_id: string | null;
       shard_verified_at: string | null;
       reclaimed_at: string | null;
+      delivered_receipt_publication_id: string | null;
+      delivered_canonical_payload_hash: string | null;
+      delivered_receipt_id: string | null;
+      delivered_contract_version: string | null;
     }>;
     return rows.map((row) => ({
       compartmentId: row.compartment_id,
@@ -629,6 +637,13 @@ export class HistorianStore {
       bustRepresentedAt: row.bust_represented_at,
       memoryDurableAckAt: row.memory_durable_ack_at,
       memoryReceiptHash: row.memory_receipt_hash,
+      // iris_agent#64: the VERIFIED bound receipt (persisted by
+      // markDelivered) — reclaim authorization must see the binding, not a
+      // bare opaque string.
+      deliveredReceiptId: row.delivered_receipt_id,
+      deliveredReceiptPublicationId: row.delivered_receipt_publication_id,
+      deliveredCanonicalPayloadHash: row.delivered_canonical_payload_hash,
+      deliveredContractVersion: row.delivered_contract_version,
       shardId: row.shard_id,
       shardVerifiedAt: row.shard_verified_at,
       reclaimedAt: row.reclaimed_at,
