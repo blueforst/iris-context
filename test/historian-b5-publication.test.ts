@@ -27,6 +27,8 @@ import assert from "node:assert/strict";
 
 import type { SessionTreeEntry } from "@earendil-works/pi-agent-core";
 
+import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
+
 import { freezeBoundary } from "../src/historian/historian-boundary.js";
 import { HistorianRunner } from "../src/historian/historian-runner.js";
 import {
@@ -106,6 +108,44 @@ function storeFixture(): { store: HistorianStore; dir: string; service: Publicat
   return { store, dir, service };
 }
 
+/** iris_agent#45: publication requires a Context read port (fail closed). */
+function stubHistoryPort(): ContextHistoryReadPort {
+  return {
+    getMaterializedBoundary() {
+      return {
+        representedThroughContextSeq: 0,
+        representedThroughEntrySeq: 0,
+        m0ContentHash: null,
+        lineageStatus: "ok",
+        providerProfileId: "mock",
+      };
+    },
+    listUnitsForHistorian() {
+      return [];
+    },
+    listUnitsForHistorianByEntrySeq(_runtimeSessionId, fromEntrySeq, toEntrySeq) {
+      // One committed unit per claimed entry — the B5 mechanics tests are
+      // not provenance tests; they need a REAL (non-empty) Context range.
+      const units: import("../src/historian/anti-echo.js").HistorianUnitView[] = [];
+      for (let seq = fromEntrySeq; seq <= toEntrySeq; seq++) {
+        units.push({
+          contextUnitId: `unit-${seq}`,
+          contextSeq: seq,
+          runtimeEventId: `evt-${seq}`,
+          unitType: "input",
+          disposition: "include",
+          contentHash: "b".repeat(64),
+          derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+        });
+      }
+      return units;
+    },
+    lineageId() {
+      return "identity-b5";
+    },
+  };
+}
+
 async function runOneCycle(
   store: HistorianStore,
   entries: SessionTreeEntry[],
@@ -128,7 +168,7 @@ async function runOneCycle(
   const runner = new HistorianRunner({
     store,
     readPort: port,
-    commitHook: createPublicationCommitHook({ store }),
+    commitHook: createPublicationCommitHook({ store, historyPort: stubHistoryPort() }),
   });
   return runner.run({ runtimeSessionId: SESSION, boundary: freeze.snapshot });
 }
@@ -383,6 +423,7 @@ test("B5: a publication with recall projections commits assessment deltas in the
       readPort: port,
       commitHook: createPublicationCommitHook({
         store,
+        historyPort: stubHistoryPort(),
         recallProjections: [
           {
             invocationId: "inv-1",

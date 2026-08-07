@@ -17,7 +17,7 @@ import type { RunnerCommitHook } from "./historian-runner.js";
 import type { HistorianAnalysisView } from "./historian-analysis.js";
 import type { ValidationOutcome } from "./historian-analysis.js";
 import { buildCompartment } from "./historian-compartment.js";
-import type { HistorianUnitView } from "./anti-echo.js";
+import type { EvidenceBasisRef, HistorianUnitView } from "./anti-echo.js";
 import type { BuiltCompartment } from "./historian-compartment.js";
 import {
   deriveMemoryAssessments,
@@ -139,6 +139,55 @@ export function createPublicationCommitHook(options: PublicationServiceOptions):
   };
 }
 
+/**
+ * iris_agent#45: typed fail-closed error for publications whose Context
+ * provenance is missing or fabricated. Thrown BEFORE any row is written, so
+ * the enclosing transaction rolls back and the job retries/exhausts with a
+ * durable diagnosable intent (iris_agent#53 machinery).
+ */
+export class HistorianProvenanceError extends Error {
+  readonly runtimeSessionId: string;
+
+  constructor(runtimeSessionId: string, message: string) {
+    super(`historian provenance (iris_agent#45): ${message}`);
+    this.name = "HistorianProvenanceError";
+    this.runtimeSessionId = runtimeSessionId;
+  }
+}
+
+/**
+ * iris_agent#45: canonical Context range hash over the EXACT ordered unit
+ * identities of the committed batch (contextSeq asc, then unit id for full
+ * determinism). Includes contextSeq, contextUnitId, runtimeEventId and
+ * contentHash — any change to the committed batch changes the hash. When
+ * unit views are absent but basis refs exist, the basis refs define the
+ * membership (ordered by contextSeq, then contextUnitId).
+ */
+export function canonicalUnitRangeHash(
+  units: HistorianUnitView[],
+  basis: EvidenceBasisRef[],
+): string {
+  const ordered = [...units]
+    .sort((a, b) => a.contextSeq - b.contextSeq || (a.contextUnitId < b.contextUnitId ? -1 : 1))
+    .map((x) => ({
+      contextSeq: x.contextSeq,
+      contextUnitId: x.contextUnitId,
+      runtimeEventId: x.runtimeEventId,
+      contentHash: x.contentHash,
+    }));
+  const orderedBasis = [...basis]
+    .sort((a, b) => a.contextSeq - b.contextSeq || (a.contextUnitId < b.contextUnitId ? -1 : 1))
+    .map((x) => ({
+      contextSeq: x.contextSeq,
+      contextUnitId: x.contextUnitId,
+      runtimeEventId: x.runtimeEventId,
+      contentHash: x.contentHash,
+    }));
+  return createHash("sha256")
+    .update(JSON.stringify(ordered.length > 0 ? ordered : orderedBasis), "utf8")
+    .digest("hex");
+}
+
 export class PublicationService {
   private readonly store: HistorianStore;
   private readonly nowMs: () => number;
@@ -173,15 +222,26 @@ export class PublicationService {
   }): void {
     const { runtimeSessionId, boundary, safePrefix, analysis, outcome } = input;
 
+    // iris_agent#45: production Historian CANNOT publish without the
+    // Context-owned read/claim port. The old Session-semantic fallback
+    // (no unit views, Session-derived provenance) is prohibited by v13 —
+    // fail closed instead of degrading.
+    if (this.historyPort === undefined) {
+      throw new HistorianProvenanceError(
+        runtimeSessionId,
+        `cannot publish without a ContextHistoryReadPort (iris_agent#45 fail closed) ` +
+          `for session ${runtimeSessionId}`,
+      );
+    }
+
     // Build the immutable compartment from the VERIFIED safe prefix.
     const nextSequence = this.store.maxCompartmentSequence(runtimeSessionId) + 1;
 
     // R3 (anti-echo):把 Session-safe-prefix 的 entrySeq 范围映射到 Context
     // 单元窄视图,使 EvidenceSet 携带 evidenceBasis/derivedOnly(derived-only
-    // 内容不产生新 Evidence)。historyPort 未接线 → unitViews 缺省,保持旧
-    // 行为(向后兼容)。
+    // 内容不产生新 Evidence)。
     let unitViews: HistorianUnitView[] | undefined;
-    if (this.historyPort !== undefined && safePrefix.length > 0) {
+    if (safePrefix.length > 0) {
       const first = safePrefix[0];
       const last = safePrefix[safePrefix.length - 1];
       if (first !== undefined && last !== undefined) {
@@ -295,6 +355,14 @@ export class PublicationService {
     unitViews?: HistorianUnitView[],
   ): string {
     const evidence = built.evidence;
+    // Defense in depth: commitSafePrefix already requires the port; the
+    // builder itself never runs without one.
+    if (this.historyPort === undefined) {
+      throw new HistorianProvenanceError(
+        built.compartment.runtimeSessionId,
+        "cannot build a Publication without a ContextHistoryReadPort (iris_agent#45 fail closed)",
+      );
+    }
     const basis =
       evidence.evidenceBasis !== undefined
         ? evidence.evidenceBasis.map((ref) => ({
@@ -306,22 +374,26 @@ export class PublicationService {
             ...(ref.derivationRefs !== undefined ? { derivationRefs: ref.derivationRefs } : {}),
           }))
         : [];
-    // contextRange 覆盖本批 Context 单元(unitViews 优先;退化到 basis;
-    // 两者皆空 = 纯 derived-only 批,仍给合法最小范围 1..1,绝不为 0)。
+    // contextRange 覆盖本批 Context 单元(unitViews 优先;退化到 basis)。
+    // iris_agent#45: 两者皆空 = 没有任何已提交 Context 批 → FAIL CLOSED
+    // (绝不伪造 1..1 范围)。
     const rangeSeqs = (unitViews ?? []).map((u) => u.contextSeq);
+    const basisSeqRefs = basis.map((b) => b.contextSeq);
+    if (rangeSeqs.length === 0 && basisSeqRefs.length === 0) {
+      throw new HistorianProvenanceError(
+        built.compartment.runtimeSessionId,
+        `no committed Context units or basis refs for the claimed batch ` +
+          `(session ${built.compartment.runtimeSessionId}); refusing to fabricate a Context range`,
+      );
+    }
     const fromContextSeq =
-      rangeSeqs.length > 0
-        ? Math.min(...rangeSeqs)
-        : basis.length > 0
-          ? Math.min(...basis.map((b) => b.contextSeq))
-          : 1;
-    const toContextSeq =
-      rangeSeqs.length > 0
-        ? Math.max(...rangeSeqs)
-        : basis.length > 0
-          ? Math.max(...basis.map((b) => b.contextSeq))
-          : 1;
-    const envelope = {
+      rangeSeqs.length > 0 ? Math.min(...rangeSeqs) : Math.min(...basisSeqRefs);
+    const toContextSeq = rangeSeqs.length > 0 ? Math.max(...rangeSeqs) : Math.max(...basisSeqRefs);
+    // iris_agent#45: rangeHash = canonical hash of the EXACT ordered unit
+    // identities (contextSeq, unitId, runtimeEventId, contentHash) — never
+    // the Session source-range hash.
+    const rangeHash = canonicalUnitRangeHash(unitViews ?? [], basis);
+    const envelopeBase = {
       schemaVersion: "historian-publication-v2",
       // 0.2.0 schema 要求 format: uuid;确定性派生(sha256 of
       // session:seq)保证跨重启稳定、可被 iris_memory 强校验通过。
@@ -330,17 +402,11 @@ export class PublicationService {
       ),
       sourceSequence: publicationSequence,
       publishedAt: now,
-      payloadHash: createHash("sha256")
-        .update(
-          `${built.compartment.sourceRangeHash}:${basis.map((b) => b.contextUnitId).join(",")}`,
-          "utf8",
-        )
-        .digest("hex"),
       contextRange: {
-        contextLineageId: `identity-${built.compartment.runtimeSessionId}`,
+        contextLineageId: this.historyPort.lineageId(),
         fromContextSeq,
         toContextSeq,
-        rangeHash: built.compartment.sourceRangeHash,
+        rangeHash,
       },
       semanticSourceVersion: "context-unit-v1",
       compartmentCount: 1,
@@ -350,6 +416,14 @@ export class PublicationService {
       derivedOnly: evidence.derivedOnly ?? basis.length === 0,
       summary: built.compartment.content.slice(0, 4000),
     };
+    // iris_agent#45: payloadHash = canonical sha256 over the COMPLETE
+    // versioned payload, with the payloadHash field blanked (documented
+    // no-self-reference rule). Any provenance change (basis, disposition,
+    // content hash, derivation refs, range, summary) changes it.
+    const payloadHash = createHash("sha256")
+      .update(JSON.stringify({ ...envelopeBase, payloadHash: "" }), "utf8")
+      .digest("hex");
+    const envelope = { ...envelopeBase, payloadHash };
     return JSON.stringify(envelope);
   }
 

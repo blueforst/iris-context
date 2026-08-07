@@ -25,6 +25,7 @@ import assert from "node:assert/strict";
 import type { SessionTreeEntry } from "@earendil-works/pi-agent-core";
 
 import { HistorianManager, historianSchedulerOptions } from "../src/historian/historian-manager.js";
+import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
 import {
   HistorianQueue,
   type HistorianJob,
@@ -32,6 +33,43 @@ import {
 } from "../src/historian/historian-queue.js";
 import { HistorianStore } from "../src/historian/historian-store.js";
 import { SessionHistoryReadPort } from "../src/historian/history-read-port.js";
+
+/** iris_agent#45: production Historian cannot publish without the Context
+ * read/claim port — tests wire a stub port with committed units. */
+function stubHistoryPort(): ContextHistoryReadPort {
+  return {
+    getMaterializedBoundary() {
+      return {
+        representedThroughContextSeq: 0,
+        representedThroughEntrySeq: 0,
+        m0ContentHash: null,
+        lineageStatus: "ok",
+        providerProfileId: "mock",
+      };
+    },
+    listUnitsForHistorian() {
+      return [];
+    },
+    listUnitsForHistorianByEntrySeq(_r: string, fromEntrySeq: number, toEntrySeq: number) {
+      const units: import("../src/historian/anti-echo.js").HistorianUnitView[] = [];
+      for (let seq = fromEntrySeq; seq <= toEntrySeq; seq++) {
+        units.push({
+          contextUnitId: `unit-${seq}`,
+          contextSeq: seq,
+          runtimeEventId: `evt-${seq}`,
+          unitType: "input",
+          disposition: "include",
+          contentHash: "b".repeat(64),
+          derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+        });
+      }
+      return units;
+    },
+    lineageId() {
+      return "identity-b8b9";
+    },
+  };
+}
 
 const SESSION = "iris-runtime-2026-08-01-1";
 
@@ -82,6 +120,7 @@ function managerFixture(options: {
   const manager = new HistorianManager({
     store,
     readPort: port,
+    historyPort: stubHistoryPort(),
     modelProviderProfile: "opencode/deepseek-v4-flash",
     maxQueuedJobs: options.maxQueuedJobs ?? 256,
     ...(options.maxSuccessors !== undefined ? { maxSuccessors: options.maxSuccessors } : {}),
@@ -183,6 +222,7 @@ test("B9-AC5/AC8: durable intent persists BEFORE scheduling; crash → restart r
     const manager1 = new HistorianManager({
       store: store1,
       readPort: port1,
+      historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 2,
     });
@@ -201,6 +241,7 @@ test("B9-AC5/AC8: durable intent persists BEFORE scheduling; crash → restart r
     const manager2 = new HistorianManager({
       store: store2,
       readPort: port2,
+      historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 2,
     });
@@ -244,6 +285,7 @@ test("B9-AC2/AC8: thousands of durable closing intents do not grow the bounded s
     const manager = new HistorianManager({
       store,
       readPort: port,
+      historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 8,
       durableRefillBatchSize: 16,
@@ -290,6 +332,7 @@ test("B9-AC4: refill is fair and deterministic — FIFO by finalizationRequested
     const manager = new HistorianManager({
       store,
       readPort: port,
+      historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 16,
       durableRefillBatchSize: 16,
@@ -356,6 +399,7 @@ test("B9-AC6: duplicate wrapup/recovery requests → exactly one terminal transi
     const manager = new HistorianManager({
       store,
       readPort: port,
+      historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 4,
     });
@@ -447,6 +491,7 @@ test("B9-AC3/AC8: worker failure keeps the durable intent; final commit still ha
     const manager = new HistorianManager({
       store,
       readPort: port,
+      historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 2,
       maxAttempts: 3,
@@ -465,6 +510,7 @@ test("B9-AC3/AC8: worker failure keeps the durable intent; final commit still ha
     const manager2 = new HistorianManager({
       store: store2,
       readPort: port2,
+      historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 2,
     });

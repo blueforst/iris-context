@@ -57,7 +57,18 @@ function fakeHistoryPort(): ContextHistoryReadPort {
       providerProfileId: "mock",
     }),
     listUnitsForHistorian: () => [],
-    listUnitsForHistorianByEntrySeq: () => [],
+    listUnitsForHistorianByEntrySeq: () => [
+      {
+        contextUnitId: "unit-1",
+        contextSeq: 1,
+        runtimeEventId: "evt-1",
+        unitType: "input",
+        disposition: "include",
+        contentHash: "d".repeat(64),
+        derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+      },
+    ],
+    lineageId: () => "identity-r4",
   };
 }
 

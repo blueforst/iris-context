@@ -143,7 +143,32 @@ async function producePublication(): Promise<{
   assert.ok(outcome.ok, "fixture range must validate");
 
   store.begin();
-  new PublicationService({ store }).commitSafePrefix({
+  // iris_agent#45: publications require the Context read/claim port.
+  new PublicationService({
+    store,
+    historyPort: {
+      getMaterializedBoundary: () => ({
+        representedThroughContextSeq: 0,
+        representedThroughEntrySeq: 0,
+        m0ContentHash: null,
+        lineageStatus: "ok",
+        providerProfileId: "mock",
+      }),
+      listUnitsForHistorian: () => [],
+      listUnitsForHistorianByEntrySeq: () => [
+        {
+          contextUnitId: "unit-1",
+          contextSeq: 1,
+          runtimeEventId: "evt-1",
+          unitType: "input",
+          disposition: "include",
+          contentHash: "f".repeat(64),
+          derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+        },
+      ],
+      lineageId: () => "identity-pin",
+    },
+  }).commitSafePrefix({
     runtimeSessionId: SESSION,
     boundary: frozen.snapshot,
     safePrefix: page.entries,

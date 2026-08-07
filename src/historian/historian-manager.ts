@@ -540,6 +540,10 @@ export class HistorianManager {
             store: this.store,
             nowMs: this.nowMs,
             claimLeaseMs: this.claimLeaseMs,
+            // iris_agent#45: the wrapup publication path needs the SAME
+            // Context read/claim port as the incremental path (fail closed
+            // otherwise — never publish from Session semantics).
+            ...(this.historyPort !== undefined ? { historyPort: this.historyPort } : {}),
             recallProjections: projections,
           });
     service.commitSafePrefix({
