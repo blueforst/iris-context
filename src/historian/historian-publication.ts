@@ -227,8 +227,9 @@ export class PublicationService {
     // (no unit views, Session-derived provenance) is prohibited by v13 —
     // fail closed instead of degrading.
     if (this.historyPort === undefined) {
-      throw new Error(
-        `historian publication: cannot publish without a ContextHistoryReadPort (iris_agent#45 fail closed) ` +
+      throw new HistorianProvenanceError(
+        runtimeSessionId,
+        `cannot publish without a ContextHistoryReadPort (iris_agent#45 fail closed) ` +
           `for session ${runtimeSessionId}`,
       );
     }

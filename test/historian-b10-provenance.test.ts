@@ -27,6 +27,7 @@ import { freezeBoundary } from "../src/historian/historian-boundary.js";
 import { HistorianRunner } from "../src/historian/historian-runner.js";
 import { createPublicationCommitHook } from "../src/historian/historian-publication.js";
 import { HistorianStore } from "../src/historian/historian-store.js";
+import { canonicalUnitRangeHash } from "../src/historian/historian-publication.js";
 import { SessionHistoryReadPort } from "../src/historian/history-read-port.js";
 import type { HistorianUnitView } from "../src/historian/anti-echo.js";
 
@@ -388,4 +389,29 @@ test("B10-AC8: derived-only with basis keeps a REAL range from the basis refs", 
     fx.store.close();
     rmSync(fx.dir, { recursive: true, force: true });
   }
+});
+
+test("B10-AC3b: canonicalUnitRangeHash basis-only branch — deterministic over ordered basis refs, sensitive to content", () => {
+  const basisA = [
+    {
+      contextUnitId: "unit-1",
+      contextSeq: 1,
+      runtimeEventId: "evt-1",
+      contentHash: "a".repeat(64),
+    },
+    {
+      contextUnitId: "unit-2",
+      contextSeq: 2,
+      runtimeEventId: "evt-2",
+      contentHash: "b".repeat(64),
+    },
+  ];
+  const basisShuffled = [basisA[1], basisA[0]];
+  const basisMutated = [{ ...basisA[0], contentHash: "c".repeat(64) }, basisA[1]];
+  const h1 = canonicalUnitRangeHash([], basisA as never);
+  const h2 = canonicalUnitRangeHash([], basisShuffled as never);
+  const h3 = canonicalUnitRangeHash([], basisMutated as never);
+  assert.equal(h1, h2, "order-independent canonical hash (sorted by contextSeq)");
+  assert.notEqual(h1, h3, "content change ripples to the canonical range hash");
+  assert.ok(!h1.includes("unit-"), "hash is a digest, not a serialization");
 });
