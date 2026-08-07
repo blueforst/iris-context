@@ -108,12 +108,15 @@ export interface HistorianQueueOptions {
   /** Clock for lease/retry timestamps. */
   nowMs?: () => number;
   /**
-   * iris_agent#65: persistence hooks so retry accounting survives crash and
-   * restart. onAttemptPersist is invoked on every successful requeue (the
-   * durable counter must advance with the in-memory attempt); onExhausted is
-   * invoked exactly when a job's retry budget is exhausted, so the durable
-   * session can be marked retry-exhausted and excluded from refill. Both are
-   * optional — without them the queue keeps its pre-#65 in-memory behavior.
+   * iris_agent#65/#75: persistence hooks so retry accounting survives crash
+   * and restart. onAttemptPersist is invoked for EVERY completed failed
+   * attempt, BEFORE the in-memory retry decision (requeue or no_capacity
+   * deferral), so the durable counter advances even when the scheduler is
+   * at capacity and a crash between accounting and requeue cannot reset
+   * the budget; onExhausted is invoked exactly when a job's retry budget is
+   * exhausted, so the durable session can be marked retry-exhausted and
+   * excluded from refill. Both are optional — without them the queue keeps
+   * its pre-#65 in-memory behavior.
    */
   onAttemptPersist?: (runtimeSessionId: string, attempts: number) => void;
   onExhausted?: (job: HistorianJob) => void;
@@ -345,24 +348,37 @@ export class HistorianQueue {
    * "no_capacity" (the queue is full: the job is NOT lost — its durable
    * closing intent remains in the store and the deterministic backlog
    * refill re-admits it; the failure is deferred, not permanent).
+   *
+   * iris_agent#75: the failed attempt is consumed DURABLY first, before the
+   * in-memory decision. The retry bound must count failed executions, not
+   * only failures that happened to find an in-memory retry slot — a full
+   * queue or a crash between accounting and requeue must never let the same
+   * durable attempt number execute repeatedly.
    */
   requeue(job: HistorianJob): "requeued" | "exhausted" | "no_capacity" {
-    if (job.attempt + 1 >= this.maxAttempts) {
+    const nextAttempt = job.attempt + 1;
+    if (nextAttempt >= this.maxAttempts) {
       // iris_agent#65: the retry budget is exhausted — persist the terminal
       // durable marker BEFORE the in-memory permanent-failure accounting so
       // a crash right after this point cannot resurrect the finalizer with a
-      // fresh attempt-zero job.
+      // fresh attempt-zero job. Exhaustion wins over capacity: an exhausted
+      // finalizer is never merely deferred.
       this.onExhausted?.(job);
       return "exhausted";
     }
+    // iris_agent#75: durably advance the attempt counter for THIS failed
+    // execution BEFORE deciding how to retry. The durable backlog refill
+    // re-admits from this persisted value, so neither a full queue
+    // (no_capacity) nor a crash between this persist and the in-memory
+    // requeue can reset the budget or repeat attempt N.
+    this.onAttemptPersist?.(job.runtimeSessionId, nextAttempt);
     if (this.pending.length >= this.maxQueuedJobs) {
+      // no_capacity: the queue is full — the failure is deferred, NOT free.
+      // The durable attempt already advanced to N+1, so the refill re-admits
+      // the NEXT attempt, never a repeat of attempt N.
       this.deferred += 1;
       return "no_capacity";
     }
-    const nextAttempt = job.attempt + 1;
-    // iris_agent#65: advance the durable attempt counter in lockstep with the
-    // in-memory job (crash/restart resumes the same budget).
-    this.onAttemptPersist?.(job.runtimeSessionId, nextAttempt);
     this.pending.push({
       ...job,
       attempt: nextAttempt,
