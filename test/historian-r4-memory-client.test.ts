@@ -160,7 +160,6 @@ test("r4 memory client: success delivers with real receipt hash", async () => {
     seedOutbox(store, SAMPLE_ENVELOPE);
     memory.queue({ ok: true, receiptHash: "real-receipt-123" });
     await manager.drainOutbox();
-    // drainOutbox 是 async fire-and-forget — 等待事件循环
     const row = outboxState(store, `publication-${SESSION}-1`);
     assert.equal(row.state, "delivered");
     assert.equal(row.delivered_receipt_hash, "real-receipt-123");

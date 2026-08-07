@@ -79,7 +79,7 @@ export interface HistorianManagerOptions {
   /**
    * R4: Memory Client (投递 publication 到 iris_memory)。缺省 = 未接线:
    * iris_agent#46 —— outbox 行永不标记 delivered,health.memoryDelivery
-   * 报 degraded;只有真实 receipt 才授权 delivered / reclaim。
+   * 报 "unavailable";只有真实 receipt 才授权 delivered / reclaim。
    */
   memoryClient?: MemoryClientPort;
 }
