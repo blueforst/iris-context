@@ -7,6 +7,12 @@
  * 所有针对 main 依赖集的适配点均以内联中文注释（"移植说明/R3-P0"）标注。
  * 后续 R3-P1..P4 工作项负责对齐 v13 规格的增量（ContextHistoryReadPort
  * m0-clamp 等）。
+ *
+ * iris_agent#66：本端口（RuntimeSessionHistoryReadPort / SessionHistoryReadPort）
+ * 是 **recovery/audit/raw-archive-only** 接口 —— Historian 的正常语义输入
+ * 只允许 Context-owned 的 ContextHistoryReadPort（committed ContextMessageUnit）。
+ * 生产 HistorianManager/Runner 构造不接受本端口（类型层面无法接入），
+ * 只有显式 recovery/audit 路径（以及测试 fixture）可以使用它。
  */
 import type { SessionTreeEntry } from "@earendil-works/pi-agent-core";
 

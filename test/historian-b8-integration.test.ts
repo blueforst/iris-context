@@ -525,6 +525,29 @@ test("iris_agent#66: Evidence identity is independent of Session segmentation â€
       "lineage id from the Context port",
     );
     assert.notEqual(parsedA.contextRange.contextLineageId, `identity-${SESSION}`);
+
+    // Rollover: a SECOND session (new runtimeSessionId) publishes against
+    // the SAME lineage â€” the envelope's Evidence identity (lineage id) is
+    // identical, never re-synthesized from the new session id.
+    const SESSION_B = "iris-runtime-2026-08-01-2";
+    await managerA.triggerIncremental(SESSION_B);
+    await managerA.pumpOnce();
+    const envB = store
+      .raw()
+      .prepare(
+        "SELECT payload_json FROM publication_outbox WHERE runtime_session_id = ? ORDER BY outbox_sequence DESC LIMIT 1",
+      )
+      .get(SESSION_B) as { payload_json: string | null } | undefined;
+    assert.ok(envB?.payload_json, "session B published after rollover");
+    const parsedB = JSON.parse(envB.payload_json) as {
+      contextRange: { contextLineageId: string };
+    };
+    assert.equal(
+      parsedB.contextRange.contextLineageId,
+      parsedA.contextRange.contextLineageId,
+      "rollover session keeps the SAME lineage identity",
+    );
+    assert.notEqual(parsedB.contextRange.contextLineageId, `identity-${SESSION_B}`);
     managerA.close();
     store.close();
   } finally {
