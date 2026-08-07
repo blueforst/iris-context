@@ -580,13 +580,10 @@ test("iris_agent#65: retry exhaustion is DURABLE — refill/recovery cannot rese
   const dir = mkdtempSync(join(tmpdir(), "iris-b65-exhaust-"));
   try {
     const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
-    const mutable = [u("u-1", null, "permanently failing")];
-    const port = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
     // maxAttempts=3: attempt 0,1,2 run and fail; the third failure exhausts.
     let now = 1_000_000;
     const manager = new HistorianManager({
       store,
-      readPort: port,
       historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 2,
@@ -622,7 +619,6 @@ test("iris_agent#65: retry exhaustion is DURABLE — refill/recovery cannot rese
     const store2 = HistorianStore.open({ databasePath: join(dir, "historian.db") });
     const manager2 = new HistorianManager({
       store: store2,
-      readPort: port,
       historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 2,
@@ -666,11 +662,9 @@ test("iris_agent#65: unrelated closing sessions stay fair while one session is e
   const dir = mkdtempSync(join(tmpdir(), "iris-b65-fair-"));
   try {
     const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
-    const mutable = [u("u-1", null, "ok")];
-    const port = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
+    let now = 1_000_000;
     const manager = new HistorianManager({
       store,
-      readPort: port,
       historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 4,
@@ -678,7 +672,6 @@ test("iris_agent#65: unrelated closing sessions stay fair while one session is e
       nowMs: () => now,
     });
     // Exhaust session A by making only it fail permanently.
-    let now = 1_000_000;
     const realExecute = (
       manager as unknown as {
         executeJob: (job: { runtimeSessionId: string }) => Promise<{ ok: boolean }>;
