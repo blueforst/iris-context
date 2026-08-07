@@ -65,6 +65,18 @@ export interface HistorianManagerOptions {
     runtimeSessionId: string,
   ) => import("./historian-assessment.js").InvocationMemoryRecallProjection[];
   /**
+   * iris_agent#53: terminal-successor registry bound (defaults to
+   * maxQueuedJobs). The successors map is memory too: it gets its own
+   * explicit capacity model.
+   */
+  maxSuccessors?: number;
+  /**
+   * iris_agent#53: durable-backlog refill batch size — how many closing
+   * sessions are re-admitted per refill pass, FIFO by finalization intent
+   * time (fair and deterministic).
+   */
+  durableRefillBatchSize?: number;
+  /**
    * R4:Memory Client(投递 publication 到 iris_memory)。缺省 = 未接线,
    * drainOutbox 退化为旧行为(伪 receipt,仅供 lease 恢复验证)。
    */
@@ -77,6 +89,18 @@ export interface HistorianHealth {
   sessionCount: number;
   publicationCount: number;
   outboxPending: number;
+  /**
+   * iris_agent#53: scheduler saturation in [0,1] — (pending + running +
+   * successors) / maxQueuedJobs. 1 means the in-memory scheduler is full;
+   * new finalization intents are being deferred to the durable backlog.
+   */
+  saturation: number;
+  /** iris_agent#53: durable finalization intents awaiting completion. */
+  durableBacklog: number;
+  /** iris_agent#53: age in ms of the oldest pending finalization intent (0 when none). */
+  oldestFinalizationIntentAgeMs: number;
+  /** iris_agent#53: permanently failed (retry-exhausted) jobs. */
+  retryExhausted: number;
 }
 
 export class HistorianManager {
@@ -92,7 +116,13 @@ export class HistorianManager {
   private readonly historyPort: ContextHistoryReadPort | undefined;
   private readonly memoryClient: MemoryClientPort | undefined;
   private readonly claimLeaseMs: number;
+  /** iris_agent#53: successor-registry bound (memory model). */
+  private readonly maxSuccessors: number;
+  /** iris_agent#53: durable backlog refill batch size (fair, FIFO). */
+  private readonly durableRefillBatchSize: number;
+  private readonly maxQueuedJobs: number;
   private draining = false;
+  private refilling = false;
 
   constructor(options: HistorianManagerOptions) {
     this.store = options.store;
@@ -103,8 +133,12 @@ export class HistorianManager {
     this.historyPort = options.historyPort;
     this.memoryClient = options.memoryClient;
     this.claimLeaseMs = options.claimLeaseMs ?? 60_000;
+    this.maxQueuedJobs = options.maxQueuedJobs ?? 256;
+    this.maxSuccessors = options.maxSuccessors ?? this.maxQueuedJobs;
+    this.durableRefillBatchSize = options.durableRefillBatchSize ?? 16;
     this.queue = new HistorianQueue({
-      maxQueuedJobs: options.maxQueuedJobs ?? 256,
+      maxQueuedJobs: this.maxQueuedJobs,
+      maxSuccessors: this.maxSuccessors,
       maxAttempts: options.maxAttempts ?? 8,
       nowMs: this.nowMs,
     });
@@ -179,12 +213,16 @@ export class HistorianManager {
       status: "active" as const,
       updatedAt: new Date(this.nowMs()).toISOString(),
     };
-    return this.queue.enqueue({
-      priority: "highest",
-      runtimeSessionId,
-      boundary: frozen.snapshot,
-      sessionState: state,
-    });
+    // iris_agent#53: highest-priority increments are never finalizers, so
+    // they cannot be deferred; "refused" only occurs for manual jobs.
+    return (
+      this.queue.enqueue({
+        priority: "highest",
+        runtimeSessionId,
+        boundary: frozen.snapshot,
+        sessionState: state,
+      }) !== "refused"
+    );
   }
 
   /** Rollover wrapup: finalize the OLD Session at `normal` priority.
@@ -219,12 +257,18 @@ export class HistorianManager {
       updatedAt: new Date(this.nowMs()).toISOString(),
     };
     this.store.upsertSessionState(closing);
-    return this.queue.enqueue({
+    // iris_agent#53: a deferred_durable outcome is still success for the
+    // caller — the authoritative closing intent IS durable and the backlog
+    // refill re-admits the finalizer when the bounded scheduler has
+    // capacity. Only a refusal (impossible for finalizers) means "not
+    // arranged".
+    const outcome = this.queue.enqueue({
       priority: "normal",
       runtimeSessionId,
       boundary: frozen.snapshot,
       sessionState: closing,
     });
+    return outcome !== "refused";
   }
 
   /** Startup recovery: re-enqueue `low` retries for closed sessions whose
@@ -268,6 +312,9 @@ export class HistorianManager {
   /** Drain ONE job (the background pump calls this repeatedly). */
   async pumpOnce(): Promise<void> {
     await this.worker.runOnce();
+    // iris_agent#53: after the worker drains (or finds nothing runnable),
+    // refill the bounded scheduler from the durable finalization backlog.
+    await this.refill();
   }
 
   /**
@@ -341,13 +388,66 @@ export class HistorianManager {
     const sessionCount = this.store.countSessions();
     const publicationCount = this.store.countPublications();
     const outboxPending = this.store.countOutboxPending();
+    const stats = this.queue.stats();
+    const occupancy = stats.pending + stats.running + stats.successors;
+    const durableBacklog = this.store.countClosingSessions();
+    const oldestIntentMs = this.store.oldestClosingRequestedAtMs();
     return {
       ready: !this.draining,
-      queue: this.queue.stats(),
+      queue: stats,
       sessionCount,
       publicationCount,
       outboxPending,
+      // iris_agent#53: saturation in [0,1] against the in-memory scheduler
+      // bound. 1 => new finalization intents defer to the durable backlog.
+      saturation: this.maxQueuedJobs > 0 ? Math.min(1, occupancy / this.maxQueuedJobs) : 0,
+      durableBacklog,
+      oldestFinalizationIntentAgeMs:
+        oldestIntentMs === undefined ? 0 : Math.max(0, this.nowMs() - oldestIntentMs),
+      retryExhausted: stats.failedPermanent,
     };
+  }
+
+  /**
+   * iris_agent#53: fair, deterministic durable-backlog refill. Re-admits up
+   * to `durableRefillBatchSize` closing sessions (FIFO by finalization
+   * intent time, then session id) into the bounded scheduler, skipping
+   * sessions that already have a pending/running/successor job. A deferred
+   * finalization intent therefore always has a guaranteed execution path
+   * without ever growing memory. Called when the worker drains a job.
+   * Returns a promise so callers (pump loop and tests) can await the pass.
+   */
+  refill(): Promise<void> {
+    if (this.refilling) {
+      return Promise.resolve();
+    }
+    this.refilling = true;
+    return (async () => {
+      try {
+        const closing = this.store.listClosingSessions(this.durableRefillBatchSize);
+        for (const session of closing) {
+          if (this.queue.hasSession(session.runtimeSessionId)) {
+            continue;
+          }
+          const frozen = await this.freezeCurrent(session.runtimeSessionId);
+          if (frozen === null) {
+            continue;
+          }
+          const outcome = this.queue.enqueue({
+            priority: "normal",
+            runtimeSessionId: session.runtimeSessionId,
+            boundary: frozen.snapshot,
+            sessionState: session,
+          });
+          if (outcome === "deferred_durable" || outcome === "refused") {
+            // Capacity still full — stop this pass; the next pump refills.
+            break;
+          }
+        }
+      } finally {
+        this.refilling = false;
+      }
+    })();
   }
 
   /** Recomp maintenance (manual priority). */
@@ -362,12 +462,14 @@ export class HistorianManager {
       status: "active" as const,
       updatedAt: new Date(this.nowMs()).toISOString(),
     };
-    return this.queue.enqueue({
-      priority: "manual",
-      runtimeSessionId,
-      boundary: frozen.snapshot,
-      sessionState: state,
-    });
+    return (
+      this.queue.enqueue({
+        priority: "manual",
+        runtimeSessionId,
+        boundary: frozen.snapshot,
+        sessionState: state,
+      }) === "queued"
+    );
   }
 
   /** Shutdown: stop draining, drain the queue, close the store. */
@@ -546,4 +648,25 @@ export class HistorianManager {
       return { ok: false, errorCode: error instanceof Error ? error.message : "unknown" };
     }
   }
+}
+
+/**
+ * iris_agent#53: map the configuration-backed historian.queue section onto
+ * the bounded-scheduler options. Production assembly (Host) and tests both
+ * go through this so the capacity model is single-sourced and tested at
+ * boundary values. Missing keys fall back to the documented defaults.
+ */
+export function historianSchedulerOptions(
+  config: import("../config/schema.js").HistorianConfig | undefined,
+): Pick<
+  HistorianManagerOptions,
+  "maxQueuedJobs" | "maxSuccessors" | "maxAttempts" | "durableRefillBatchSize"
+> {
+  const queue = config?.queue;
+  return {
+    maxQueuedJobs: queue?.max_pending_jobs ?? 256,
+    maxSuccessors: queue?.max_successors ?? queue?.max_pending_jobs ?? 256,
+    maxAttempts: queue?.max_attempts ?? 8,
+    durableRefillBatchSize: queue?.durable_refill_batch_size ?? 16,
+  };
 }

@@ -55,15 +55,26 @@ export interface HistorianStoreOptions {
 
 const SESSION_STATE_SQL = {
   select:
-    "SELECT runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, updated_at FROM session_state WHERE runtime_session_id = ?",
+    "SELECT runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, updated_at FROM session_state WHERE runtime_session_id = ?",
   upsert:
-    "INSERT INTO session_state (runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, updated_at) " +
-    "VALUES (?, ?, ?, ?, ?) " +
+    "INSERT INTO session_state (runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, updated_at) " +
+    "VALUES (?, ?, ?, ?, ?, ?) " +
     "ON CONFLICT(runtime_session_id) DO UPDATE SET " +
     "processed_through_entry_seq = excluded.processed_through_entry_seq, " +
     "status = excluded.status, " +
     "observed_head_entry_seq = excluded.observed_head_entry_seq, " +
+    // iris_agent#53: the finalization intent timestamp is set ONCE (first
+    // transition into closing) and never reset by re-enqueues / recovery /
+    // status flapping — it feeds readiness age and FIFO backlog refill.
+    "finalization_requested_at = COALESCE(session_state.finalization_requested_at, excluded.finalization_requested_at), " +
     "updated_at = excluded.updated_at",
+  listClosing:
+    "SELECT runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, updated_at " +
+    "FROM session_state WHERE status = 'closing' " +
+    "ORDER BY finalization_requested_at ASC, runtime_session_id ASC LIMIT ?",
+  countClosing: "SELECT COUNT(*) AS count FROM session_state WHERE status = 'closing'",
+  oldestClosingRequestedAt:
+    "SELECT MIN(finalization_requested_at) AS oldest FROM session_state WHERE status = 'closing'",
 };
 
 const BOUNDARY_SQL = {
@@ -140,6 +151,7 @@ export class HistorianStore {
           processed_through_entry_seq: number;
           status: string;
           observed_head_entry_seq: number | null;
+          finalization_requested_at: string | null;
           updated_at: string;
         }
       | undefined;
@@ -153,20 +165,71 @@ export class HistorianStore {
       ...(row.observed_head_entry_seq === null
         ? {}
         : { observedHeadEntrySeq: row.observed_head_entry_seq }),
+      ...(row.finalization_requested_at === null
+        ? {}
+        : { finalizationRequestedAt: row.finalization_requested_at }),
       updatedAt: row.updated_at,
     };
   }
 
   upsertSessionState(state: HistorianSessionState): void {
-    this.db
-      .prepare(SESSION_STATE_SQL.upsert)
-      .run(
-        state.runtimeSessionId,
-        state.processedThroughEntrySeq,
-        state.status,
-        state.observedHeadEntrySeq ?? null,
-        state.updatedAt,
-      );
+    this.db.prepare(SESSION_STATE_SQL.upsert).run(
+      state.runtimeSessionId,
+      state.processedThroughEntrySeq,
+      state.status,
+      state.observedHeadEntrySeq ?? null,
+      // iris_agent#53: the intent timestamp is only meaningful (and only
+      // ever set) when the session is/was closing; the upsert's COALESCE
+      // keeps the FIRST recorded time.
+      state.status === "closing" ? state.updatedAt : null,
+      state.updatedAt,
+    );
+  }
+
+  /**
+   * iris_agent#53: durable finalization backlog, FIFO by intent time —
+   * the fair, deterministic refill source for the bounded in-memory
+   * scheduler. Returns up to `limit` closing sessions ordered by
+   * finalization_requested_at (then session id for full determinism).
+   */
+  listClosingSessions(limit = 16): HistorianSessionState[] {
+    const rows = this.db.prepare(SESSION_STATE_SQL.listClosing).all(limit) as Array<{
+      runtime_session_id: string;
+      processed_through_entry_seq: number;
+      status: string;
+      observed_head_entry_seq: number | null;
+      finalization_requested_at: string | null;
+      updated_at: string;
+    }>;
+    return rows.map((row) => ({
+      runtimeSessionId: row.runtime_session_id,
+      processedThroughEntrySeq: row.processed_through_entry_seq,
+      status: row.status as HistorianSessionState["status"],
+      ...(row.observed_head_entry_seq === null
+        ? {}
+        : { observedHeadEntrySeq: row.observed_head_entry_seq }),
+      ...(row.finalization_requested_at === null
+        ? {}
+        : { finalizationRequestedAt: row.finalization_requested_at }),
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  /** iris_agent#53: durable finalization intents awaiting completion. */
+  countClosingSessions(): number {
+    const row = this.db.prepare(SESSION_STATE_SQL.countClosing).get() as { count: number };
+    return row.count;
+  }
+
+  /** iris_agent#53: oldest pending finalization intent epoch-ms (undefined when none). */
+  oldestClosingRequestedAtMs(): number | undefined {
+    const row = this.db.prepare(SESSION_STATE_SQL.oldestClosingRequestedAt).get() as
+      { oldest: string | null } | undefined;
+    if (row?.oldest === null || row?.oldest === undefined) {
+      return undefined;
+    }
+    const ms = Date.parse(row.oldest);
+    return Number.isNaN(ms) ? undefined : ms;
   }
 
   saveBoundarySnapshot(snapshot: HistorianBoundarySnapshot): void {
@@ -447,13 +510,14 @@ export class HistorianStore {
   listSessions(): HistorianSessionState[] {
     const rows = this.db
       .prepare(
-        "SELECT runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, updated_at FROM session_state ORDER BY updated_at",
+        "SELECT runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, updated_at FROM session_state ORDER BY updated_at",
       )
       .all() as unknown as Array<{
       runtime_session_id: string;
       processed_through_entry_seq: number;
       status: string;
       observed_head_entry_seq: number | null;
+      finalization_requested_at: string | null;
       updated_at: string;
     }>;
     return rows.map((row) => ({
@@ -463,6 +527,9 @@ export class HistorianStore {
       ...(row.observed_head_entry_seq === null
         ? {}
         : { observedHeadEntrySeq: row.observed_head_entry_seq }),
+      ...(row.finalization_requested_at === null
+        ? {}
+        : { finalizationRequestedAt: row.finalization_requested_at }),
       updatedAt: row.updated_at,
     }));
   }
