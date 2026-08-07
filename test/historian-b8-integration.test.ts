@@ -22,6 +22,7 @@ import type { SessionTreeEntry } from "@earendil-works/pi-agent-core";
 
 import { HistorianManager } from "../src/historian/historian-manager.js";
 import { HistorianStore } from "../src/historian/historian-store.js";
+import { FakeMemoryClient } from "../src/historian/memory-client.js";
 import { SessionHistoryReadPort } from "../src/historian/history-read-port.js";
 import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
 
@@ -118,6 +119,9 @@ function managerFixture(entries: SessionTreeEntry[]): {
     readPort: port,
     modelProviderProfile: "opencode/deepseek-v4-flash",
     historyPort: stubHistoryPort(),
+    // iris_agent#46: without a client no outbox row can be marked delivered;
+    // the B8 delivery assertions need a REAL receipt-capable client.
+    memoryClient: new FakeMemoryClient(),
   });
   return { manager, store, dir, mutable };
 }
@@ -144,8 +148,9 @@ test("B8: active incremental trigger", async () => {
       "cursor advanced",
     );
     // Delivery loop drains it.
-    const delivered = manager.drainOutbox();
-    assert.equal(delivered, 1);
+    const delivered = await manager.drainOutbox();
+    assert.equal(delivered.claimed, 1);
+    assert.equal(delivered.accepted, 1, "real receipt authorizes delivered");
     assert.equal(store.countOutboxPending(), 0, "outbox drained to delivered");
     const health = manager.health();
     assert.equal(health.ready, true);

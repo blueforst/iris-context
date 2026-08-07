@@ -101,6 +101,16 @@ export interface HistorianHealth {
   oldestFinalizationIntentAgeMs: number;
   /** iris_agent#53: permanently failed (retry-exhausted) jobs. */
   retryExhausted: number;
+  /**
+   * iris_agent#46: Memory Client wiring state. "unavailable" means outbox
+   * rows can NEVER be marked delivered (no fabricated receipts) and stay
+   * retryable; "configured" means delivery is possible.
+   */
+  memoryDelivery: "configured" | "unavailable";
+  /** iris_agent#46: count of caught delivery exceptions (never unhandled). */
+  deliveryErrors: number;
+  /** iris_agent#46: most recent delivery error (diagnostics). */
+  lastDeliveryError: string | undefined;
 }
 
 export class HistorianManager {
@@ -123,6 +133,9 @@ export class HistorianManager {
   private readonly maxQueuedJobs: number;
   private draining = false;
   private refilling = false;
+  /** iris_agent#46: delivery diagnostics (no unhandled rejections). */
+  private deliveryErrors = 0;
+  private lastDeliveryError: string | undefined;
 
   constructor(options: HistorianManagerOptions) {
     this.store = options.store;
@@ -318,40 +331,60 @@ export class HistorianManager {
   }
 
   /**
-   * Delivery loop: claim pending outbox rows and deliver via the Memory
-   * Client (R4). Success/conflict → delivered with the REAL receipt hash;
-   * validation/unsupported → quarantined; transient/unavailable → the claim
-   * lease expires and the row is re-claimed (crash-recoverable). Without a
-   * memoryClient the old fake-receipt cycle is kept (lease recovery proof).
+   * Delivery loop (iris_agent#46): claim pending outbox rows and deliver via
+   * the Memory Client. A row may become `delivered` ONLY from a validated
+   * real acceptance/duplicate receipt returned by iris_memory and bound to
+   * the exact publication idempotency identity — NEVER from a placeholder or
+   * from the absence of a client.
+   *
+   * - No memoryClient: rows stay retryable (claim lease expires and the row
+   *   is re-claimed); NOTHING is marked delivered; health/readiness exposes
+   *   the missing client.
+   * - Typed validation/version rejection → failed/quarantined by policy.
+   * - Thrown network/client exceptions are caught, classified and recorded
+   *   (no unhandled rejection); transient failures remain retryable.
+   * - Returns metrics that distinguish claimed vs completed outcomes.
    */
-  drainOutbox(batchSize = 10): number {
+  async drainOutbox(batchSize = 10): Promise<{
+    claimed: number;
+    accepted: number;
+    rejected: number;
+    deferred: number;
+  }> {
     const batch = this.service.claimBatch({ batchSize });
+    const metrics = { claimed: batch.length, accepted: 0, rejected: 0, deferred: 0 };
     if (this.memoryClient === undefined) {
-      for (const row of batch) {
-        this.service.markDelivered({
-          publicationId: row.publicationId,
-          receiptHash: `receipt-${row.outboxSequence}`,
-        });
-      }
-      return batch.length;
+      // iris_agent#46 P0: never fabricate receipts. Without a client every
+      // claimed row is deferred — the claim lease expires and the row is
+      // re-claimed later; it stays retryable and visible in health.
+      metrics.deferred = batch.length;
+      return metrics;
     }
     for (const row of batch) {
       if (row.payloadJson === undefined) {
         // 无 payload(旧行/未写 payload_json)→ 保留待重试,不误标 delivered。
+        metrics.deferred += 1;
         continue;
       }
-      void this.deliverOne(row);
+      const outcome = await this.deliverOne(row);
+      if (outcome === "accepted") {
+        metrics.accepted += 1;
+      } else if (outcome === "rejected") {
+        metrics.rejected += 1;
+      } else {
+        metrics.deferred += 1;
+      }
     }
-    return batch.length;
+    return metrics;
   }
 
-  /** 单条投递(异步;失败走 lease 过期重认领,不阻塞循环)。 */
+  /** 单条投递(await;失败分类记录,绝不 unhandled rejection)。 */
   private async deliverOne(row: {
     publicationId: string;
     payloadJson: string | null;
-  }): Promise<void> {
+  }): Promise<"accepted" | "rejected" | "deferred"> {
     if (row.payloadJson === null) {
-      return;
+      return "deferred";
     }
     let publication: unknown;
     try {
@@ -362,25 +395,48 @@ export class HistorianManager {
         errorCode: "invalid_payload_json",
         maxAttempts: 1,
       });
-      return;
+      return "rejected";
     }
-    const outcome = await this.memoryClient?.deliverPublication(publication);
+    let outcome: Awaited<ReturnType<MemoryClientPort["deliverPublication"]>> | undefined;
+    try {
+      outcome = await this.memoryClient?.deliverPublication(publication);
+    } catch (error) {
+      // iris_agent#46 P0: a thrown client/network error must never become an
+      // unhandled rejection. Classify it as transient — the row stays
+      // `delivering` and the claim lease expiry re-claims it.
+      this.recordDeliveryError(row.publicationId, error);
+      return "deferred";
+    }
     if (outcome === undefined) {
-      return;
+      return "deferred";
     }
     if (outcome.ok) {
+      // ONLY a real acceptance receipt from iris_memory authorizes
+      // `delivered` (iris_agent#46).
       this.service.markDelivered({
         publicationId: row.publicationId,
         receiptHash: outcome.receiptHash,
       });
-    } else if (outcome.error === "rejected") {
+      return "accepted";
+    }
+    if (outcome.error === "rejected") {
       this.service.markFailed({
         publicationId: row.publicationId,
         errorCode: "memory_rejected",
         maxAttempts: 1,
       });
+      return "rejected";
     }
     // unavailable / http_5xx:保持 delivering,lease 过期后重认领。
+    return "deferred";
+  }
+
+  /** iris_agent#46: 记录投递异常（无 unhandled rejection;诊断可见）。 */
+  private recordDeliveryError(publicationId: string, error: unknown): void {
+    this.deliveryErrors += 1;
+    this.lastDeliveryError = `publication ${publicationId}: ${String(
+      error instanceof Error ? error.message : error,
+    )}`;
   }
 
   /** Health/readiness snapshot. */
@@ -405,6 +461,11 @@ export class HistorianManager {
       oldestFinalizationIntentAgeMs:
         oldestIntentMs === undefined ? 0 : Math.max(0, this.nowMs() - oldestIntentMs),
       retryExhausted: stats.failedPermanent,
+      // iris_agent#46: missing Memory Client is visible in readiness; without
+      // one, outbox rows can never be marked delivered.
+      memoryDelivery: this.memoryClient === undefined ? "unavailable" : "configured",
+      deliveryErrors: this.deliveryErrors,
+      lastDeliveryError: this.lastDeliveryError,
     };
   }
 
