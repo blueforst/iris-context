@@ -77,8 +77,9 @@ export interface HistorianManagerOptions {
    */
   durableRefillBatchSize?: number;
   /**
-   * R4:Memory Client(投递 publication 到 iris_memory)。缺省 = 未接线,
-   * drainOutbox 退化为旧行为(伪 receipt,仅供 lease 恢复验证)。
+   * R4: Memory Client (投递 publication 到 iris_memory)。缺省 = 未接线:
+   * iris_agent#46 —— outbox 行永不标记 delivered,health.memoryDelivery
+   * 报 degraded;只有真实 receipt 才授权 delivered / reclaim。
    */
   memoryClient?: MemoryClientPort;
 }

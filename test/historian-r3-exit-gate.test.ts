@@ -603,10 +603,9 @@ test("R3 Exit Gate: publicationSequence 跨 incremental→wrapup 连续递增（
 // ---- 5. outbox 状态机（b5 已覆盖；此处对 wrapup 生成的 outbox 行做完整流转）----
 
 test("R3 Exit Gate: wrapup 生成的 outbox 行走完 claim→delivering→delivered", async () => {
-  const { manager, store, dir } = managerFixture(
-    [u("u-1", null, "hello"), c("c-1", "u-1")],
-    { memoryClient: new FakeMemoryClient() },
-  );
+  const { manager, store, dir } = managerFixture([u("u-1", null, "hello"), c("c-1", "u-1")], {
+    memoryClient: new FakeMemoryClient(),
+  });
   try {
     await manager.enqueueWrapup(SESSION);
     await manager.pumpOnce();
