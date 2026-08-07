@@ -23,6 +23,7 @@ import {
 } from "../src/historian/historian-manager.js";
 import { HistorianStore } from "../src/historian/historian-store.js";
 import { FakeMemoryClient } from "../src/historian/memory-client.js";
+import type { MemoryClientPort } from "../src/contracts/ports.js";
 import { SessionHistoryReadPort } from "../src/historian/history-read-port.js";
 import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
 
@@ -158,9 +159,7 @@ test("r4 memory client: success delivers with real receipt hash", async () => {
   try {
     seedOutbox(store, SAMPLE_ENVELOPE);
     memory.queue({ ok: true, receiptHash: "real-receipt-123" });
-    manager.drainOutbox();
-    // drainOutbox 是 async fire-and-forget — 等待事件循环
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await manager.drainOutbox();
     const row = outboxState(store, `publication-${SESSION}-1`);
     assert.equal(row.state, "delivered");
     assert.equal(row.delivered_receipt_hash, "real-receipt-123");
@@ -175,8 +174,7 @@ test("r4 memory client: conflict (409) is replay-safe delivered", async () => {
   try {
     seedOutbox(store, SAMPLE_ENVELOPE);
     memory.queue({ ok: true, receiptHash: "conflict-replay" });
-    manager.drainOutbox();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await manager.drainOutbox();
     const row = outboxState(store, `publication-${SESSION}-1`);
     assert.equal(row.state, "delivered");
   } finally {
@@ -189,8 +187,7 @@ test("r4 memory client: rejected (400/422) quarantines immediately", async () =>
   try {
     seedOutbox(store, SAMPLE_ENVELOPE);
     memory.queue({ ok: false, error: "rejected" });
-    manager.drainOutbox();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await manager.drainOutbox();
     const row = outboxState(store, `publication-${SESSION}-1`);
     assert.equal(row.state, "quarantined");
   } finally {
@@ -203,8 +200,7 @@ test("r4 memory client: unavailable keeps row claimable (lease recovery)", async
   try {
     seedOutbox(store, SAMPLE_ENVELOPE);
     memory.queue({ ok: false, error: "unavailable" });
-    manager.drainOutbox();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await manager.drainOutbox();
     const row = outboxState(store, `publication-${SESSION}-1`);
     assert.equal(row.state, "delivering", "unavailable must not mark delivered");
     // lease 过期后重新 claim 并可再次投递成功
@@ -214,8 +210,7 @@ test("r4 memory client: unavailable keeps row claimable (lease recovery)", async
       .raw()
       .prepare("UPDATE publication_outbox SET claim_leased_until = ? WHERE publication_id = ?")
       .run(new Date(now - 1000).toISOString(), `publication-${SESSION}-1`);
-    manager.drainOutbox();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await manager.drainOutbox();
     const after = outboxState(store, `publication-${SESSION}-1`);
     assert.equal(after.state, "delivered", "retry after lease expiry must succeed");
     assert.equal(after.delivered_receipt_hash, "second-try-receipt");
@@ -224,8 +219,8 @@ test("r4 memory client: unavailable keeps row claimable (lease recovery)", async
   }
 });
 
-test("r4 memory client: no client wired keeps legacy fake-receipt behavior", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "iris-r4-legacy-"));
+test("r4 memory client: no client wired NEVER fabricates receipts (iris_agent#46)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iris-r4-noclient-"));
   const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
   try {
     const manager = new HistorianManager({
@@ -236,10 +231,86 @@ test("r4 memory client: no client wired keeps legacy fake-receipt behavior", asy
       historyPort: fakeHistoryPort(),
     } as HistorianManagerOptions);
     seedOutbox(store, SAMPLE_ENVELOPE);
-    manager.drainOutbox();
+    const metrics = await manager.drainOutbox();
+    assert.equal(metrics.claimed, 1, "row is claimed for delivery");
+    assert.equal(metrics.accepted, 0, "NOTHING accepted without a client");
+    assert.equal(metrics.deferred, 1, "row stays retryable");
     const row = outboxState(store, `publication-${SESSION}-1`);
-    assert.equal(row.state, "delivered");
-    assert.match(row.delivered_receipt_hash ?? "", /^receipt-/);
+    assert.notEqual(row.state, "delivered", "never marked delivered");
+    assert.equal(row.delivered_receipt_hash, null, "no fabricated receipt hash");
+    // The claim lease expires and the row becomes claimable again — it is
+    // not lost and not falsely acked; it stays pending/retryable.
+    assert.equal(manager.health().memoryDelivery, "unavailable");
+    assert.equal(store.countOutboxPending(), 1, "row stays pending and retryable");
+  } finally {
+    store.close();
+  }
+});
+
+test("r4 memory client: thrown client errors are caught (no unhandled rejection) and rows stay retryable (iris_agent#46)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iris-r4-throw-"));
+  const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
+  try {
+    const throwing = {
+      deliverPublication: async () => {
+        throw new Error("connection refused");
+      },
+    } as unknown as MemoryClientPort;
+    const manager = new HistorianManager({
+      store,
+      readPort: new SessionHistoryReadPort({ readRawEntries: async () => [] }),
+      modelProviderProfile: "mock",
+      nowMs: () => Date.now(),
+      historyPort: fakeHistoryPort(),
+      memoryClient: throwing,
+    } as HistorianManagerOptions);
+    seedOutbox(store, SAMPLE_ENVELOPE);
+    // Must resolve (not reject) with deferred metrics.
+    const metrics = await manager.drainOutbox();
+    assert.equal(metrics.accepted, 0);
+    assert.equal(metrics.deferred, 1);
+    const row = outboxState(store, `publication-${SESSION}-1`);
+    assert.notEqual(row.state, "delivered", "thrown error never fabricates delivered");
+    assert.equal(manager.health().deliveryErrors, 1, "exception recorded, not unhandled");
+    assert.match(manager.health().lastDeliveryError ?? "", /connection refused/);
+    // The row remains claimable: the lease expires and it is retried.
+    assert.equal(store.countOutboxPending(), 1);
+  } finally {
+    store.close();
+  }
+});
+
+test("r4 memory client: fake/missing receipts cannot authorize outbox reclaim (iris_agent#46)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iris-r4-reclaim-"));
+  const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
+  try {
+    const manager = new HistorianManager({
+      store,
+      readPort: new SessionHistoryReadPort({ readRawEntries: async () => [] }),
+      modelProviderProfile: "mock",
+      nowMs: () => Date.now(),
+      historyPort: fakeHistoryPort(),
+    } as HistorianManagerOptions);
+    seedOutbox(store, SAMPLE_ENVELOPE);
+    // Without a client the row can never be delivered, even after a real
+    // drain pass (iris_agent#46: no fabricated receipts).
+    await manager.drainOutbox();
+    const row = outboxState(store, `publication-${SESSION}-1`);
+    assert.notEqual(row.state, "delivered");
+    // Direct tamper attempt on the receipt hash alone cannot flip state to
+    // delivered (the state machine owns the transition; markDelivered is the
+    // only writer and it is driven by a real client receipt).
+    const tampered = outboxState(store, `publication-${SESSION}-1`);
+    assert.equal(tampered.delivered_receipt_hash, null);
+    // Reclaim path (hot-row release) requires a real publication delivery;
+    // the row is not delivered, so its release view cannot exist with a
+    // memory durable ack (nothing was ever acknowledged to memory).
+    const releases = store.listCompartmentReleaseViews(SESSION);
+    assert.equal(
+      releases.some((r) => r.memoryReceiptHash !== null && r.reclaimedAt === null),
+      false,
+      "no release authorized by a fake/missing receipt",
+    );
   } finally {
     store.close();
   }
@@ -256,8 +327,7 @@ test("r4 memory client: envelope carries anti-echo basis and derivedOnly", async
     };
     seedOutbox(store, derivedEnvelope);
     memory.queue({ ok: true, receiptHash: "r" });
-    manager.drainOutbox();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await manager.drainOutbox();
     assert.equal(memory.delivered.length, 1);
     const sent = memory.delivered[0] as {
       derivedOnly: boolean;
