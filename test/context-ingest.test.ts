@@ -332,7 +332,7 @@ test("r2: input unit payload never stores raw wire before pairing (placeholder)"
   }
 });
 
-test("r2: empty context.db initializes cleanly; 0001-0004 applied and idempotent", () => {
+test("r2: empty context.db initializes cleanly; 0001-0005 applied and idempotent", () => {
   const dir = tempDir();
   try {
     const store = ContextStore.open(join(dir, "context.db"));
@@ -357,7 +357,7 @@ test("r2: empty context.db initializes cleanly; 0001-0004 applied and idempotent
     store.close();
     const reopened = ContextStore.open(join(dir, "context.db"));
     reopened.close();
-    assert.equal(LATEST_MIGRATION_VERSION, "0004_identity_lineage");
+    assert.equal(LATEST_MIGRATION_VERSION, "0005_session_lineage_bindings");
   } finally {
     cleanupDir(dir);
   }
