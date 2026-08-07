@@ -5,6 +5,8 @@ import test from "node:test";
 
 import assert from "node:assert/strict";
 
+import { computeMessageContentHash } from "@earendil-works/pi-agent-core";
+
 import { defaultAgentConfig } from "../src/config/load.js";
 import { initializeDataRoot, resolveDataRootPaths } from "../src/host/data-root.js";
 import { RuntimeEpochStore } from "../src/runtime/epoch-manager.js";
@@ -100,10 +102,11 @@ test("f2-xrepo: crash between durable append and publication is recovered exactl
     // between append and message_finalized.
     const metadata = await s.session.getMetadata();
     const message = userMessage("crash window message");
+    const contentHash = await computeMessageContentHash(message);
     await s.session.appendMessageWithCommitReceipt(message, (entryId) => ({
       sessionId: metadata.id,
       entryId,
-      contentHash: "x".repeat(64),
+      contentHash,
       committedAt: new Date().toISOString(),
     }));
     await expectPending(s, 1);
@@ -186,10 +189,11 @@ test("f2-xrepo: duplicate recovery does not duplicate ledger commits (exactly-on
 
     const metadata = await s.session.getMetadata();
     const message = userMessage("duplicate window");
+    const contentHash = await computeMessageContentHash(message);
     await s.session.appendMessageWithCommitReceipt(message, (entryId) => ({
       sessionId: metadata.id,
       entryId,
-      contentHash: "y".repeat(64),
+      contentHash,
       committedAt: new Date().toISOString(),
     }));
     await expectPending(s, 1);
@@ -244,15 +248,14 @@ test("f2-xrepo: out-of-order recovery replays in commit order with stable identi
     for (let i = 0; i < texts.length; i++) {
       const text = texts[i];
       assert.ok(text !== undefined, "test vector must exist");
-      const { entryId } = await s.session.appendMessageWithCommitReceipt(
-        userMessage(text),
-        (id) => ({
-          sessionId: metadata.id,
-          entryId: id,
-          contentHash: `h${i}`.padEnd(64, "0"),
-          committedAt: new Date(Date.now() + i).toISOString(),
-        }),
-      );
+      const message = userMessage(text);
+      const contentHash = await computeMessageContentHash(message);
+      const { entryId } = await s.session.appendMessageWithCommitReceipt(message, (id) => ({
+        sessionId: metadata.id,
+        entryId: id,
+        contentHash,
+        committedAt: new Date(Date.now() + i).toISOString(),
+      }));
       entryIds.push(entryId);
     }
     await expectPending(s, 3);
@@ -304,12 +307,13 @@ test("f2-xrepo: rollover keeps per-session recovery independent and never resets
 
     // Session A: one committed message with a pending receipt (crash window).
     const aMessage = userMessage("pre-rollover");
+    const aHash = await computeMessageContentHash(aMessage);
     const { entryId: aEntryId } = await s.session.appendMessageWithCommitReceipt(
       aMessage,
       (id) => ({
         sessionId: metadata.id,
         entryId: id,
-        contentHash: "a".repeat(64),
+        contentHash: aHash,
         committedAt: new Date().toISOString(),
       }),
     );
@@ -401,6 +405,223 @@ test("f2-xrepo: rollover keeps per-session recovery independent and never resets
     ledgerA.close();
     ledger2.close();
     await closeSessionStorage(repoB);
+    s.epochStore.close();
+  } finally {
+    // OS tmpdir 管理。
+  }
+});
+
+test("f2-xrepo: same-millisecond committedAt ties replay in exact append order (iris_agent#50)", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-f2-ties-"));
+  try {
+    const s = await setupSlice(dataRoot);
+    const { harness } = createIrisHarness({
+      session: s.session,
+      instanceEpoch: s.epoch.ordinalWithinDate,
+      models: s.models,
+      model: s.model,
+      tools: [makeReadOnlyTestTool()],
+      currentInvocation: {
+        input: sampleAgentInput(),
+        prepared: s.prepared,
+        invocationId: "inv-f2-ties",
+      },
+      now: s.now,
+      providerProfileId: s.providerProfileId,
+    });
+    const ledger = attachLedger(
+      harness,
+      s.paths,
+      s.epoch.runtimeSessionId,
+      s.epoch.runtimeSessionId,
+    );
+    const metadata = await s.session.getMetadata();
+
+    const sameTimestamp = new Date(2026, 7, 5, 0, 0, 0, 0).toISOString();
+    const texts = ["alpha", "beta", "gamma"];
+    const entryIds: string[] = [];
+    for (const text of texts) {
+      const message = userMessage(text);
+      const contentHash = await computeMessageContentHash(message);
+      const { entryId } = await s.session.appendMessageWithCommitReceipt(message, (id) => ({
+        sessionId: metadata.id,
+        entryId: id,
+        contentHash,
+        committedAt: sameTimestamp,
+      }));
+      entryIds.push(entryId);
+    }
+    await expectPending(s, 3);
+
+    // All three receipts share the identical committed_at; replay must still
+    // follow the authoritative commit sequence (append order), never the
+    // timestamp or an opaque entry-id tie-break.
+    assert.equal(await harness.recoverPendingCommitReceipts(), 3);
+    const finalized = ledger
+      .listBySession(s.epoch.runtimeSessionId)
+      .filter((e) => e.type === "message_finalized");
+    assert.deepEqual(
+      finalized.map((e) => e.entryId),
+      entryIds,
+      "same-timestamp receipts must replay in exact append order",
+    );
+
+    ledger.close();
+    await closeSessionStorage(s.repo);
+    s.epochStore.close();
+  } finally {
+    // OS tmpdir 管理。
+  }
+});
+
+test("f2-xrepo: tampered persisted receipt is quarantined, never emitted, never acked (iris_agent#50)", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-f2-tamper-"));
+  try {
+    const s = await setupSlice(dataRoot);
+    const { harness } = createIrisHarness({
+      session: s.session,
+      instanceEpoch: s.epoch.ordinalWithinDate,
+      models: s.models,
+      model: s.model,
+      tools: [makeReadOnlyTestTool()],
+      currentInvocation: {
+        input: sampleAgentInput(),
+        prepared: s.prepared,
+        invocationId: "inv-f2-tamper",
+      },
+      now: s.now,
+      providerProfileId: s.providerProfileId,
+    });
+    const ledger = attachLedger(
+      harness,
+      s.paths,
+      s.epoch.runtimeSessionId,
+      s.epoch.runtimeSessionId,
+    );
+    const metadata = await s.session.getMetadata();
+
+    const message = userMessage("tamper target");
+    const contentHash = await computeMessageContentHash(message);
+    const { entryId } = await s.session.appendMessageWithCommitReceipt(message, (id) => ({
+      sessionId: metadata.id,
+      entryId: id,
+      contentHash,
+      committedAt: new Date().toISOString(),
+    }));
+    await expectPending(s, 1);
+
+    // Tamper with the persisted row: flip the content hash in the SQLite
+    // journal (as a corrupt or malicious write would).
+    const repo = s.repo as unknown as {
+      raw: () => {
+        prepare: (sql: string) => {
+          run: (...args: Array<string | number>) => { changes: number };
+        };
+      };
+    };
+    const db = (repo as unknown as { database: unknown }).database as
+      | { prepare: (sql: string) => { run: (...a: Array<string | number>) => { changes: number } } }
+      | undefined;
+    if (db !== undefined) {
+      db.prepare(
+        "UPDATE session_commit_receipts SET content_hash = ? WHERE session_id = ? AND entry_id = ?",
+      ).run("0".repeat(64), metadata.id, entryId);
+    } else {
+      // Fallback: reach the sqlite connection through the backend internals
+      // is intentionally not part of the contract; the tamper is applied via
+      // a direct DatabaseSync open of the same file instead.
+      const { DatabaseSync } = await import("node:sqlite");
+      const direct = new DatabaseSync(s.paths.sessionDb);
+      direct
+        .prepare(
+          "UPDATE session_commit_receipts SET content_hash = ? WHERE session_id = ? AND entry_id = ?",
+        )
+        .run("0".repeat(64), metadata.id, entryId);
+      direct.close();
+    }
+
+    // Recovery must NOT emit the tampered receipt, must NOT ack it, must
+    // quarantine it with a typed reason, and must not block.
+    assert.equal(await harness.recoverPendingCommitReceipts(), 0);
+    const finalized = ledger
+      .listBySession(s.epoch.runtimeSessionId)
+      .filter((e) => e.type === "message_finalized");
+    assert.equal(finalized.length, 0, "tampered receipt must never reach the ledger");
+    assert.equal(
+      (await s.session.readPendingCommitReceipts()).length,
+      0,
+      "quarantined rows leave pending",
+    );
+    const quarantined = await s.session.readQuarantinedCommitReceipts();
+    assert.equal(quarantined.length, 1);
+    assert.equal(quarantined[0]?.entryId, entryId);
+    assert.match(quarantined[0]?.reason ?? "", /content_hash_mismatch/);
+
+    ledger.close();
+    await closeSessionStorage(s.repo);
+    s.epochStore.close();
+  } finally {
+    // OS tmpdir 管理。
+  }
+});
+
+test("f2-xrepo: the seam refuses to ingest an event whose payload contradicts its content hash (iris_agent#50)", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-f2-seam-"));
+  try {
+    const s = await setupSlice(dataRoot);
+    const ledger = RuntimeEventLedger.open(s.paths.runtimeLedgerDb);
+
+    // A fake harness-shaped emitter: the seam subscribes to it and must fail
+    // closed when the emitted event's payload does not match its hash.
+    let captured:
+      | ((event: {
+          type: string;
+          entryId: string;
+          role: string;
+          contentHash: string;
+          message: {
+            role: string;
+            content: Array<{ type: string; text: string }>;
+            timestamp: number;
+          };
+          receipt: { entrySeq?: number };
+        }) => void | Promise<void>)
+      | undefined;
+    const fakeHarness = {
+      subscribe: (fn: typeof captured) => {
+        captured = fn;
+      },
+    } as unknown as import("@earendil-works/pi-agent-core").AgentHarness;
+
+    attachRuntimeEventSeam(fakeHarness, {
+      ledger,
+      runtimeSessionId: s.epoch.runtimeSessionId,
+      piSessionId: s.epoch.runtimeSessionId,
+    });
+    assert.ok(captured, "seam must subscribe to the harness");
+
+    const message = userMessage("seam payload");
+    const goodHash = await computeMessageContentHash(message);
+    await assert.rejects(async () => {
+      await captured?.({
+        type: "message_finalized",
+        entryId: "e-seam",
+        role: "user",
+        contentHash: "f".repeat(64),
+        message,
+        receipt: { entrySeq: 1 },
+      });
+    }, /content hash mismatch/);
+    // The inconsistent event never reached the ledger.
+    assert.equal(
+      ledger.listBySession(s.epoch.runtimeSessionId).filter((e) => e.type === "message_finalized")
+        .length,
+      0,
+    );
+    assert.notEqual(goodHash, "f".repeat(64), "test vector must actually be inconsistent");
+
+    ledger.close();
+    await closeSessionStorage(s.repo);
     s.epochStore.close();
   } finally {
     // OS tmpdir 管理。
