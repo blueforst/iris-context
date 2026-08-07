@@ -172,6 +172,15 @@ export class HistorianManager {
       maxSuccessors: this.maxSuccessors,
       maxAttempts: options.maxAttempts ?? 8,
       nowMs: this.nowMs,
+      // iris_agent#65: persist retry accounting at the durable
+      // finalization-intent boundary so exhaustion survives restart and
+      // refill/recovery can never reset an exhausted finalizer to zero.
+      onAttemptPersist: (runtimeSessionId, attempts) => {
+        this.store.recordRetryAttempt(runtimeSessionId, attempts);
+      },
+      onExhausted: (job) => {
+        this.store.markRetryExhausted(job.runtimeSessionId);
+      },
     });
     this.service = new PublicationService({
       store: this.store,
@@ -317,6 +326,11 @@ export class HistorianManager {
   async recover(): Promise<void> {
     const sessions = this.store.listSessions();
     for (const session of sessions) {
+      // iris_agent#65: a retry-exhausted session must not be re-admitted by
+      // startup recovery — only explicit reactivation resumes it.
+      if (session.retryExhaustedAt !== undefined) {
+        continue;
+      }
       if (session.status === "closed" || session.status === "closed_incomplete") {
         const frozen = await this.freezeCurrent(session.runtimeSessionId);
         if (frozen !== null && !frozen.nothingNew) {
@@ -482,6 +496,30 @@ export class HistorianManager {
     )}`;
   }
 
+  /** iris_agent#65: durable exhausted-finalizer count (health/readiness). */
+  countExhaustedSessions(): number {
+    return this.store.countExhaustedSessions();
+  }
+
+  /**
+   * iris_agent#65: explicit operator/manual reactivation of a retry-exhausted
+   * finalizer. Clears the durable exhaustion marker and the attempt counter,
+   * then re-admits the finalization intent through the normal refill path —
+   * the terminal transition (closing → closed / closed_incomplete) is
+   * idempotent, so reactivation cannot duplicate Publication/snapshot/outbox
+   * commits. Returns false when the session is unknown or not exhausted.
+   * The returned promise resolves after the re-admission pass completes, so
+   * callers can observe the fresh job deterministically.
+   */
+  async reactivateExhaustedSession(runtimeSessionId: string): Promise<boolean> {
+    const cleared = this.store.reactivateExhaustedSession(runtimeSessionId);
+    if (cleared) {
+      // Re-admit through the durable backlog (fair FIFO path).
+      await this.refill();
+    }
+    return cleared;
+  }
+
   /** Health/readiness snapshot. */
   health(): HistorianHealth {
     const sessionCount = this.store.countSessions();
@@ -503,7 +541,7 @@ export class HistorianManager {
       durableBacklog,
       oldestFinalizationIntentAgeMs:
         oldestIntentMs === undefined ? 0 : Math.max(0, this.nowMs() - oldestIntentMs),
-      retryExhausted: stats.failedPermanent,
+      retryExhausted: this.store.countExhaustedSessions(),
       // iris_agent#46: missing Memory Client is visible in readiness; without
       // one, outbox rows can never be marked delivered.
       memoryDelivery: this.memoryClient === undefined ? "unavailable" : "configured",
@@ -528,7 +566,10 @@ export class HistorianManager {
     this.refilling = true;
     return (async () => {
       try {
-        const closing = this.store.listClosingSessions(this.durableRefillBatchSize);
+        // iris_agent#65: refill reads ONLY closing sessions that are not
+        // retry-exhausted — an exhausted finalizer must never be re-admitted
+        // automatically with a fresh attempt budget.
+        const closing = this.store.listClosingSessionsNotExhausted(this.durableRefillBatchSize);
         for (const session of closing) {
           if (this.queue.hasSession(session.runtimeSessionId)) {
             continue;

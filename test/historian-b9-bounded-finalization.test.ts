@@ -575,3 +575,183 @@ test("B9-AC10: migration 0007 upgrades a 0006-era DB, backfills intent timestamp
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("iris_agent#65: retry exhaustion is DURABLE — refill/recovery cannot reset an exhausted finalizer to attempt zero", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iris-b65-exhaust-"));
+  try {
+    const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
+    const mutable = [u("u-1", null, "permanently failing")];
+    const port = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
+    // maxAttempts=3: attempt 0,1,2 run and fail; the third failure exhausts.
+    let now = 1_000_000;
+    const manager = new HistorianManager({
+      store,
+      readPort: port,
+      historyPort: stubHistoryPort(),
+      modelProviderProfile: "m",
+      maxQueuedJobs: 2,
+      maxAttempts: 3,
+      nowMs: () => now,
+    });
+    // A permanently failing handler: make every finalizer run throw.
+    (manager as unknown as { executeJob: () => Promise<{ ok: boolean }> }).executeJob =
+      async () => ({
+        ok: false,
+        errorCode: "boom",
+      });
+    await manager.enqueueWrapup(SESSION);
+    for (let i = 0; i < 10 && manager.getQueue().pendingCount() > 0; i++) {
+      await manager.pumpOnce();
+      now += 60_000; // advance past the retry backoff
+    }
+    // Durable exhaustion marker is set.
+    const exhausted = store.getSessionState(SESSION);
+    assert.equal(exhausted?.status, "closing", "durable state stays closing");
+    assert.ok(exhausted?.retryExhaustedAt, "durable retry-exhausted marker persisted");
+    assert.equal(exhausted?.retryAttempts, 2, "durable attempt counter persisted");
+    // health() reports the durable exhausted count.
+    assert.equal(manager.countExhaustedSessions(), 1);
+    assert.equal(manager.health().retryExhausted, 1);
+    // refill() must NOT re-admit the exhausted session.
+    await manager.refill();
+    assert.equal(manager.getQueue().pendingCount(), 0, "exhausted session not re-admitted");
+    manager.close();
+    store.close();
+
+    // Restart: recover() must NOT re-admit the exhausted finalizer either.
+    const store2 = HistorianStore.open({ databasePath: join(dir, "historian.db") });
+    const manager2 = new HistorianManager({
+      store: store2,
+      readPort: port,
+      historyPort: stubHistoryPort(),
+      modelProviderProfile: "m",
+      maxQueuedJobs: 2,
+      maxAttempts: 3,
+      nowMs: () => now,
+    });
+    await manager2.recover();
+    assert.equal(
+      manager2.getQueue().pendingCount(),
+      0,
+      "startup recovery skips exhausted sessions (no auto-resurrection)",
+    );
+    const afterRestart = store2.getSessionState(SESSION);
+    assert.ok(afterRestart?.retryExhaustedAt, "exhaustion survives restart");
+    assert.equal(afterRestart?.retryAttempts, 2, "attempt budget survives restart");
+    // pumpOnce/refill stays quiet.
+    await manager2.pumpOnce();
+    assert.equal(manager2.getQueue().pendingCount(), 0);
+    assert.equal(
+      manager2.getQueue().stats().failedPermanent,
+      0,
+      "no fresh attempt-zero job created",
+    );
+
+    // Explicit reactivation: clears the marker and re-admits through refill.
+    assert.equal(await manager2.reactivateExhaustedSession(SESSION), true);
+    const reactivated = store2.getSessionState(SESSION);
+    assert.equal(reactivated?.retryExhaustedAt, undefined, "exhaustion marker cleared");
+    assert.equal(reactivated?.retryAttempts ?? 0, 0, "attempt budget reset for the explicit retry");
+    assert.equal(manager2.getQueue().pendingCount(), 1, "explicit retry re-admitted");
+    // Reactivation is idempotent for non-exhausted sessions.
+    assert.equal(await manager2.reactivateExhaustedSession(SESSION), false);
+    manager2.close();
+    store2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("iris_agent#65: unrelated closing sessions stay fair while one session is exhausted", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iris-b65-fair-"));
+  try {
+    const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
+    const mutable = [u("u-1", null, "ok")];
+    const port = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
+    const manager = new HistorianManager({
+      store,
+      readPort: port,
+      historyPort: stubHistoryPort(),
+      modelProviderProfile: "m",
+      maxQueuedJobs: 4,
+      maxAttempts: 2,
+      nowMs: () => now,
+    });
+    // Exhaust session A by making only it fail permanently.
+    let now = 1_000_000;
+    const realExecute = (
+      manager as unknown as {
+        executeJob: (job: { runtimeSessionId: string }) => Promise<{ ok: boolean }>;
+      }
+    ).executeJob.bind(manager);
+    (
+      manager as unknown as {
+        executeJob: (job: { runtimeSessionId: string }) => Promise<{ ok: boolean }>;
+      }
+    ).executeJob = async (job) =>
+      job.runtimeSessionId === "session-A" ? { ok: false, errorCode: "boom" } : realExecute(job);
+
+    await manager.enqueueWrapup("session-A");
+    await manager.enqueueWrapup("session-B");
+    for (let i = 0; i < 20 && manager.getQueue().pendingCount() > 0; i++) {
+      await manager.pumpOnce();
+      now += 60_000; // advance past the retry backoff
+    }
+    assert.ok(store.getSessionState("session-A")?.retryExhaustedAt, "session A durably exhausted");
+    const b = store.getSessionState("session-B");
+    assert.ok(
+      b?.status === "closed" || b?.status === "closed_incomplete",
+      `session B finalized independently ${b?.status}`,
+    );
+    assert.equal(manager.countExhaustedSessions(), 1, "only session A exhausted");
+    manager.close();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("iris_agent#65: migration 0008 upgrades a 0007-era DB and fails closed on tampering", () => {
+  const dir = mkdtempSync(join(tmpdir(), "iris-b65-mig-"));
+  try {
+    const realMigrations = join(process.cwd(), "src/db/migrations/historian");
+    // Build a 0007-era database (migrations without 0008).
+    const oldDir = join(dir, "old-migrations");
+    mkdtempSync(oldDir);
+    for (const f of readdirSync(realMigrations).filter(
+      (n) => n <= "0007_finalization_intent.sql",
+    )) {
+      cpSync(join(realMigrations, f), join(oldDir, f));
+    }
+    const dbPath = join(dir, "historian.db");
+    const store07 = HistorianStore.open({ databasePath: dbPath, migrationsDir: oldDir });
+    store07
+      .raw()
+      .prepare(
+        `INSERT INTO session_state (runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, updated_at)
+       VALUES (?, 1, 'closing', NULL, ?)`,
+      )
+      .run(SESSION, "2026-08-01T00:00:00.000Z");
+    store07.close();
+    // Reopen with the real migration set: 0008 applies (retry columns default).
+    const store = HistorianStore.open({ databasePath: dbPath });
+    const state = store.getSessionState(SESSION);
+    assert.equal(state?.status, "closing");
+    assert.equal(state?.retryExhaustedAt, undefined, "no exhaustion marker after upgrade");
+    store.close();
+    // Tamper 0008 after apply -> reopen fails closed.
+    const tamperedDir = join(dir, "tampered-migrations");
+    mkdtempSync(tamperedDir);
+    for (const f of readdirSync(realMigrations)) {
+      cpSync(join(realMigrations, f), join(tamperedDir, f));
+    }
+    writeFileSync(join(tamperedDir, "0008_retry_exhaustion.sql"), "-- tampered\n", { flag: "a" });
+    assert.throws(
+      () => HistorianStore.open({ databasePath: dbPath, migrationsDir: tamperedDir }),
+      /migration 0008_retry_exhaustion changed after being applied/,
+      "release-owned checksum fails closed",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

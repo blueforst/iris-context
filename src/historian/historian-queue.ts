@@ -107,6 +107,16 @@ export interface HistorianQueueOptions {
   maxAttempts?: number;
   /** Clock for lease/retry timestamps. */
   nowMs?: () => number;
+  /**
+   * iris_agent#65: persistence hooks so retry accounting survives crash and
+   * restart. onAttemptPersist is invoked on every successful requeue (the
+   * durable counter must advance with the in-memory attempt); onExhausted is
+   * invoked exactly when a job's retry budget is exhausted, so the durable
+   * session can be marked retry-exhausted and excluded from refill. Both are
+   * optional — without them the queue keeps its pre-#65 in-memory behavior.
+   */
+  onAttemptPersist?: (runtimeSessionId: string, attempts: number) => void;
+  onExhausted?: (job: HistorianJob) => void;
 }
 
 export interface QueueStats {
@@ -136,6 +146,10 @@ export class HistorianQueue {
   private readonly maxSuccessors: number;
   private readonly maxAttempts: number;
   private readonly nowMs: () => number;
+  /** iris_agent#65: durable retry-accounting hooks (optional). */
+  private readonly onAttemptPersist:
+    ((runtimeSessionId: string, attempts: number) => void) | undefined;
+  private readonly onExhausted: ((job: HistorianJob) => void) | undefined;
 
   private pending: HistorianJob[] = [];
   private running: HistorianJob | null = null;
@@ -163,6 +177,8 @@ export class HistorianQueue {
     this.maxSuccessors = options.maxSuccessors ?? this.maxQueuedJobs;
     this.maxAttempts = options.maxAttempts ?? 8;
     this.nowMs = options.nowMs ?? (() => Date.now());
+    this.onAttemptPersist = options.onAttemptPersist;
+    this.onExhausted = options.onExhausted;
   }
 
   /** iris_agent#53: per-attempt retry backoff (exponential, capped). */
@@ -236,7 +252,9 @@ export class HistorianQueue {
           priority: job.priority,
           runtimeSessionId: job.runtimeSessionId,
           jobId: `${job.priority}:${job.runtimeSessionId}:${this.nextRunId++}`,
-          attempt: 0,
+          // iris_agent#65: resume the durable retry budget (never reset to
+          // zero on re-admission).
+          attempt: job.sessionState.retryAttempts ?? 0,
           boundary: job.boundary,
           sessionState: job.sessionState,
         });
@@ -279,7 +297,10 @@ export class HistorianQueue {
       priority: job.priority,
       runtimeSessionId: job.runtimeSessionId,
       jobId: `${job.priority}:${job.runtimeSessionId}:${this.nextRunId++}`,
-      attempt,
+      // iris_agent#65: resume the durable retry budget instead of silently
+      // restarting at zero — a crashed finalizer must not get a fresh
+      // attempt counter on every re-admission.
+      attempt: job.sessionState.retryAttempts ?? attempt,
       boundary: job.boundary,
       sessionState: job.sessionState,
     };
@@ -327,16 +348,25 @@ export class HistorianQueue {
    */
   requeue(job: HistorianJob): "requeued" | "exhausted" | "no_capacity" {
     if (job.attempt + 1 >= this.maxAttempts) {
+      // iris_agent#65: the retry budget is exhausted — persist the terminal
+      // durable marker BEFORE the in-memory permanent-failure accounting so
+      // a crash right after this point cannot resurrect the finalizer with a
+      // fresh attempt-zero job.
+      this.onExhausted?.(job);
       return "exhausted";
     }
     if (this.pending.length >= this.maxQueuedJobs) {
       this.deferred += 1;
       return "no_capacity";
     }
+    const nextAttempt = job.attempt + 1;
+    // iris_agent#65: advance the durable attempt counter in lockstep with the
+    // in-memory job (crash/restart resumes the same budget).
+    this.onAttemptPersist?.(job.runtimeSessionId, nextAttempt);
     this.pending.push({
       ...job,
-      attempt: job.attempt + 1,
-      retryAtMs: this.nowMs() + this.retryBackoffMs(job.attempt + 1),
+      attempt: nextAttempt,
+      retryAtMs: this.nowMs() + this.retryBackoffMs(nextAttempt),
     });
     return "requeued";
   }

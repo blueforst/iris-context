@@ -55,10 +55,10 @@ export interface HistorianStoreOptions {
 
 const SESSION_STATE_SQL = {
   select:
-    "SELECT runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, updated_at FROM session_state WHERE runtime_session_id = ?",
+    "SELECT runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, retry_attempts, retry_exhausted_at, updated_at FROM session_state WHERE runtime_session_id = ?",
   upsert:
-    "INSERT INTO session_state (runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, updated_at) " +
-    "VALUES (?, ?, ?, ?, ?, ?) " +
+    "INSERT INTO session_state (runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, retry_attempts, retry_exhausted_at, updated_at) " +
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
     "ON CONFLICT(runtime_session_id) DO UPDATE SET " +
     "processed_through_entry_seq = excluded.processed_through_entry_seq, " +
     "status = excluded.status, " +
@@ -67,14 +67,30 @@ const SESSION_STATE_SQL = {
     // transition into closing) and never reset by re-enqueues / recovery /
     // status flapping — it feeds readiness age and FIFO backlog refill.
     "finalization_requested_at = COALESCE(session_state.finalization_requested_at, excluded.finalization_requested_at), " +
+    // iris_agent#65: retry accounting is durable and sticky. retry_attempts
+    // only ever advances (never resets on re-enqueue); retry_exhausted_at is
+    // set ONCE and never cleared by refill/recovery/status flapping — only an
+    // explicit reactivation API clears it. excluded=0 means "this upsert is
+    // not about retry accounting": keep the durable counter unchanged.
+    "retry_attempts = CASE WHEN excluded.retry_attempts = 0 THEN session_state.retry_attempts ELSE excluded.retry_attempts END, " +
+    "retry_exhausted_at = COALESCE(session_state.retry_exhausted_at, excluded.retry_exhausted_at), " +
     "updated_at = excluded.updated_at",
   listClosing:
-    "SELECT runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, updated_at " +
+    "SELECT runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, retry_attempts, retry_exhausted_at, updated_at " +
     "FROM session_state WHERE status = 'closing' " +
     "ORDER BY finalization_requested_at ASC, runtime_session_id ASC LIMIT ?",
   countClosing: "SELECT COUNT(*) AS count FROM session_state WHERE status = 'closing'",
   oldestClosingRequestedAt:
     "SELECT MIN(finalization_requested_at) AS oldest FROM session_state WHERE status = 'closing'",
+  // iris_agent#65: durable exhausted finalizers — visible in health, and
+  // explicitly EXCLUDED from the durable backlog refill (they must not be
+  // re-admitted automatically).
+  listClosingNotExhausted:
+    "SELECT runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, retry_attempts, retry_exhausted_at, updated_at " +
+    "FROM session_state WHERE status = 'closing' AND retry_exhausted_at IS NULL " +
+    "ORDER BY finalization_requested_at ASC, runtime_session_id ASC LIMIT ?",
+  countExhausted:
+    "SELECT COUNT(*) AS count FROM session_state WHERE retry_exhausted_at IS NOT NULL",
 };
 
 const BOUNDARY_SQL = {
@@ -152,6 +168,8 @@ export class HistorianStore {
           status: string;
           observed_head_entry_seq: number | null;
           finalization_requested_at: string | null;
+          retry_attempts: number;
+          retry_exhausted_at: string | null;
           updated_at: string;
         }
       | undefined;
@@ -168,6 +186,10 @@ export class HistorianStore {
       ...(row.finalization_requested_at === null
         ? {}
         : { finalizationRequestedAt: row.finalization_requested_at }),
+      // iris_agent#65: durable retry accounting (absent = 0 attempts / not
+      // exhausted).
+      ...(row.retry_attempts > 0 ? { retryAttempts: row.retry_attempts } : {}),
+      ...(row.retry_exhausted_at === null ? {} : { retryExhaustedAt: row.retry_exhausted_at }),
       updatedAt: row.updated_at,
     };
   }
@@ -182,8 +204,76 @@ export class HistorianStore {
       // ever set) when the session is/was closing; the upsert's COALESCE
       // keeps the FIRST recorded time.
       state.status === "closing" ? state.updatedAt : null,
+      // iris_agent#65: 0 means "not about retry accounting" (the sticky CASE
+      // keeps the durable counter unchanged); explicit retry updates pass
+      // the real value.
+      state.retryAttempts ?? 0,
+      state.retryExhaustedAt ?? null,
       state.updatedAt,
     );
+  }
+
+  /**
+   * iris_agent#65: persist an advanced retry-attempt count for a session
+   * (called on every finalizer requeue). The upsert's sticky CASE guarantees
+   * the counter only ever grows.
+   */
+  recordRetryAttempt(runtimeSessionId: string, attempts: number): void {
+    const current = this.getSessionState(runtimeSessionId);
+    if (current === undefined) {
+      return;
+    }
+    this.db
+      .prepare(
+        "UPDATE session_state SET retry_attempts = ?, updated_at = ? WHERE runtime_session_id = ?",
+      )
+      .run(attempts, new Date(this.nowMs()).toISOString(), runtimeSessionId);
+  }
+
+  /**
+   * iris_agent#65: durably mark a finalizer as retry-exhausted (set ONCE).
+   * After this, refill/startup-recovery skip the session; only an explicit
+   * reactivation clears the marker.
+   */
+  markRetryExhausted(runtimeSessionId: string): void {
+    const current = this.getSessionState(runtimeSessionId);
+    if (current === undefined) {
+      return;
+    }
+    this.db
+      .prepare(
+        "UPDATE session_state SET retry_exhausted_at = ?, updated_at = ? WHERE runtime_session_id = ?",
+      )
+      .run(
+        new Date(this.nowMs()).toISOString(),
+        new Date(this.nowMs()).toISOString(),
+        runtimeSessionId,
+      );
+  }
+
+  /**
+   * iris_agent#65: explicit operator/manual reactivation of an exhausted
+   * finalizer — clears the exhaustion marker and resets the attempt counter
+   * so a fresh retry budget starts. Returns false when the session is
+   * unknown or not exhausted (idempotent, fail-safe).
+   */
+  reactivateExhaustedSession(runtimeSessionId: string): boolean {
+    const current = this.getSessionState(runtimeSessionId);
+    if (current?.retryExhaustedAt === undefined) {
+      return false;
+    }
+    const updated = this.db
+      .prepare(
+        "UPDATE session_state SET retry_exhausted_at = NULL, retry_attempts = 0, updated_at = ? WHERE runtime_session_id = ?",
+      )
+      .run(new Date(this.nowMs()).toISOString(), runtimeSessionId);
+    return updated.changes === 1;
+  }
+
+  /** iris_agent#65: durable exhausted-finalizer count (health/readiness). */
+  countExhaustedSessions(): number {
+    const row = this.db.prepare(SESSION_STATE_SQL.countExhausted).get() as { count: number };
+    return row.count;
   }
 
   /**
@@ -199,9 +289,44 @@ export class HistorianStore {
       status: string;
       observed_head_entry_seq: number | null;
       finalization_requested_at: string | null;
+      retry_attempts: number;
+      retry_exhausted_at: string | null;
       updated_at: string;
     }>;
-    return rows.map((row) => ({
+    return rows.map((row) => this.stateFromRow(row));
+  }
+
+  /**
+   * iris_agent#65: durable closing sessions that are NOT retry-exhausted —
+   * the refill source. Exhausted finalizers must not be re-admitted
+   * automatically; only explicit reactivation clears the marker and makes
+   * them eligible again.
+   */
+  listClosingSessionsNotExhausted(limit = 16): HistorianSessionState[] {
+    const rows = this.db.prepare(SESSION_STATE_SQL.listClosingNotExhausted).all(limit) as Array<{
+      runtime_session_id: string;
+      processed_through_entry_seq: number;
+      status: string;
+      observed_head_entry_seq: number | null;
+      finalization_requested_at: string | null;
+      retry_attempts: number;
+      retry_exhausted_at: string | null;
+      updated_at: string;
+    }>;
+    return rows.map((row) => this.stateFromRow(row));
+  }
+
+  private stateFromRow(row: {
+    runtime_session_id: string;
+    processed_through_entry_seq: number;
+    status: string;
+    observed_head_entry_seq: number | null;
+    finalization_requested_at: string | null;
+    retry_attempts: number;
+    retry_exhausted_at: string | null;
+    updated_at: string;
+  }): HistorianSessionState {
+    return {
       runtimeSessionId: row.runtime_session_id,
       processedThroughEntrySeq: row.processed_through_entry_seq,
       status: row.status as HistorianSessionState["status"],
@@ -211,8 +336,10 @@ export class HistorianStore {
       ...(row.finalization_requested_at === null
         ? {}
         : { finalizationRequestedAt: row.finalization_requested_at }),
+      ...(row.retry_attempts > 0 ? { retryAttempts: row.retry_attempts } : {}),
+      ...(row.retry_exhausted_at === null ? {} : { retryExhaustedAt: row.retry_exhausted_at }),
       updatedAt: row.updated_at,
-    }));
+    };
   }
 
   /** iris_agent#53: durable finalization intents awaiting completion. */
@@ -510,7 +637,7 @@ export class HistorianStore {
   listSessions(): HistorianSessionState[] {
     const rows = this.db
       .prepare(
-        "SELECT runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, updated_at FROM session_state ORDER BY updated_at",
+        "SELECT runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, retry_attempts, retry_exhausted_at, updated_at FROM session_state ORDER BY updated_at",
       )
       .all() as unknown as Array<{
       runtime_session_id: string;
@@ -518,20 +645,11 @@ export class HistorianStore {
       status: string;
       observed_head_entry_seq: number | null;
       finalization_requested_at: string | null;
+      retry_attempts: number;
+      retry_exhausted_at: string | null;
       updated_at: string;
     }>;
-    return rows.map((row) => ({
-      runtimeSessionId: row.runtime_session_id,
-      processedThroughEntrySeq: row.processed_through_entry_seq,
-      status: row.status as HistorianSessionState["status"],
-      ...(row.observed_head_entry_seq === null
-        ? {}
-        : { observedHeadEntrySeq: row.observed_head_entry_seq }),
-      ...(row.finalization_requested_at === null
-        ? {}
-        : { finalizationRequestedAt: row.finalization_requested_at }),
-      updatedAt: row.updated_at,
-    }));
+    return rows.map((row) => this.stateFromRow(row));
   }
 
   countSessions(): number {

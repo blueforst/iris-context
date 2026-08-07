@@ -119,6 +119,17 @@ export interface HistorianSessionState {
    * backlog refill (FIFO by this column).
    */
   finalizationRequestedAt?: string;
+  /**
+   * iris_agent#65: durable retry-accounting for the finalizer. retryAttempts
+   * is the number of failed attempts already consumed (persisted on every
+   * requeue, survives crash/restart); when it reaches maxAttempts the
+   * session is marked retryExhaustedAt (set ONCE, never reset by refill or
+   * recovery). Refill/startup-recovery skip exhausted sessions — only an
+   * explicit operator/manual reactivation clears the marker. Absent fields
+   * mean 0 attempts / not exhausted.
+   */
+  retryAttempts?: number;
+  retryExhaustedAt?: string;
   updatedAt: string;
 }
 
