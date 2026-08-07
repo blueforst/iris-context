@@ -86,6 +86,7 @@ function lineagePort(representedThroughEntrySeq: number | null): ContextHistoryR
     }),
     listUnitsForHistorian: () => [],
     listUnitsForHistorianByEntrySeq: () => [],
+    claimUnitsForHistorian: () => [],
     lineageId: () => "identity-exit-gate",
   };
 }
@@ -103,12 +104,49 @@ function noLineageThrowingPort(): ContextHistoryReadPort {
     listUnitsForHistorianByEntrySeq: () => {
       throw new Error("context history read port: no lineage for session (fail closed)");
     },
+    claimUnitsForHistorian: () => {
+      throw new Error("context history read port: no lineage for session (fail closed)");
+    },
   };
 }
 
-/** iris_agent#45: publishing-capable stub port (one committed unit per
- * claimed entry — publications need a REAL non-empty Context range). */
+/** iris_agent#45/#66: publishing-capable stub port (one committed unit per
+ * claimed entry — publications need a REAL non-empty Context range). The
+ * #66 variant serves full units derived from the mutable fixture entries. */
 function publishingStubPort(): ContextHistoryReadPort {
+  return publishingStubPortWithUnits([]);
+}
+
+function publishingStubPortWithUnits(mutable: SessionTreeEntry[]): ContextHistoryReadPort {
+  const claim = (_id: string, fromEntrySeq: number, toEntrySeq: number) => {
+    const units: import("../src/contracts/context-units.js").ContextMessageUnit[] = [];
+    const head = mutable.length; // the fixture's notion of the session head
+    for (let seq = fromEntrySeq; seq <= Math.min(toEntrySeq, head); seq++) {
+      const entry = mutable[seq - 1];
+      const message = (entry as { message?: unknown } | undefined)?.message;
+      units.push({
+        lineageId: "identity-exit-gate",
+        runtimeSessionId: _id,
+        contextSeq: seq,
+        unitId: `unit-${seq}`,
+        sourceEventId: `evt-${seq}`,
+        runtimeEventId: `evt-${seq}`,
+        unitType: "input",
+        disposition: "include",
+        entryId: `entry-${seq}`,
+        entrySeq: seq,
+        contentHash: "e".repeat(64),
+        payload:
+          (message as import("../src/contracts/context-units.js").ContextMessageUnit["payload"]) ??
+          ({ role: "user", content: `content-${seq}`, timestamp: 1 } as never),
+        paired: false,
+        derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+        schemaVersion: "context-unit-v1",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      });
+    }
+    return units;
+  };
   return {
     getMaterializedBoundary: () => ({
       representedThroughContextSeq: 0,
@@ -133,6 +171,8 @@ function publishingStubPort(): ContextHistoryReadPort {
       }
       return units;
     },
+    claimUnitsForHistorian: (_id: string, fromEntrySeq: number, toEntrySeq: number) =>
+      claim(_id, fromEntrySeq, toEntrySeq),
     lineageId: () => "identity-exit-gate",
   };
 }
@@ -144,17 +184,16 @@ function managerFixture(
   const dir = mkdtempSync(join(tmpdir(), "iris-exit-"));
   const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
   const mutable = [...entries];
-  const port = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
   const manager = new HistorianManager({
     store,
-    readPort: port,
-    // iris_agent#45: publications require a Context read port; the fixture
-    // default provides committed units so wrapup/incremental publish.
-    historyPort: publishingStubPort(),
+    // iris_agent#45/#66: publications require the Context claim port; the
+    // fixture default provides committed units so wrapup/incremental
+    // publish. The mutable entries are served through the #66 claim path.
+    historyPort: publishingStubPortWithUnits(mutable),
     modelProviderProfile: "m",
     ...extras,
   });
-  return { manager, store, dir, mutable, port };
+  return { manager, store, dir, mutable };
 }
 
 // ---- 6. compaction 授权（v13 "只有已进入 m0/m1 的 compartment 才可替换 raw P5"）----
@@ -223,7 +262,6 @@ test("R3 Exit Gate: createCompactionAuthorizer 原因分类（materialized / no_
   // 有边界 + lineage 已物化（N=50）→ cut = min(89, 50) = 50，reason materialized。
   const materialized = createCompactionAuthorizer({
     historyPort: lineagePort(50),
-    sessionReadPort: new SessionHistoryReadPort({ readRawEntries: async () => [] }),
     latestBoundaryFor: () => boundary,
   }).authorize(SESSION);
   assert.equal(materialized.cutThroughEntrySeq, 50);
@@ -233,7 +271,6 @@ test("R3 Exit Gate: createCompactionAuthorizer 原因分类（materialized / no_
   // 有边界 + lineage 从未物化 → cut 0，reason no_m0_coverage。
   const noM0 = createCompactionAuthorizer({
     historyPort: lineagePort(null),
-    sessionReadPort: new SessionHistoryReadPort({ readRawEntries: async () => [] }),
     latestBoundaryFor: () => boundary,
   }).authorize(SESSION);
   assert.equal(noM0.cutThroughEntrySeq, 0);
@@ -242,7 +279,6 @@ test("R3 Exit Gate: createCompactionAuthorizer 原因分类（materialized / no_
   // 有边界 + 端口对无 lineage 会话 fail-closed（抛错）→ 同样 no_m0_coverage（不授权）。
   const throwing = createCompactionAuthorizer({
     historyPort: noLineageThrowingPort(),
-    sessionReadPort: new SessionHistoryReadPort({ readRawEntries: async () => [] }),
     latestBoundaryFor: () => boundary,
   }).authorize(SESSION);
   assert.equal(throwing.cutThroughEntrySeq, 0);
@@ -251,7 +287,6 @@ test("R3 Exit Gate: createCompactionAuthorizer 原因分类（materialized / no_
   // 无边界快照 → cut 0，reason no_boundary（fail-closed）。
   const noBoundary = createCompactionAuthorizer({
     historyPort: lineagePort(50),
-    sessionReadPort: new SessionHistoryReadPort({ readRawEntries: async () => [] }),
     latestBoundaryFor: () => undefined,
   }).authorize(SESSION);
   assert.equal(noBoundary.cutThroughEntrySeq, 0);
@@ -260,7 +295,6 @@ test("R3 Exit Gate: createCompactionAuthorizer 原因分类（materialized / no_
   // lineage 已越过保护尾部 → cut 封顶 protectedTailStart-1，绝不越过。
   const clamped = createCompactionAuthorizer({
     historyPort: lineagePort(10_000),
-    sessionReadPort: new SessionHistoryReadPort({ readRawEntries: async () => [] }),
     latestBoundaryFor: () => boundary,
   }).authorize(SESSION);
   assert.equal(clamped.cutThroughEntrySeq, 89, "protected tail is raw-inviolable");
@@ -299,22 +333,22 @@ test("R3 Exit Gate: HistorianManager.authorizeCompaction 端到端（historyPort
 
 test("R3 Exit Gate: authorizeCompaction 未接线 historyPort → 抛错（fail-closed）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "iris-exit-noport-"));
+  const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
   try {
-    const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
-    const mutable = [u("u-1", null, "hello"), c("c-1", "u-1")];
-    const port = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
-    // Deliberately NO historyPort: compaction authorization must fail closed.
-    const manager = new HistorianManager({ store, readPort: port, modelProviderProfile: "m" });
-    try {
-      assert.throws(
-        () => manager.authorizeCompaction(SESSION),
-        /ContextHistoryReadPort/,
-        "compaction authorization must be explicitly wired",
-      );
-    } finally {
-      manager.close();
-    }
+    // Deliberately NO historyPort: manager construction itself must fail
+    // closed (iris_agent#66 — the Context claim port is REQUIRED, a
+    // production Historian cannot exist without its normal semantic input).
+    assert.throws(
+      () =>
+        new HistorianManager({
+          store,
+          modelProviderProfile: "m",
+        } as never),
+      /ContextHistoryReadPort is required/,
+      "Historian construction requires the Context claim port (fail closed)",
+    );
   } finally {
+    store.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -322,14 +356,11 @@ test("R3 Exit Gate: authorizeCompaction 未接线 historyPort → 抛错（fail-
 test("R3 Exit Gate: compaction 授权崩溃确定性——authorize → 崩溃（未 trim）→ 重开 → 相同 cut", () => {
   const dir = mkdtempSync(join(tmpdir(), "iris-exit-crash-"));
   const dbPath = join(dir, "historian.db");
-  const entries = [u("u-1", null, "hello"), c("c-1", "u-1")];
   try {
     // 阶段 1：持久化边界 + 授权（cut 由边界与 lineage 确定性决定）。
     const store1 = HistorianStore.open({ databasePath: dbPath });
-    const port1 = new SessionHistoryReadPort({ readRawEntries: async () => entries });
     const manager1 = new HistorianManager({
       store: store1,
-      readPort: port1,
       modelProviderProfile: "m",
       historyPort: lineagePort(50),
     });
@@ -351,10 +382,8 @@ test("R3 Exit Gate: compaction 授权崩溃确定性——authorize → 崩溃�
 
     // 阶段 2：重开同一数据根 → 重新授权 → 同一 cut（确定性、幂等）。
     const store2 = HistorianStore.open({ databasePath: dbPath });
-    const port2 = new SessionHistoryReadPort({ readRawEntries: async () => entries });
     const manager2 = new HistorianManager({
       store: store2,
-      readPort: port2,
       modelProviderProfile: "m",
       historyPort: lineagePort(50),
     });
@@ -501,13 +530,15 @@ test("R3 Exit Gate: wrapup 最终事务——continuity + assessment + publicati
 });
 
 test("R3 Exit Gate: wrapup 事务失败 → 整事务回滚（continuity + state 不留半成品）", async () => {
-  const { store, dir, port } = managerFixture([
+  const { store, dir, mutable } = managerFixture([
     u("u-1", null, "hello"),
     c("c-1", "u-1"),
     assistantLike("a-1", "c-1", "reply"),
   ]);
   try {
-    const page = await port.readEntries({ runtimeSessionId: SESSION, limit: 100 });
+    const page = await new SessionHistoryReadPort({
+      readRawEntries: async () => mutable,
+    }).readEntries({ runtimeSessionId: SESSION, limit: 100 });
     const freeze = freezeBoundary({
       rawSeamInput: {
         runtimeSessionId: SESSION,
@@ -766,9 +797,7 @@ test("R3 Exit Gate: queue 单飞合并——终结性任务（normal/low）胜�
     const newQueue = () =>
       new HistorianManager({
         store,
-        readPort: new SessionHistoryReadPort({
-          readRawEntries: async () => [u("u1", null), u("u2", "u1")],
-        }),
+        historyPort: publishingStubPort(),
         modelProviderProfile: "m",
       }).getQueue();
     const job = (priority: "highest" | "normal" | "low" | "manual") => ({

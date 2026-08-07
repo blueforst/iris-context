@@ -64,6 +64,7 @@ function fakeHistoryPort(units: HistorianUnitView[]) {
     },
     listUnitsForHistorian: () => units,
     listUnitsForHistorianByEntrySeq: () => units,
+    claimUnitsForHistorian: () => [],
     lineageId: () => "identity-anti-echo",
   };
 }

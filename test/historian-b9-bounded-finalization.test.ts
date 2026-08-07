@@ -32,7 +32,6 @@ import {
   type HistorianJobResult,
 } from "../src/historian/historian-queue.js";
 import { HistorianStore } from "../src/historian/historian-store.js";
-import { SessionHistoryReadPort } from "../src/historian/history-read-port.js";
 
 /** iris_agent#45: production Historian cannot publish without the Context
  * read/claim port — tests wire a stub port with committed units. */
@@ -65,6 +64,32 @@ function stubHistoryPort(): ContextHistoryReadPort {
       }
       return units;
     },
+    claimUnitsForHistorian(_r: string, fromEntrySeq: number, toEntrySeq: number) {
+      // iris_agent#66: full committed units (payload included) — the
+      // runner's normal semantic input (same claimed window as the view).
+      const units: import("../src/contracts/context-units.js").ContextMessageUnit[] = [];
+      for (let seq = fromEntrySeq; seq <= toEntrySeq; seq++) {
+        units.push({
+          lineageId: "identity-b8b9",
+          runtimeSessionId: _r,
+          contextSeq: seq,
+          unitId: `unit-${seq}`,
+          sourceEventId: `evt-${seq}`,
+          runtimeEventId: `evt-${seq}`,
+          unitType: "input",
+          disposition: "include",
+          entryId: `entry-${seq}`,
+          entrySeq: seq,
+          contentHash: "b".repeat(64),
+          payload: { role: "user", content: `content-${seq}`, timestamp: 1 },
+          paired: false,
+          derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+          schemaVersion: "context-unit-v1",
+          createdAt: "2026-08-01T00:00:00.000Z",
+        });
+      }
+      return units;
+    },
     lineageId() {
       return "identity-b8b9";
     },
@@ -72,16 +97,6 @@ function stubHistoryPort(): ContextHistoryReadPort {
 }
 
 const SESSION = "iris-runtime-2026-08-01-1";
-
-function u(id: string, parentId: string | null, text = "hello", ts = 1): SessionTreeEntry {
-  return {
-    type: "message",
-    id,
-    parentId,
-    timestamp: new Date(ts).toISOString(),
-    message: { role: "user", content: text, timestamp: ts },
-  } as unknown as SessionTreeEntry;
-}
 
 function fakeJob(
   runtimeSessionId: string,
@@ -112,14 +127,11 @@ function managerFixture(options: {
   maxAttempts?: number;
   durableRefillBatchSize?: number;
   nowMs?: () => number;
-}): { manager: HistorianManager; store: HistorianStore; dir: string; mutable: SessionTreeEntry[] } {
+}): { manager: HistorianManager; store: HistorianStore; dir: string } {
   const dir = mkdtempSync(join(tmpdir(), "iris-b9-"));
   const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
-  const mutable = [...(options.entries ?? [u("u-1", null)])];
-  const port = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
   const manager = new HistorianManager({
     store,
-    readPort: port,
     historyPort: stubHistoryPort(),
     modelProviderProfile: "opencode/deepseek-v4-flash",
     maxQueuedJobs: options.maxQueuedJobs ?? 256,
@@ -130,7 +142,7 @@ function managerFixture(options: {
       : {}),
     ...(options.nowMs !== undefined ? { nowMs: options.nowMs } : {}),
   });
-  return { manager, store, dir, mutable };
+  return { manager, store, dir };
 }
 
 test("B9-AC1: pending+running+successors never exceed the configured bounds (finalizers deferred, never admitted unbounded)", () => {
@@ -217,11 +229,8 @@ test("B9-AC5/AC8: durable intent persists BEFORE scheduling; crash → restart r
   try {
     // Process 1: durable append + wrapup enqueued, then CRASH before the pump.
     const store1 = HistorianStore.open({ databasePath: join(dir, "historian.db") });
-    const mutable = [u("u-1", null, "wrap me up")];
-    const port1 = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
     const manager1 = new HistorianManager({
       store: store1,
-      readPort: port1,
       historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 2,
@@ -237,10 +246,8 @@ test("B9-AC5/AC8: durable intent persists BEFORE scheduling; crash → restart r
 
     // Process 2: restart — recover() re-admits the durable closing intent.
     const store2 = HistorianStore.open({ databasePath: join(dir, "historian.db") });
-    const port2 = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
     const manager2 = new HistorianManager({
       store: store2,
-      readPort: port2,
       historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 2,
@@ -280,11 +287,8 @@ test("B9-AC2/AC8: thousands of durable closing intents do not grow the bounded s
       });
     }
     assert.equal(store.countClosingSessions(), 2000);
-    const mutable = [u("u-1", null)];
-    const port = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
     const manager = new HistorianManager({
       store,
-      readPort: port,
       historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 8,
@@ -327,11 +331,8 @@ test("B9-AC4: refill is fair and deterministic — FIFO by finalizationRequested
         updatedAt: new Date(base + intentTime * 1000).toISOString(),
       });
     }
-    const mutable = [u("u-1", null)];
-    const port = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
     const manager = new HistorianManager({
       store,
-      readPort: port,
       historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 16,
@@ -394,11 +395,8 @@ test("B9-AC6: duplicate wrapup/recovery requests → exactly one terminal transi
   const dir = mkdtempSync(join(tmpdir(), "iris-b9-dup-"));
   try {
     const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
-    const mutable = [u("u-1", null, "once")];
-    const port = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
     const manager = new HistorianManager({
       store,
-      readPort: port,
       historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 4,
@@ -486,11 +484,8 @@ test("B9-AC3/AC8: worker failure keeps the durable intent; final commit still ha
   const dir = mkdtempSync(join(tmpdir(), "iris-b9-fail-"));
   try {
     const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
-    const mutable = [u("u-1", null, "retry me")];
-    const port = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
     const manager = new HistorianManager({
       store,
-      readPort: port,
       historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 2,
@@ -506,10 +501,8 @@ test("B9-AC3/AC8: worker failure keeps the durable intent; final commit still ha
     manager.close();
     // Restart: recover() re-admits; the finalizer runs to completion.
     const store2 = HistorianStore.open({ databasePath: join(dir, "historian.db") });
-    const port2 = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
     const manager2 = new HistorianManager({
       store: store2,
-      readPort: port2,
       historyPort: stubHistoryPort(),
       modelProviderProfile: "m",
       maxQueuedJobs: 2,

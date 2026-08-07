@@ -11,13 +11,20 @@
 import type {
   HistorianBoundarySnapshot,
   HistorianSessionState,
-  RuntimeSessionHistoryReadPort,
   SequencedSessionEntry,
 } from "../contracts/historian.js";
 import type { HistorianStore } from "./historian-store.js";
 import { HistorianQueue, HistorianWorker, type HistorianJob } from "./historian-queue.js";
-import { HistorianRunner, type RunnerCommitHook } from "./historian-runner.js";
+import {
+  contextUnitToSequencedEntry,
+  HistorianRunner,
+  unprocessedFromEntrySeq,
+  type RunnerCommitHook,
+} from "./historian-runner.js";
 import { freezeBoundary, type LineageBoundaryInput } from "./historian-boundary.js";
+
+/** iris_agent#66: freeze head window (matches the old readPort 4096 page). */
+const MAX_FREEZE_HEAD_ENTRY_SEQ = 4096;
 import { buildAnalysisView, validateRange } from "./historian-analysis.js";
 import { PublicationService } from "./historian-publication.js";
 import { runWrapup } from "./historian-continuity.js";
@@ -49,17 +56,20 @@ import type { MemoryClientPort } from "../contracts/ports.js";
 
 export interface HistorianManagerOptions {
   store: HistorianStore;
-  /** Read port for the CURRENT active Runtime Session (Host-wired). */
-  readPort: RuntimeSessionHistoryReadPort;
   /** Model/provider profile for boundary freeze. */
   modelProviderProfile: string;
   nowMs?: () => number;
   claimLeaseMs?: number;
   maxQueuedJobs?: number;
   maxAttempts?: number;
-  /** R3-P4：Context lineage 物化边界读取端口（compaction 授权用）。缺省 =
-   * 未接线，此时 authorizeCompaction 抛错（fail-closed）。 */
-  historyPort?: ContextHistoryReadPort;
+  /**
+   * R3-P4 + iris_agent#66: the Context-owned history read/claim port. THIS
+   * is the Historian's normal semantic input (committed Context units,
+   * contextSeq order); construction REQUIRES it (fail-closed — a Historian
+   * without Context input cannot exist in production). Pi Session access is
+   * not part of the normal path.
+   */
+  historyPort: ContextHistoryReadPort;
   /** Optional per-invocation recall projections for B7 assessments. */
   recallProjectionsFor?: (
     runtimeSessionId: string,
@@ -116,7 +126,7 @@ export interface HistorianHealth {
 
 export class HistorianManager {
   private readonly store: HistorianStore;
-  private readonly readPort: RuntimeSessionHistoryReadPort;
+  private readonly historyPort: ContextHistoryReadPort;
   private readonly modelProviderProfile: string;
   private readonly nowMs: () => number;
   private readonly queue: HistorianQueue;
@@ -124,7 +134,6 @@ export class HistorianManager {
   private readonly recallProjectionsFor: HistorianManagerOptions["recallProjectionsFor"];
   private readonly service: PublicationService;
   private readonly runner: HistorianRunner;
-  private readonly historyPort: ContextHistoryReadPort | undefined;
   private readonly memoryClient: MemoryClientPort | undefined;
   private readonly claimLeaseMs: number;
   /** iris_agent#53: successor-registry bound (memory model). */
@@ -140,7 +149,15 @@ export class HistorianManager {
 
   constructor(options: HistorianManagerOptions) {
     this.store = options.store;
-    this.readPort = options.readPort;
+    // iris_agent#66: the Context-owned port is REQUIRED — a production
+    // Historian must be constructed with its normal semantic input wired,
+    // never a Pi Session port. Fail closed on missing wiring.
+    if (options.historyPort === undefined) {
+      throw new Error(
+        "historian manager: ContextHistoryReadPort is required (iris_agent#66 — Historian's normal semantic input must be Context-owned committed units)",
+      );
+    }
+    this.historyPort = options.historyPort;
     this.modelProviderProfile = options.modelProviderProfile;
     this.nowMs = options.nowMs ?? (() => Date.now());
     this.recallProjectionsFor = options.recallProjectionsFor;
@@ -160,14 +177,18 @@ export class HistorianManager {
       store: this.store,
       nowMs: this.nowMs,
       claimLeaseMs: this.claimLeaseMs,
-      ...(this.historyPort !== undefined ? { historyPort: this.historyPort } : {}),
+      historyPort: this.historyPort,
     });
     const commitHook: RunnerCommitHook = {
       commitSafePrefix: (input) => {
         this.service.commitSafePrefix(input);
       },
     };
-    this.runner = new HistorianRunner({ store: this.store, readPort: this.readPort, commitHook });
+    this.runner = new HistorianRunner({
+      store: this.store,
+      historyPort: this.historyPort,
+      commitHook,
+    });
     this.worker = new HistorianWorker(this.queue, (job) => this.executeJob(job));
   }
 
@@ -545,18 +566,13 @@ export class HistorianManager {
    * 替换 raw P5"）。cut = min(protectedTailStartEntrySeq - 1,
    * lineageMaterializedEntrySeq)——保护尾部 raw-inviolable，任何授权都绝不越过
    * protectedTailStartEntrySeq - 1；lineage 从未物化 → cut = 0（不授权）。
-   * 需要 historyPort（ContextHistoryReadPort）；未接线 → 抛错（fail-closed，
-   * compaction 授权必须显式接线才能生效）。
+   * iris_agent#66: the authorizer consumes ONLY Context-owned values
+   * (historyPort) + Historian boundary snapshots — no Pi Session read is
+   * involved in the normal authorization path.
    */
   authorizeCompaction(runtimeSessionId: string): CompactionAuthorization {
-    if (this.historyPort === undefined) {
-      throw new Error(
-        "historian manager: authorizeCompaction requires a ContextHistoryReadPort (wire historyPort)",
-      );
-    }
     const authorizer = createCompactionAuthorizer({
       historyPort: this.historyPort,
-      sessionReadPort: this.readPort,
       latestBoundaryFor: (sessionId) => this.store.listBoundarySnapshots(sessionId, 1)[0],
     });
     return authorizer.authorize(runtimeSessionId);
@@ -590,6 +606,8 @@ export class HistorianManager {
       runtimeSessionId: input.runtimeSessionId,
       boundary: input.boundary,
       eligibleEntries: unprocessed,
+      // iris_agent#66: same anchor as the freeze (durable cursor + 1).
+      unprocessedFromEntrySeq: unprocessedFromEntrySeq(input.state),
     });
     if (!outcome.ok) {
       return; // 边界漂移 → 本次 wrapup 只落快照（不推进、不发布）
@@ -626,18 +644,23 @@ export class HistorianManager {
   ): Promise<{ snapshot: HistorianBoundarySnapshot; nothingNew: boolean } | null> {
     const state = this.store.getSessionState(runtimeSessionId);
     const processed = state?.processedThroughEntrySeq ?? 0;
-    const page = await this.readPort.readEntries({
+    // iris_agent#66: the freeze head comes from committed Context units
+    // (the normal semantic input), not from a Pi Session read.
+    const units = this.historyPort.claimUnitsForHistorian(
       runtimeSessionId,
-      afterEntrySeqExclusive: 0,
-      limit: 4096,
-    });
-    if (page.entries.length === 0) {
+      1,
+      MAX_FREEZE_HEAD_ENTRY_SEQ,
+    );
+    const entries = units
+      .filter((unit) => unit.entrySeq !== undefined)
+      .map((unit) => contextUnitToSequencedEntry(runtimeSessionId, unit));
+    if (entries.length === 0) {
       return null;
     }
     const result = freezeBoundary({
       rawSeamInput: {
         runtimeSessionId,
-        entries: page.entries,
+        entries,
         processedThroughEntrySeq: processed,
         // No fixed tail margin: the freeze's arc/in-flight seam logic is the
         // protected-tail authority (a fixed margin would leave short sessions
@@ -666,13 +689,19 @@ export class HistorianManager {
         if (state === undefined) {
           return { ok: false, errorCode: "session_state_missing" };
         }
-        const port = this.readPort;
-        const page = await port.readEntries({
+        // iris_agent#66: wrapup claims committed Context units through the
+        // Context-owned port (never a Pi Session read).
+        const units = this.historyPort.claimUnitsForHistorian(
           runtimeSessionId,
-          afterEntrySeqExclusive: 0,
-          limit: 4096,
-        });
-        const eligible = page.entries.filter((e) => e.entrySeq <= boundary.eligibleThroughEntrySeq);
+          1,
+          boundary.eligibleThroughEntrySeq,
+        );
+        const eligible = units
+          .filter(
+            (unit) =>
+              unit.entrySeq !== undefined && unit.entrySeq <= boundary.eligibleThroughEntrySeq,
+          )
+          .map((unit) => contextUnitToSequencedEntry(runtimeSessionId, unit));
         const analysis = buildAnalysisView({
           runtimeSessionId,
           boundary,

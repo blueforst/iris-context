@@ -24,7 +24,6 @@ import {
 import { HistorianStore } from "../src/historian/historian-store.js";
 import { FakeMemoryClient } from "../src/historian/memory-client.js";
 import type { MemoryClientPort } from "../src/contracts/ports.js";
-import { SessionHistoryReadPort } from "../src/historian/history-read-port.js";
 import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
 
 const SESSION = "iris-runtime-2026-08-01-1";
@@ -39,7 +38,6 @@ function fixture(): {
   const memory = new FakeMemoryClient();
   const manager = new HistorianManager({
     store,
-    readPort: new SessionHistoryReadPort({ readRawEntries: async () => [] }),
     modelProviderProfile: "mock",
     nowMs: () => Date.now(),
     historyPort: fakeHistoryPort(),
@@ -69,6 +67,7 @@ function fakeHistoryPort(): ContextHistoryReadPort {
         derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
       },
     ],
+    claimUnitsForHistorian: () => [],
     lineageId: () => "identity-r4",
   };
 }
@@ -225,7 +224,6 @@ test("r4 memory client: no client wired NEVER fabricates receipts (iris_agent#46
   try {
     const manager = new HistorianManager({
       store,
-      readPort: new SessionHistoryReadPort({ readRawEntries: async () => [] }),
       modelProviderProfile: "mock",
       nowMs: () => Date.now(),
       historyPort: fakeHistoryPort(),
@@ -258,7 +256,6 @@ test("r4 memory client: thrown client errors are caught (no unhandled rejection)
     } as unknown as MemoryClientPort;
     const manager = new HistorianManager({
       store,
-      readPort: new SessionHistoryReadPort({ readRawEntries: async () => [] }),
       modelProviderProfile: "mock",
       nowMs: () => Date.now(),
       historyPort: fakeHistoryPort(),
@@ -286,7 +283,6 @@ test("r4 memory client: fake/missing receipts cannot authorize outbox reclaim (i
   try {
     const manager = new HistorianManager({
       store,
-      readPort: new SessionHistoryReadPort({ readRawEntries: async () => [] }),
       modelProviderProfile: "mock",
       nowMs: () => Date.now(),
       historyPort: fakeHistoryPort(),

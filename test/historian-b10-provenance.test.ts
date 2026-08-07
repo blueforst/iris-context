@@ -28,7 +28,7 @@ import { HistorianRunner } from "../src/historian/historian-runner.js";
 import { createPublicationCommitHook } from "../src/historian/historian-publication.js";
 import { HistorianStore } from "../src/historian/historian-store.js";
 import { canonicalUnitRangeHash } from "../src/historian/historian-publication.js";
-import { SessionHistoryReadPort } from "../src/historian/history-read-port.js";
+import { contextUnitToSequencedEntry } from "../src/historian/historian-runner.js";
 import type { HistorianUnitView } from "../src/historian/anti-echo.js";
 
 const SESSION = "iris-runtime-2026-08-01-1";
@@ -58,8 +58,31 @@ function unit(contextSeq: number, overrides: Partial<HistorianUnitView> = {}): H
   };
 }
 
-/** Fake ContextHistoryReadPort: configurable unit views + a fixed lineage id. */
+/** Fake ContextHistoryReadPort: configurable unit views + a fixed lineage id.
+ * iris_agent#66: claimUnitsForHistorian serves FULL committed ContextMessageUnit
+ * rows (the normal semantic input); the narrow views stay values-only. */
 function stubPort(units: HistorianUnitView[], lineageId = LINEAGE): ContextHistoryReadPort {
+  const claim = (_r: string, fromEntrySeq: number, toEntrySeq: number) =>
+    units
+      .filter((u) => u.contextSeq >= fromEntrySeq && u.contextSeq <= toEntrySeq)
+      .map((u) => ({
+        lineageId,
+        runtimeSessionId: _r,
+        contextSeq: u.contextSeq,
+        unitId: u.contextUnitId,
+        sourceEventId: u.runtimeEventId,
+        runtimeEventId: u.runtimeEventId,
+        unitType: u.unitType,
+        disposition: u.disposition,
+        entryId: `entry-${u.contextSeq}`,
+        entrySeq: u.contextSeq,
+        contentHash: u.contentHash,
+        payload: { role: "user", content: `content-${u.contextSeq}`, timestamp: 1 },
+        paired: false,
+        derivationRefs: u.derivationRefs,
+        schemaVersion: "context-unit-v1",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }));
   return {
     getMaterializedBoundary() {
       return {
@@ -73,8 +96,11 @@ function stubPort(units: HistorianUnitView[], lineageId = LINEAGE): ContextHisto
     listUnitsForHistorian() {
       return units;
     },
-    listUnitsForHistorianByEntrySeq() {
-      return units;
+    listUnitsForHistorianByEntrySeq(_r: string, fromEntrySeq: number, toEntrySeq: number) {
+      return units.filter((u) => u.contextSeq >= fromEntrySeq && u.contextSeq <= toEntrySeq);
+    },
+    claimUnitsForHistorian(_r: string, fromEntrySeq: number, toEntrySeq: number) {
+      return claim(_r, fromEntrySeq, toEntrySeq);
     },
     lineageId() {
       return lineageId;
@@ -96,12 +122,19 @@ function fixture(port: ContextHistoryReadPort): Fixture {
     store,
     dir,
     async runCycle(entries, sessionId = SESSION) {
-      const sessionPort = new SessionHistoryReadPort({ readRawEntries: async () => entries });
-      const page = await sessionPort.readEntries({ runtimeSessionId: sessionId, limit: 100 });
+      // iris_agent#66: BOTH the freeze head and the runner input come from
+      // the SAME Context claim path (committed units) — the freeze must see
+      // exactly what the runner consumes, or the frozen sourceRangeHash
+      // would never match the claimed range.
+      const claimed = port.claimUnitsForHistorian(sessionId, 1, 4096);
+      const claimedEntries = claimed
+        .filter((unit) => unit.entrySeq !== undefined)
+        .map((unit) => contextUnitToSequencedEntry(sessionId, unit));
+      void entries; // the fixture's entries feed freeze through the claim path
       const freeze = freezeBoundary({
         rawSeamInput: {
           runtimeSessionId: sessionId,
-          entries: page.entries,
+          entries: claimedEntries,
           processedThroughEntrySeq: 0,
           tailMarginEntries: 0,
           modelProviderProfile: "opencode/deepseek-v4-flash",
@@ -110,7 +143,7 @@ function fixture(port: ContextHistoryReadPort): Fixture {
       });
       const runner = new HistorianRunner({
         store,
-        readPort: sessionPort,
+        historyPort: port,
         commitHook: createPublicationCommitHook({ store, historyPort: port }),
       });
       return runner.run({ runtimeSessionId: sessionId, boundary: freeze.snapshot });
@@ -238,15 +271,17 @@ test("B10-AC3: Context range and rangeHash derive from the exact committed units
   }
 });
 
-test("B10-AC4: no Context batch -> fail closed, never a fabricated 1..1 range", async () => {
+test("B10-AC4: no Context batch -> nothing new, never a fabricated 1..1 range", async () => {
   const fx = fixture(stubPort([]));
   try {
-    // Fail closed: the publication path THROWS the typed provenance error
-    // (the runner propagates it); nothing is published, nothing fabricated.
-    await assert.rejects(
-      () => fx.runCycle([u("u-1", null, "one")]),
-      /refusing to fabricate a Context range/,
-    );
+    // iris_agent#66: with Context-owned input the claim port IS the batch
+    // source — an empty claim means there are no committed semantic units,
+    // so the runner reports nothing_new (no fabrication, no publication,
+    // no cursor advance). The previous Session-derived freeze path could
+    // see a Session head and try to publish against an empty Context range;
+    // now both freeze and runner read the SAME claim, so this cannot arise.
+    const result = await fx.runCycle([u("u-1", null, "one")]);
+    assert.equal(result.status, "nothing_new");
     const env = fx.envelopeOf();
     assert.equal(env, undefined, "no publication with fabricated provenance");
     const pubs = fx.store
@@ -254,6 +289,8 @@ test("B10-AC4: no Context batch -> fail closed, never a fabricated 1..1 range", 
       .prepare("SELECT COUNT(*) AS n FROM publications WHERE runtime_session_id = ?")
       .get(SESSION) as { n: number };
     assert.equal(pubs.n, 0);
+    // No cursor was invented either.
+    assert.equal(fx.store.getSessionState(SESSION), undefined);
   } finally {
     fx.store.close();
     rmSync(fx.dir, { recursive: true, force: true });
@@ -264,24 +301,27 @@ test("B10-AC5: production Historian cannot publish without the Context read/clai
   const dir = mkdtempSync(join(tmpdir(), "iris-b10-noport-"));
   try {
     const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
-    const sessionPort = new SessionHistoryReadPort({
-      readRawEntries: async () => [u("u-1", null)],
-    });
-    const page = await sessionPort.readEntries({ runtimeSessionId: SESSION, limit: 100 });
+    const hp = stubPort([unit(1)]);
+    const claimedEntries = hp
+      .claimUnitsForHistorian(SESSION, 1, 1)
+      .filter((unit) => unit.entrySeq !== undefined)
+      .map((unit) => contextUnitToSequencedEntry(SESSION, unit));
     const freeze = freezeBoundary({
       rawSeamInput: {
         runtimeSessionId: SESSION,
-        entries: page.entries,
+        entries: claimedEntries,
         processedThroughEntrySeq: 0,
         tailMarginEntries: 0,
         modelProviderProfile: "m",
         frozenAt: "2026-08-01T00:00:00.000Z",
       },
     });
-    // NOTE: createPublicationCommitHook WITHOUT historyPort.
+    // NOTE: createPublicationCommitHook WITHOUT historyPort — the runner
+    // still needs its Context input (iris_agent#66), but the hook must fail
+    // closed when the publication service has no Context provenance.
     const runner = new HistorianRunner({
       store,
-      readPort: sessionPort,
+      historyPort: hp,
       commitHook: createPublicationCommitHook({ store }),
     });
     await assert.rejects(

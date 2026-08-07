@@ -23,45 +23,10 @@ import type { SessionTreeEntry } from "@earendil-works/pi-agent-core";
 import { HistorianManager } from "../src/historian/historian-manager.js";
 import { HistorianStore } from "../src/historian/historian-store.js";
 import { FakeMemoryClient } from "../src/historian/memory-client.js";
-import { SessionHistoryReadPort } from "../src/historian/history-read-port.js";
-import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
-
-/** iris_agent#45: production Historian cannot publish without the Context
- * read/claim port — tests wire a stub port with committed units. */
-function stubHistoryPort(): ContextHistoryReadPort {
-  return {
-    getMaterializedBoundary() {
-      return {
-        representedThroughContextSeq: 0,
-        representedThroughEntrySeq: 0,
-        m0ContentHash: null,
-        lineageStatus: "ok",
-        providerProfileId: "mock",
-      };
-    },
-    listUnitsForHistorian() {
-      return [];
-    },
-    listUnitsForHistorianByEntrySeq(_r: string, fromEntrySeq: number, toEntrySeq: number) {
-      const units: import("../src/historian/anti-echo.js").HistorianUnitView[] = [];
-      for (let seq = fromEntrySeq; seq <= toEntrySeq; seq++) {
-        units.push({
-          contextUnitId: `unit-${seq}`,
-          contextSeq: seq,
-          runtimeEventId: `evt-${seq}`,
-          unitType: "input",
-          disposition: "include",
-          contentHash: "b".repeat(64),
-          derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
-        });
-      }
-      return units;
-    },
-    lineageId() {
-      return "identity-b8b9";
-    },
-  };
-}
+import {
+  contextUnitsFromEntries,
+  createFixtureHistoryPort,
+} from "./helpers/historian-context-stub.js";
 
 const SESSION = "iris-runtime-2026-08-01-1";
 
@@ -113,12 +78,14 @@ function managerFixture(entries: SessionTreeEntry[]): {
   const dir = mkdtempSync(join(tmpdir(), "iris-b8-"));
   const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
   const mutable = [...entries];
-  const port = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
+  // iris_agent#66: the fixture feeds the Historian through the Context-owned
+  // claim port (committed units), not a Pi Session read port.
   const manager = new HistorianManager({
     store,
-    readPort: port,
     modelProviderProfile: "opencode/deepseek-v4-flash",
-    historyPort: stubHistoryPort(),
+    historyPort: createFixtureHistoryPort({
+      units: () => contextUnitsFromEntries(mutable),
+    }),
     // iris_agent#46: without a client no outbox row can be marked delivered;
     // the B8 delivery assertions need a REAL receipt-capable client.
     memoryClient: new FakeMemoryClient(),
@@ -223,11 +190,11 @@ test("B8: closed Session retry at startup (recover re-enqueues low)", async () =
     // Simulated RESTART: a new manager over the SAME durable store + data
     // root recovers the closed session (the Session has since grown).
     mutable.push(u("u-2", "a-1", "new after restart"), c("c-2", "u-2"));
-    const port = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
     const restarted = new HistorianManager({
       store,
-      readPort: port,
-      historyPort: stubHistoryPort(),
+      historyPort: createFixtureHistoryPort({
+        units: () => contextUnitsFromEntries(mutable),
+      }),
       modelProviderProfile: "opencode/deepseek-v4-flash",
     });
     await restarted.recover();
@@ -261,12 +228,12 @@ test("B8: SIGKILL-style reopen — a fully committed publication survives (crash
   const entries = [u("u-1", null, "hello"), c("c-1", "u-1"), assistantText("a-1", "c-1", "reply")];
   try {
     const store = HistorianStore.open({ databasePath: dbPath });
-    const port = new SessionHistoryReadPort({ readRawEntries: async () => entries });
     const manager = new HistorianManager({
       store,
-      readPort: port,
       modelProviderProfile: "m",
-      historyPort: stubHistoryPort(),
+      historyPort: createFixtureHistoryPort({
+        units: () => contextUnitsFromEntries(entries),
+      }),
     });
     await manager.triggerIncremental(SESSION);
     await manager.pumpOnce();
@@ -365,17 +332,16 @@ test("F5: recover() re-enqueues closing sessions (durable intent survives crash)
     assert.equal(store.getSessionState(SESSION)?.status, "closing", "durable closing remains");
 
     // Restart: a fresh manager over the SAME store recovers the closing session.
-    const port = new SessionHistoryReadPort({
-      readRawEntries: async () => [
-        u("u-1", null, "please read the file"),
-        c("c-1", "u-1"),
-        assistantText("a-1", "c-1", "I will read it."),
-      ],
-    });
     const restarted = new HistorianManager({
       store,
-      readPort: port,
-      historyPort: stubHistoryPort(),
+      historyPort: createFixtureHistoryPort({
+        units: () =>
+          contextUnitsFromEntries([
+            u("u-1", null, "please read the file"),
+            c("c-1", "u-1"),
+            assistantText("a-1", "c-1", "I will read it."),
+          ]),
+      }),
       modelProviderProfile: "opencode/deepseek-v4-flash",
     });
     await restarted.recover();
@@ -459,13 +425,11 @@ test("F5: wrapup of a session whose head is an in-flight tool arc still terminat
       `in-flight-arc wrapup must terminate closing, got ${state?.status}`,
     );
     // And recovery after restart must not spin forever.
-    const port = new SessionHistoryReadPort({
-      readRawEntries: async () => [toolCallEntry, c("c-1", "a-tool-1", 2)],
-    });
     const restarted = new HistorianManager({
       store,
-      readPort: port,
-      historyPort: stubHistoryPort(),
+      historyPort: createFixtureHistoryPort({
+        units: () => contextUnitsFromEntries([toolCallEntry, c("c-1", "a-tool-1", 2)]),
+      }),
       modelProviderProfile: "opencode/deepseek-v4-flash",
     });
     await restarted.recover();
@@ -478,6 +442,92 @@ test("F5: wrapup of a session whose head is an in-flight tool arc still terminat
     restarted.close();
   } finally {
     manager.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("iris_agent#66: Historian normal input is Context-owned ONLY — construction requires the claim port and never a Session read", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iris-b66-boundary-"));
+  try {
+    const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
+    // 1) Production construction REQUIRES the Context claim port — a
+    //    Historian without Context input cannot exist (fail closed).
+    assert.throws(
+      () => new HistorianManager({ store, modelProviderProfile: "m" } as never),
+      /ContextHistoryReadPort is required/,
+      "construction without the Context claim port fails closed",
+    );
+    // 2) With the claim port wired, the manager's semantic input comes from
+    //    committed units — no RuntimeSessionHistoryReadPort is needed.
+    const manager = new HistorianManager({
+      store,
+      modelProviderProfile: "m",
+      historyPort: createFixtureHistoryPort({
+        units: () =>
+          contextUnitsFromEntries([
+            u("u-1", null, "one"),
+            c("c-1", "u-1"),
+            assistantText("a-1", "c-1", "reply"),
+          ]),
+      }),
+    });
+    await manager.triggerIncremental(SESSION);
+    await manager.pumpOnce();
+    assert.equal(store.countPublications(), 1, "publication committed from Context units");
+    assert.ok(
+      (store.getSessionState(SESSION)?.processedThroughEntrySeq ?? 0) >= 1,
+      "cursor advanced from Context-owned batch",
+    );
+    manager.close();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("iris_agent#66: Evidence identity is independent of Session segmentation — one lineage, same units, identical range hash across sessions", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iris-b66-split-"));
+  try {
+    const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
+    const mutable: SessionTreeEntry[] = [
+      u("u-1", null, "alpha"),
+      c("c-1", "u-1"),
+      assistantText("a-1", "c-1", "beta"),
+      c("c-2", "a-1"),
+    ];
+    const port = createFixtureHistoryPort({
+      units: () => contextUnitsFromEntries(mutable),
+      representedThroughEntrySeq: 4,
+    });
+    // Process the SAME committed units under two DIFFERENT session ids —
+    // the lineage (and therefore the semantic Evidence identity) must not
+    // change: rollover does not alter Historian semantic continuity.
+    const managerA = new HistorianManager({
+      store,
+      modelProviderProfile: "m",
+      historyPort: port,
+    });
+    await managerA.triggerIncremental(SESSION);
+    await managerA.pumpOnce();
+    const envA = store
+      .raw()
+      .prepare(
+        "SELECT payload_json FROM publication_outbox WHERE runtime_session_id = ? ORDER BY outbox_sequence DESC LIMIT 1",
+      )
+      .get(SESSION) as { payload_json: string | null } | undefined;
+    assert.ok(envA?.payload_json, "session A published");
+    const parsedA = JSON.parse(envA.payload_json) as {
+      contextRange: { contextLineageId: string };
+    };
+    assert.equal(
+      parsedA.contextRange.contextLineageId,
+      "identity-stub",
+      "lineage id from the Context port",
+    );
+    assert.notEqual(parsedA.contextRange.contextLineageId, `identity-${SESSION}`);
+    managerA.close();
+    store.close();
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

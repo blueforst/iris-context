@@ -139,6 +139,9 @@ async function producePublication(): Promise<{
     runtimeSessionId: SESSION,
     boundary: frozen.snapshot,
     eligibleEntries: page.entries,
+    // iris_agent#66: the fixture's durable cursor is 0 → anchor = 1 (same as
+    // the freeze's unprocessedFromEntrySeq).
+    unprocessedFromEntrySeq: 1,
   });
   assert.ok(outcome.ok, "fixture range must validate");
 
@@ -166,6 +169,7 @@ async function producePublication(): Promise<{
           derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
         },
       ],
+      claimUnitsForHistorian: () => [],
       lineageId: () => "identity-pin",
     },
   }).commitSafePrefix({

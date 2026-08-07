@@ -105,6 +105,24 @@ export interface ContextHistoryReadPort {
     contentHash: string;
     derivationRefs: RuntimeEventDerivationRefs;
   }>;
+
+  /**
+   * iris_agent#66: the NORMAL semantic input path for the Historian. Claims
+   * committed, immutable Context semantic units (with payload) from the
+   * identity-level lineage, in global contextSeq order. Session ids/ranges
+   * survive only as optional opaque rawArchiveRef/audit attribution (the
+   * entrySeq window is a narrow archive mapping, never the semantic order).
+   * This is the ONLY interface the production Historian consumes for
+   * batch/analysis/finalization input; Pi Session access stays behind the
+   * explicitly separated recovery/audit interface and can never be selected
+   * by the normal Historian path.
+   * Missing lineage → fail-closed throw (same as the other port methods).
+   */
+  claimUnitsForHistorian(
+    runtimeSessionId: string,
+    fromEntrySeq: number,
+    toEntrySeq: number,
+  ): ContextMessageUnit[];
 }
 
 /**
@@ -211,6 +229,20 @@ export function createContextHistoryReadPort(store: ContextStore): ContextHistor
           contentHash: unit.contentHash,
           derivationRefs: unit.derivationRefs,
         }));
+    },
+    claimUnitsForHistorian(runtimeSessionId, fromEntrySeq, toEntrySeq) {
+      // iris_agent#66: the normal Historian semantic input is committed
+      // Context units (identity-level lineage, contextSeq order). Same
+      // session→lineage resolution as the narrow view, but returns the FULL
+      // immutable unit (payload included) — the Historian's batch/analysis/
+      // finalization source. No lineage → fail-closed.
+      const lineage = store.getLineage(runtimeSessionId);
+      if (lineage === undefined) {
+        throw new Error(
+          `context history read port: no lineage for ${runtimeSessionId} (fail closed)`,
+        );
+      }
+      return store.listUnitsByEntrySeqRange(lineage.lineageId, fromEntrySeq, toEntrySeq);
     },
   };
 }

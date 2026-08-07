@@ -79,13 +79,6 @@ export function authorizePiCompaction(input: {
 export interface CompactionAuthorizerSources {
   /** Context lineage 物化边界（values-only，跨库安全）。 */
   historyPort: ContextHistoryReadPort;
-  /**
-   * 保留的会话读取端口：未来 Host/Pi 集成在真正 trim raw 条目之前，用它读取
-   * 当前 live head 以约束裁剪（边界快照的 observed head 可能早于会话最新增长）。
-   * 同步的 authorize() 不读取它（契约保持同步），其角色是集成步骤的 live-head
-   * 校验 seam。
-   */
-  sessionReadPort: import("../contracts/historian.js").RuntimeSessionHistoryReadPort;
   /** 该 session 最新 HistorianBoundarySnapshot（protected tail 的权威来源）。
    * undefined = 尚无边界（例如从未 freeze）→ 不授权。 */
   latestBoundaryFor: (runtimeSessionId: string) => HistorianBoundarySnapshot | undefined;
