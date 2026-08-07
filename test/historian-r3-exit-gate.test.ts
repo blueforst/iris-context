@@ -47,6 +47,7 @@ import { HistorianManager } from "../src/historian/historian-manager.js";
 import { HistorianQueue } from "../src/historian/historian-queue.js";
 import { HistorianStore } from "../src/historian/historian-store.js";
 import { SessionHistoryReadPort } from "../src/historian/history-read-port.js";
+import { FakeMemoryClient } from "../src/historian/memory-client.js";
 
 const SESSION = "iris-runtime-2026-08-01-1";
 const NEW_SESSION = "iris-runtime-2026-08-02-1";
@@ -602,7 +603,10 @@ test("R3 Exit Gate: publicationSequence 跨 incremental→wrapup 连续递增（
 // ---- 5. outbox 状态机（b5 已覆盖；此处对 wrapup 生成的 outbox 行做完整流转）----
 
 test("R3 Exit Gate: wrapup 生成的 outbox 行走完 claim→delivering→delivered", async () => {
-  const { manager, store, dir } = managerFixture([u("u-1", null, "hello"), c("c-1", "u-1")]);
+  const { manager, store, dir } = managerFixture(
+    [u("u-1", null, "hello"), c("c-1", "u-1")],
+    { memoryClient: new FakeMemoryClient() },
+  );
   try {
     await manager.enqueueWrapup(SESSION);
     await manager.pumpOnce();
@@ -614,9 +618,10 @@ test("R3 Exit Gate: wrapup 生成的 outbox 行走完 claim→delivering→deliv
       }
     ).publication_id;
 
-    // claim → delivering。
-    const delivered = manager.drainOutbox();
-    assert.equal(delivered, 1, "wrapup outbox row claimed and delivered");
+    // claim → delivering (iris_agent#46: only a real receipt marks delivered).
+    const delivered = await manager.drainOutbox();
+    assert.equal(delivered.claimed, 1, "wrapup outbox row claimed");
+    assert.equal(delivered.accepted, 1, "real receipt authorizes delivered");
     assert.equal(store.countOutboxPending(), 0, "outbox drained to delivered");
     const outbox = store
       .raw()

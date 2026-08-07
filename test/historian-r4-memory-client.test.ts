@@ -50,7 +50,6 @@ function fixture(): {
 
 function fakeHistoryPort(): ContextHistoryReadPort {
   return {
-    lineageId: () => "lineage-test",
     getMaterializedBoundary: () => ({
       representedThroughContextSeq: 0,
       representedThroughEntrySeq: null,
