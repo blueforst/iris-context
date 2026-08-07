@@ -63,7 +63,10 @@ function fakeJob(
 
 /** Refill-style re-admission: the durable backlog hands the session back
  * with the PERSISTED retryAttempts value (never a fresh zero budget). */
-function jobAtAttempt(runtimeSessionId: string, attempts: number): Parameters<HistorianQueue["enqueue"]>[0] {
+function jobAtAttempt(
+  runtimeSessionId: string,
+  attempts: number,
+): Parameters<HistorianQueue["enqueue"]>[0] {
   const base = fakeJob(runtimeSessionId, "highest");
   return {
     ...base,
@@ -140,7 +143,9 @@ function stubHistoryPort(): ContextHistoryReadPort {
  * executions, then behaves like the stub. The freeze path (first claim of
  * each admission) must keep working — the failure is injected into the
  * handler execution, not into scheduling. */
-function flakyHistoryPort(failures: number): ContextHistoryReadPort & { remainingFailures: number } {
+function flakyHistoryPort(
+  failures: number,
+): ContextHistoryReadPort & { remainingFailures: number } {
   const port = stubHistoryPort() as ContextHistoryReadPort & { remainingFailures: number };
   port.remainingFailures = failures;
   let claimCalls = 0;
@@ -209,7 +214,11 @@ test("B11-AC2: repeated no_capacity never re-executes the same durable attempt; 
   for (let cycle = 1; cycle <= 3; cycle++) {
     const job = queue.take();
     assert.ok(job, `cycle ${cycle} must have a runnable job`);
-    assert.equal(job.attempt, cycle - 1, `cycle ${cycle} executes attempt ${cycle - 1} exactly once`);
+    assert.equal(
+      job.attempt,
+      cycle - 1,
+      `cycle ${cycle} executes attempt ${cycle - 1} exactly once`,
+    );
     // Fill the scheduler to capacity while the job is "running".
     queue.enqueue(fakeJob(`filler-${cycle}`, "highest"));
     const outcome = queue.requeue(job);
@@ -339,7 +348,11 @@ test("B11-AC5: crash before and after exhaustion persistence; exhausted sessions
     });
     await manager2.recover();
     await manager2.refill();
-    assert.equal(manager2.getQueue().pendingCount(), 0, "exhausted finalizer stays out of the scheduler");
+    assert.equal(
+      manager2.getQueue().pendingCount(),
+      0,
+      "exhausted finalizer stays out of the scheduler",
+    );
     assert.equal(store2.countExhaustedSessions(), 1);
 
     // Explicit operator reactivation is the ONLY reset path: it clears the
@@ -375,7 +388,11 @@ test("B11-AC6: reactivation cannot duplicate terminal commits — one terminal t
       now += 60_000; // elapse the retry backoff window between attempts
     }
     assert.equal(store.countExhaustedSessions(), 1, "three failed executions exhaust the budget");
-    assert.equal(store.listContinuitySnapshots(SESSION).length, 0, "no terminal transition while failing");
+    assert.equal(
+      store.listContinuitySnapshots(SESSION).length,
+      0,
+      "no terminal transition while failing",
+    );
 
     // Reactivate: the wrapup runs once more and commits the terminal
     // transition — exactly one snapshot, no duplicate publication.
