@@ -58,6 +58,14 @@ export interface ContextHistoryReadPort {
   getMaterializedBoundary(runtimeSessionId: string): MaterializedLineageBoundary;
 
   /**
+   * iris_agent#45: the authoritative identity-level Context lineage id of
+   * THIS data root (one data root → one durable lineage). Publications must
+   * identify exactly this id — never a Session-derived synthesis. Rollover
+   * does not change it.
+   */
+  lineageId(): string;
+
+  /**
    * R3 (anti-echo)：读取 lineage 内 [fromContextSeq, toContextSeq] 闭区间的
    * ContextMessageUnit 窄视图（values-only：contextSeq / disposition /
    * derivationRefs / contentHash / runtimeEventId / unitType）。供 Historian
@@ -146,6 +154,12 @@ export function resolveEntrySeqForWatermark(
 /** Adapter：把 ContextStore（context.db 权威 owner）适配为窄读取端口。 */
 export function createContextHistoryReadPort(store: ContextStore): ContextHistoryReadPort {
   return {
+    lineageId() {
+      // The store is opened with the data-root-derived lineage id; the
+      // binding ledger (iris_agent#52) enforces one durable lineage per
+      // data root, so this IS the authoritative identity.
+      return store.lineageId;
+    },
     getMaterializedBoundary(runtimeSessionId: string): MaterializedLineageBoundary {
       const lineage = store.getLineage(runtimeSessionId);
       if (lineage === undefined) {

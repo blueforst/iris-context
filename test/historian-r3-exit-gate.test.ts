@@ -85,12 +85,14 @@ function lineagePort(representedThroughEntrySeq: number | null): ContextHistoryR
     }),
     listUnitsForHistorian: () => [],
     listUnitsForHistorianByEntrySeq: () => [],
+    lineageId: () => "identity-exit-gate",
   };
 }
 
 /** 会话无 lineage 行（端口 fail-closed 抛错）的 mock 端口。 */
 function noLineageThrowingPort(): ContextHistoryReadPort {
   return {
+    lineageId: () => "identity-exit-gate",
     getMaterializedBoundary: () => {
       throw new Error("context history read port: no lineage for session (fail closed)");
     },
@@ -100,6 +102,37 @@ function noLineageThrowingPort(): ContextHistoryReadPort {
     listUnitsForHistorianByEntrySeq: () => {
       throw new Error("context history read port: no lineage for session (fail closed)");
     },
+  };
+}
+
+/** iris_agent#45: publishing-capable stub port (one committed unit per
+ * claimed entry — publications need a REAL non-empty Context range). */
+function publishingStubPort(): ContextHistoryReadPort {
+  return {
+    getMaterializedBoundary: () => ({
+      representedThroughContextSeq: 0,
+      representedThroughEntrySeq: 0,
+      m0ContentHash: null,
+      lineageStatus: "ok",
+      providerProfileId: "mock",
+    }),
+    listUnitsForHistorian: () => [],
+    listUnitsForHistorianByEntrySeq: (_id: string, fromEntrySeq: number, toEntrySeq: number) => {
+      const units: import("../src/historian/anti-echo.js").HistorianUnitView[] = [];
+      for (let seq = fromEntrySeq; seq <= toEntrySeq; seq++) {
+        units.push({
+          contextUnitId: `unit-${seq}`,
+          contextSeq: seq,
+          runtimeEventId: `evt-${seq}`,
+          unitType: "input",
+          disposition: "include",
+          contentHash: "e".repeat(64),
+          derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+        });
+      }
+      return units;
+    },
+    lineageId: () => "identity-exit-gate",
   };
 }
 
@@ -114,6 +147,9 @@ function managerFixture(
   const manager = new HistorianManager({
     store,
     readPort: port,
+    // iris_agent#45: publications require a Context read port; the fixture
+    // default provides committed units so wrapup/incremental publish.
+    historyPort: publishingStubPort(),
     modelProviderProfile: "m",
     ...extras,
   });
@@ -261,15 +297,23 @@ test("R3 Exit Gate: HistorianManager.authorizeCompaction 端到端（historyPort
 });
 
 test("R3 Exit Gate: authorizeCompaction 未接线 historyPort → 抛错（fail-closed）", async () => {
-  const { manager, dir } = managerFixture([u("u-1", null, "hello"), c("c-1", "u-1")]);
+  const dir = mkdtempSync(join(tmpdir(), "iris-exit-noport-"));
   try {
-    assert.throws(
-      () => manager.authorizeCompaction(SESSION),
-      /ContextHistoryReadPort/,
-      "compaction authorization must be explicitly wired",
-    );
+    const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
+    const mutable = [u("u-1", null, "hello"), c("c-1", "u-1")];
+    const port = new SessionHistoryReadPort({ readRawEntries: async () => mutable });
+    // Deliberately NO historyPort: compaction authorization must fail closed.
+    const manager = new HistorianManager({ store, readPort: port, modelProviderProfile: "m" });
+    try {
+      assert.throws(
+        () => manager.authorizeCompaction(SESSION),
+        /ContextHistoryReadPort/,
+        "compaction authorization must be explicitly wired",
+      );
+    } finally {
+      manager.close();
+    }
   } finally {
-    manager.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

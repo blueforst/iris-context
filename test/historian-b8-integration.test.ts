@@ -23,6 +23,44 @@ import type { SessionTreeEntry } from "@earendil-works/pi-agent-core";
 import { HistorianManager } from "../src/historian/historian-manager.js";
 import { HistorianStore } from "../src/historian/historian-store.js";
 import { SessionHistoryReadPort } from "../src/historian/history-read-port.js";
+import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
+
+/** iris_agent#45: production Historian cannot publish without the Context
+ * read/claim port — tests wire a stub port with committed units. */
+function stubHistoryPort(): ContextHistoryReadPort {
+  return {
+    getMaterializedBoundary() {
+      return {
+        representedThroughContextSeq: 0,
+        representedThroughEntrySeq: 0,
+        m0ContentHash: null,
+        lineageStatus: "ok",
+        providerProfileId: "mock",
+      };
+    },
+    listUnitsForHistorian() {
+      return [];
+    },
+    listUnitsForHistorianByEntrySeq(_r: string, fromEntrySeq: number, toEntrySeq: number) {
+      const units: import("../src/historian/anti-echo.js").HistorianUnitView[] = [];
+      for (let seq = fromEntrySeq; seq <= toEntrySeq; seq++) {
+        units.push({
+          contextUnitId: `unit-${seq}`,
+          contextSeq: seq,
+          runtimeEventId: `evt-${seq}`,
+          unitType: "input",
+          disposition: "include",
+          contentHash: "b".repeat(64),
+          derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+        });
+      }
+      return units;
+    },
+    lineageId() {
+      return "identity-b8b9";
+    },
+  };
+}
 
 const SESSION = "iris-runtime-2026-08-01-1";
 
@@ -79,6 +117,7 @@ function managerFixture(entries: SessionTreeEntry[]): {
     store,
     readPort: port,
     modelProviderProfile: "opencode/deepseek-v4-flash",
+    historyPort: stubHistoryPort(),
   });
   return { manager, store, dir, mutable };
 }
@@ -183,6 +222,7 @@ test("B8: closed Session retry at startup (recover re-enqueues low)", async () =
     const restarted = new HistorianManager({
       store,
       readPort: port,
+      historyPort: stubHistoryPort(),
       modelProviderProfile: "opencode/deepseek-v4-flash",
     });
     await restarted.recover();
@@ -217,7 +257,12 @@ test("B8: SIGKILL-style reopen — a fully committed publication survives (crash
   try {
     const store = HistorianStore.open({ databasePath: dbPath });
     const port = new SessionHistoryReadPort({ readRawEntries: async () => entries });
-    const manager = new HistorianManager({ store, readPort: port, modelProviderProfile: "m" });
+    const manager = new HistorianManager({
+      store,
+      readPort: port,
+      modelProviderProfile: "m",
+      historyPort: stubHistoryPort(),
+    });
     await manager.triggerIncremental(SESSION);
     await manager.pumpOnce();
     manager.close(); // simulated crash boundary: committed state is durable
@@ -325,6 +370,7 @@ test("F5: recover() re-enqueues closing sessions (durable intent survives crash)
     const restarted = new HistorianManager({
       store,
       readPort: port,
+      historyPort: stubHistoryPort(),
       modelProviderProfile: "opencode/deepseek-v4-flash",
     });
     await restarted.recover();
@@ -414,6 +460,7 @@ test("F5: wrapup of a session whose head is an in-flight tool arc still terminat
     const restarted = new HistorianManager({
       store,
       readPort: port,
+      historyPort: stubHistoryPort(),
       modelProviderProfile: "opencode/deepseek-v4-flash",
     });
     await restarted.recover();
