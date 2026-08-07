@@ -59,10 +59,38 @@ export interface ToolExecutionPort {
  * R4 (iris_agent#9):Memory Client —— 投递 Historian publication 到
  * iris_memory 并接收 durable acceptance receipt。Agent 只经此窄端口
  * 与 memory 服务交互(不读其数据库、不连接 Neo4j)。
+ *
+ * iris_agent#64:成功/重复回执必须携带**版本化不可变身份**,足以把回执
+ * 绑定到被投递的确切 Publication(idempotency 请求)。Agent 在 markDelivered
+ * 前必须验证 publicationId 与 canonical payload hash(以及契约版本)。
+ * 裸 `receiptHash` 字符串不再足以授权 delivered/reclaim。
  */
+export type MemoryAcceptanceReceipt =
+  | {
+      schemaVersion: "acceptance-receipt-v1";
+      status: "accepted";
+      receiptId: string;
+      publicationId: string;
+      canonicalPayloadHash: string;
+      contractVersion: string;
+      acceptedAt: string;
+    }
+  | {
+      schemaVersion: "duplicate-replay-receipt-v1";
+      status: "duplicate_replay";
+      receiptId: string;
+      publicationId: string;
+      canonicalPayloadHash: string;
+      contractVersion: string;
+      originalAcceptedAt: string;
+    };
+
 export type PublicationDeliveryOutcome =
-  | { ok: true; receiptHash: string }
-  | { ok: false; error: "rejected" | "unavailable" | `http_${number}` };
+  | { ok: true; receipt: MemoryAcceptanceReceipt }
+  | {
+      ok: false;
+      error: "rejected" | "unavailable" | `http_${number}`;
+    };
 
 export interface MemoryClientPort {
   deliverPublication(publication: unknown): Promise<PublicationDeliveryOutcome>;

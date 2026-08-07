@@ -335,7 +335,18 @@ test("B5: outbox state machine — claim → delivering → delivered (Router AC
     const again = service.claimBatch({ batchSize: 10 });
     assert.equal(again.length, 0, "active lease suppresses re-claim");
 
-    service.markDelivered({ publicationId: pubId, receiptHash: "receipt-1" });
+    service.markDelivered({
+      publicationId: pubId,
+      receipt: {
+        schemaVersion: "acceptance-receipt-v1",
+        status: "accepted",
+        receiptId: "receipt-1",
+        publicationId: pubId,
+        canonicalPayloadHash: "a".repeat(64),
+        contractVersion: "0.2.0",
+        acceptedAt: "2026-08-01T00:00:00.000Z",
+      },
+    });
     const outbox = store
       .raw()
       .prepare("SELECT state FROM publication_outbox WHERE publication_id = ?")
@@ -629,7 +640,18 @@ test("B5: delivery pump crash window — claim survives reopen, lease expiry rec
       const recovered = freshService.claimBatch({ batchSize: 10 });
       assert.equal(recovered.length, 1, "expired lease recovered after reopen");
       assert.equal(recovered[0]?.publicationId, pubId);
-      freshService.markDelivered({ publicationId: pubId, receiptHash: "receipt-crash-1" });
+      freshService.markDelivered({
+        publicationId: pubId,
+        receipt: {
+          schemaVersion: "acceptance-receipt-v1",
+          status: "accepted",
+          receiptId: "receipt-crash-1",
+          publicationId: pubId,
+          canonicalPayloadHash: "a".repeat(64),
+          contractVersion: "0.2.0",
+          acceptedAt: "2026-08-01T00:00:00.000Z",
+        },
+      });
       const after = reopened
         .raw()
         .prepare("SELECT state, attempt_count FROM publication_outbox WHERE publication_id = ?")

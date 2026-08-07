@@ -433,11 +433,32 @@ export class HistorianManager {
       return "deferred";
     }
     if (outcome.ok) {
-      // ONLY a real acceptance receipt from iris_memory authorizes
-      // `delivered` (iris_agent#46).
+      // iris_agent#64: ONLY a receipt bound to THIS exact Publication
+      // authorizes `delivered`. The client already verified
+      // publicationId + canonicalPayloadHash + contractVersion; the manager
+      // re-checks the binding defensively: the receipt's publicationId must
+      // equal the CONTRACT identity of the delivered envelope (the envelope's
+      // publicationId — the idempotency key sent to Memory), not the
+      // internal row key.
+      const envelopePublicationId = (publication as { publicationId?: unknown }).publicationId;
+      if (
+        typeof envelopePublicationId !== "string" ||
+        outcome.receipt.publicationId !== envelopePublicationId
+      ) {
+        // Receipt bound to a DIFFERENT publication (or to no envelope
+        // identity) cannot ACK this row — fail closed into quarantine
+        // (typed policy: mismatch is never retryable noise; it is a
+        // service/contract violation).
+        this.service.markFailed({
+          publicationId: row.publicationId,
+          errorCode: "memory_receipt_mismatch",
+          maxAttempts: 1,
+        });
+        return "rejected";
+      }
       this.service.markDelivered({
         publicationId: row.publicationId,
-        receiptHash: outcome.receiptHash,
+        receipt: outcome.receipt,
       });
       return "accepted";
     }
