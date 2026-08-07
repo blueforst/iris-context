@@ -61,6 +61,12 @@ export interface HistorianJob {
   /** Attempt counter (0-based). Bounded by maxAttempts. */
   attempt: number;
   /**
+   * iris_agent#53: earliest epoch-ms at which this job may run again after a
+   * failed attempt (exponential backoff, capped). peek/take skip jobs whose
+   * retryAtMs is in the future, so a failing job cannot hot-loop.
+   */
+  retryAtMs?: number;
+  /**
    * The frozen boundary the trigger captured. The runner consumes EXACTLY
    * this snapshot and never widens the range (B3).
    */
@@ -69,9 +75,34 @@ export interface HistorianJob {
   sessionState: HistorianSessionState;
 }
 
+/**
+ * iris_agent#53: typed enqueue/scheduling outcome. The scheduler is STRICTLY
+ * bounded — a full queue never grows memory, never drops a finalizer, and
+ * never blocks the caller:
+ * - "queued": admitted to pending;
+ * - "merged": the Session already had a pending/running job; the newer
+ *   boundary superseded it (single-flight);
+ * - "successor_registered": recorded as the terminal successor of a running
+ *   non-finalizing job (exactly one per Session, newest boundary wins);
+ * - "deferred_durable": a finalization intent could NOT be admitted (queue
+ *   full of finalizers / successor slots exhausted) — it is NOT lost: the
+ *   durable closing intent remains in the store and the deterministic
+ *   backlog refill re-admits it when capacity frees;
+ * - "refused": non-finalizing maintenance dropped under capacity pressure
+ *   (droppable by design, never silently claimed as queued).
+ */
+export type EnqueueOutcome =
+  "queued" | "merged" | "successor_registered" | "deferred_durable" | "refused";
+
 export interface HistorianQueueOptions {
   /** Bounded queue capacity (0 = unbounded; production default bounded). */
   maxQueuedJobs?: number;
+  /**
+   * iris_agent#53: explicit bound on the per-Session terminal-successor
+   * registry (defaults to maxQueuedJobs). The successors map is memory too:
+   * it gets its own documented capacity model.
+   */
+  maxSuccessors?: number;
   /** Per-job max attempts before the job is dropped (retry bound). */
   maxAttempts?: number;
   /** Clock for lease/retry timestamps. */
@@ -86,6 +117,8 @@ export interface QueueStats {
   failedPermanent: number;
   /** F5 (iris_agent#42): registered terminal successors awaiting a running job. */
   successors: number;
+  /** iris_agent#53: finalization intents deferred to the durable backlog. */
+  deferred: number;
 }
 
 type JobHandler = (job: HistorianJob) => Promise<HistorianJobResult>;
@@ -100,6 +133,7 @@ export interface HistorianJobResult {
 /** Bounded priority queue with per-Session single-flight. */
 export class HistorianQueue {
   private readonly maxQueuedJobs: number;
+  private readonly maxSuccessors: number;
   private readonly maxAttempts: number;
   private readonly nowMs: () => number;
 
@@ -120,22 +154,43 @@ export class HistorianQueue {
   private dropped = 0;
   private completed = 0;
   private failedPermanent = 0;
+  /** iris_agent#53: finalization intents deferred to the durable backlog. */
+  private deferred = 0;
   private nextRunId = 1;
 
   constructor(options: HistorianQueueOptions = {}) {
     this.maxQueuedJobs = options.maxQueuedJobs ?? 256;
+    this.maxSuccessors = options.maxSuccessors ?? this.maxQueuedJobs;
     this.maxAttempts = options.maxAttempts ?? 8;
     this.nowMs = options.nowMs ?? (() => Date.now());
+  }
+
+  /** iris_agent#53: per-attempt retry backoff (exponential, capped). */
+  private retryBackoffMs(attempt: number): number {
+    return Math.min(2_000, 50 * 2 ** attempt);
+  }
+
+  /** True when the Session has a pending, running or successor job. */
+  hasSession(runtimeSessionId: string): boolean {
+    return (
+      this.pending.some((j) => j.runtimeSessionId === runtimeSessionId) ||
+      this.running?.runtimeSessionId === runtimeSessionId ||
+      this.successors.has(runtimeSessionId)
+    );
   }
 
   /**
    * Enqueue a job. Single-flight: when the Session already has a pending or
    * running job, the NEW boundary REPLACES the queued job's boundary (the
-   * runner re-freezes; the queued job is stale). Returns true when enqueued.
-   * Never throws for capacity: a full queue drops the lowest-priority
-   * non-running job (the newest freeze of the same Session wins).
+   * runner re-freezes; the queued job is stale).
+   *
+   * iris_agent#53: STRICTLY bounded. A full queue NEVER grows memory and
+   * NEVER drops a finalization intent: when no non-finalizing job can be
+   * evicted, a finalizing job is NOT admitted (deferred_durable) — its
+   * durable closing intent stays in the store and the deterministic backlog
+   * refill re-admits it when capacity frees.
    */
-  enqueue(job: Omit<HistorianJob, "jobId" | "attempt">): boolean {
+  enqueue(job: Omit<HistorianJob, "jobId" | "attempt" | "retryAtMs">): EnqueueOutcome {
     const existing = this.pending.find((j) => j.runtimeSessionId === job.runtimeSessionId);
     if (existing !== undefined) {
       // Single-flight: refresh the boundary with a fresh run identity.
@@ -156,7 +211,7 @@ export class HistorianQueue {
       }
       existing.boundary = job.boundary;
       existing.sessionState = job.sessionState;
-      return true;
+      return "merged";
     }
     if (this.running?.runtimeSessionId === job.runtimeSessionId) {
       // F5 (iris_agent#42): a running NON-finalizing job must not suppress a
@@ -170,6 +225,13 @@ export class HistorianQueue {
       // repeated wrapup would run the terminal transition twice and produce
       // a duplicate ContinuitySnapshot (iris_agent#42 AC6).
       if (isFinalizing(job.priority) && !isFinalizing(this.running.priority)) {
+        if (this.successors.size >= this.maxSuccessors) {
+          // iris_agent#53: the successor registry has its own bound; a
+          // finalization intent beyond it stays durable (deferred) — the
+          // refill re-admits it, so nothing is lost and memory is bounded.
+          this.deferred += 1;
+          return "deferred_durable";
+        }
         this.successors.set(job.runtimeSessionId, {
           priority: job.priority,
           runtimeSessionId: job.runtimeSessionId,
@@ -178,8 +240,12 @@ export class HistorianQueue {
           boundary: job.boundary,
           sessionState: job.sessionState,
         });
+        return "successor_registered";
       }
-      return true;
+      // Either a duplicate finalizer while a finalizer runs (the running job
+      // IS the terminal transition) or a redundant non-finalizing request:
+      // nothing to register — single-flight "merged" semantics.
+      return "merged";
     }
     const full = this.pending.length >= this.maxQueuedJobs;
     if (full) {
@@ -198,10 +264,15 @@ export class HistorianQueue {
         this.pending.splice(dropIndex.index, 1);
         this.dropped += 1;
       } else if (job.priority === "manual") {
-        return false; // manual maintenance is droppable; refuse silently
+        return "refused"; // manual maintenance is droppable; refuse silently
+      } else {
+        // iris_agent#53: no non-finalizing candidate to evict — the queue is
+        // full of finalization work. DO NOT admit (memory must stay bounded):
+        // a finalization intent is deferred to the durable backlog, where it
+        // already lives as the closing session state; the refill re-admits it.
+        this.deferred += 1;
+        return "deferred_durable";
       }
-      // No non-finalizing candidate to evict: allow the finalizing job in
-      // (bounded by evicting nothing; the finalizer is required work).
     }
     const attempt = 0;
     const candidate: HistorianJob = {
@@ -213,31 +284,19 @@ export class HistorianQueue {
       sessionState: job.sessionState,
     };
     this.pending.push(candidate);
-    return true;
+    return "queued";
   }
 
-  /** Highest-priority next job (stable FIFO within a priority). */
+  /** Highest-priority next RUNNABLE job (stable FIFO within a priority;
+   * jobs whose retry backoff has not elapsed are skipped — iris_agent#53). */
   peek(): HistorianJob | undefined {
-    if (this.pending.length === 0) {
-      return undefined;
-    }
-    const sorted = [...this.pending].sort(
-      (a, b) =>
-        HISTORIAN_PRIORITY_ORDER[a.priority] - HISTORIAN_PRIORITY_ORDER[b.priority] ||
-        (a.jobId < b.jobId ? -1 : 1),
-    );
-    return sorted[0];
+    const now = this.nowMs();
+    return this.sortedRunnable(now)[0];
   }
 
   take(): HistorianJob | undefined {
-    if (this.pending.length === 0) {
-      return undefined;
-    }
-    const sorted = [...this.pending].sort(
-      (a, b) =>
-        HISTORIAN_PRIORITY_ORDER[a.priority] - HISTORIAN_PRIORITY_ORDER[b.priority] ||
-        (a.jobId < b.jobId ? -1 : 1),
-    );
+    const now = this.nowMs();
+    const sorted = this.sortedRunnable(now);
     const job = sorted[0];
     if (job === undefined) {
       return undefined;
@@ -247,13 +306,39 @@ export class HistorianQueue {
     return job;
   }
 
-  /** Retry with an incremented attempt (bounded); false when exhausted. */
-  requeue(job: HistorianJob): boolean {
+  /** Pending jobs ordered by priority, then job id, filtering retry backoff. */
+  private sortedRunnable(now: number): HistorianJob[] {
+    return [...this.pending]
+      .filter((j) => j.retryAtMs === undefined || j.retryAtMs <= now)
+      .sort(
+        (a, b) =>
+          HISTORIAN_PRIORITY_ORDER[a.priority] - HISTORIAN_PRIORITY_ORDER[b.priority] ||
+          (a.jobId < b.jobId ? -1 : 1),
+      );
+  }
+
+  /**
+   * Retry with an incremented attempt (bounded) and exponential backoff.
+   * iris_agent#53: three outcomes — "requeued" (moved back to pending with
+   * backoff), "exhausted" (attempts used up: permanent failure), or
+   * "no_capacity" (the queue is full: the job is NOT lost — its durable
+   * closing intent remains in the store and the deterministic backlog
+   * refill re-admits it; the failure is deferred, not permanent).
+   */
+  requeue(job: HistorianJob): "requeued" | "exhausted" | "no_capacity" {
     if (job.attempt + 1 >= this.maxAttempts) {
-      return false;
+      return "exhausted";
     }
-    this.pending.push({ ...job, attempt: job.attempt + 1 });
-    return true;
+    if (this.pending.length >= this.maxQueuedJobs) {
+      this.deferred += 1;
+      return "no_capacity";
+    }
+    this.pending.push({
+      ...job,
+      attempt: job.attempt + 1,
+      retryAtMs: this.nowMs() + this.retryBackoffMs(job.attempt + 1),
+    });
+    return "requeued";
   }
 
   /**
@@ -300,6 +385,15 @@ export class HistorianQueue {
           if (evictIndex !== undefined) {
             this.pending.splice(evictIndex.index, 1);
             this.dropped += 1;
+          } else {
+            // iris_agent#53: pending is ALL finalization work and full — do
+            // NOT grow memory. The successor's session is still 'closing' in
+            // the store; the deterministic durable-backlog refill re-admits
+            // it when capacity frees (a re-freeze yields the same terminal
+            // transition; exactly-once is preserved by the idempotent
+            // closing → closed/closed_incomplete commit).
+            this.deferred += 1;
+            return;
           }
         }
         this.pending.push(successor);
@@ -326,6 +420,7 @@ export class HistorianQueue {
       completed: this.completed,
       failedPermanent: this.failedPermanent,
       successors: this.successors.size,
+      deferred: this.deferred,
     };
   }
 
@@ -373,16 +468,29 @@ export class HistorianWorker {
       const result = await this.handler(job);
       if (!result.ok) {
         const retried = this.queue.requeue(job);
-        // Requeued → moved back to pending (not a completion); exhausted →
-        // permanent failure (counted, running cleared).
-        this.queue.finish(!retried ? false : undefined);
+        if (retried === "requeued") {
+          // Requeued → moved back to pending (not a completion).
+          this.queue.finish(undefined);
+        } else if (retried === "exhausted") {
+          // Attempts used up → permanent failure (counted, running cleared).
+          this.queue.finish(false);
+        } else {
+          // no_capacity: the queue is full — the durable closing intent
+          // remains and the backlog refill re-admits it; NOT a permanent
+          // failure (deferred, not counted).
+          this.queue.finish(undefined);
+        }
       } else {
         this.queue.finish(true);
       }
       return result;
     } catch (error) {
       const retried = this.queue.requeue(job);
-      this.queue.finish(retried ? undefined : false);
+      if (retried === "requeued" || retried === "no_capacity") {
+        this.queue.finish(undefined);
+      } else {
+        this.queue.finish(false);
+      }
       return { ok: false, errorCode: error instanceof Error ? error.message : "unknown" };
     } finally {
       this.runningLoop = false;

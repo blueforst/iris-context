@@ -112,6 +112,13 @@ export interface HistorianSessionState {
   status: "active" | "closing" | "closed" | "closed_incomplete" | "corrupt";
   /** Set when a boundary freeze captured the session head (B3). */
   observedHeadEntrySeq?: number;
+  /**
+   * iris_agent#53: durable finalization-intent timestamp. Set ONCE when the
+   * session enters 'closing' (idempotent, never reset). Feeds readiness
+   * (oldest finalization intent age) and the fair, deterministic durable
+   * backlog refill (FIFO by this column).
+   */
+  finalizationRequestedAt?: string;
   updatedAt: string;
 }
 

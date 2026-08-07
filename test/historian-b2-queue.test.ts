@@ -58,7 +58,7 @@ test("B2: queue is single-flight per Session — a newer freeze replaces the que
       boundary: snapshot(SESSION_A, 10),
       sessionState: state(SESSION_A),
     }),
-    true,
+    "queued",
   );
   // Same Session re-freeze: no new job, boundary refreshed.
   assert.equal(
@@ -68,7 +68,7 @@ test("B2: queue is single-flight per Session — a newer freeze replaces the que
       boundary: snapshot(SESSION_A, 20),
       sessionState: state(SESSION_A),
     }),
-    true,
+    "merged",
   );
   assert.equal(queue.pendingCount(), 1, "single-flight keeps one queued job");
   const peeked = queue.peek();
@@ -87,9 +87,14 @@ test("B2: queue is single-flight per Session — a newer freeze replaces the que
       boundary: snapshot(SESSION_A, 30),
       sessionState: state(SESSION_A),
     }),
-    true,
+    "merged",
   );
   assert.equal(queue.pendingCount(), 0, "no queued copy while running");
+  assert.equal(
+    queue.successorCount(),
+    0,
+    "running NORMAL (finalizing) job absorbs the duplicate request — no successor",
+  );
   queue.finish(true);
 });
 
@@ -175,9 +180,13 @@ test("B2: retry is bounded by maxAttempts; exhausted jobs fail permanently", () 
     boundary: snapshot(SESSION_A),
     sessionState: state(SESSION_A),
   };
-  assert.equal(queue.requeue(job), true, "attempt 0 → 1");
-  assert.equal(queue.requeue({ ...job, attempt: 1 }), true, "attempt 1 → 2");
-  assert.equal(queue.requeue({ ...job, attempt: 2 }), false, "attempt 2 ≥ max → permanent fail");
+  assert.equal(queue.requeue(job), "requeued", "attempt 0 → 1");
+  assert.equal(queue.requeue({ ...job, attempt: 1 }), "requeued", "attempt 1 → 2");
+  assert.equal(
+    queue.requeue({ ...job, attempt: 2 }),
+    "exhausted",
+    "attempt 2 ≥ max → permanent fail",
+  );
   assert.equal(
     queue.stats().failedPermanent,
     0,
@@ -228,8 +237,11 @@ test("B2: worker runs at most ONE job at a time (single writer)", async () => {
   assert.equal(queue.stats().completed, 3);
 });
 
-test("B2: worker requeues on failure (retry) and finishes on permanent failure", async () => {
-  const queue = new HistorianQueue({ maxAttempts: 3 });
+test("B2: worker requeues on failure (retry with backoff) and finishes on permanent failure", async () => {
+  // iris_agent#53: requeue applies exponential backoff (retryAtMs), so the
+  // test drives a fake clock past the backoff window between runOnce passes.
+  let fakeNow = 0;
+  const queue = new HistorianQueue({ maxAttempts: 3, nowMs: () => fakeNow });
   let attempts = 0;
   const handler = async (job: HistorianJob) => {
     void job;
@@ -248,6 +260,9 @@ test("B2: worker requeues on failure (retry) and finishes on permanent failure",
   });
   let guard = 0;
   while (queue.pendingCount() > 0 && guard++ < 10) {
+    // Advance the clock past the retry backoff so the requeued job is
+    // runnable again (iris_agent#53).
+    fakeNow += 2_000;
     await worker.runOnce();
   }
   assert.equal(attempts, 3, "retried twice, succeeded on the third");
@@ -327,7 +342,7 @@ test("F5: wrapup while a highest job runs registers exactly one successor promot
       boundary: snapshot(SESSION_A, 20),
       sessionState: closing,
     }),
-    true,
+    "successor_registered",
   );
   // Not in pending (single-flight) but registered as successor.
   assert.equal(queue.pendingCount(), 0);
@@ -371,7 +386,9 @@ test("a finalizing request while a FINALIZING job runs is a duplicate (no second
 });
 
 test("requeue keeps the successor registered until the retry chain truly finishes", () => {
-  const queue = new HistorianQueue();
+  // iris_agent#53: requeue applies backoff (retryAtMs); drive a fake clock.
+  let fakeNow = 0;
+  const queue = new HistorianQueue({ nowMs: () => fakeNow });
   queue.enqueue({
     priority: "highest",
     runtimeSessionId: SESSION_A,
@@ -393,6 +410,7 @@ test("requeue keeps the successor registered until the retry chain truly finishe
   assert.equal(queue.pendingCount(), 1);
   assert.equal(queue.successorCount(), 1, "successor survives a retry");
   // Retry completes → successor promoted.
+  fakeNow += 2_000; // past the retry backoff window
   const retry = queue.take();
   assert.ok(retry !== undefined);
   queue.finish(true);
