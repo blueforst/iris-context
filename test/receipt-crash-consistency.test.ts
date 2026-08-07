@@ -1,11 +1,16 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import assert from "node:assert/strict";
 
-import { computeMessageContentHash } from "@earendil-works/pi-agent-core";
+import {
+  computeMessageContentHash,
+  JsonlSessionRepository,
+  loadJsonlSessionMetadata,
+} from "@earendil-works/pi-agent-core";
+import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 
 import { defaultAgentConfig } from "../src/config/load.js";
 import { initializeDataRoot, resolveDataRootPaths } from "../src/host/data-root.js";
@@ -636,3 +641,123 @@ async function expectPending(slice: Awaited<ReturnType<typeof setupSlice>>, coun
     `expected ${count} pending commit receipt(s), got ${pending.length}`,
   );
 }
+
+test("f2-xrepo: mixed legacy+framed JSONL journal replays in physical commit order into the Agent ledger (iris_agent#60)", async () => {
+  // The issue's exact file shape: a legacy pre-framing journal that was
+  // upgraded — legacy marker at line 3 (order=lineNumber), framed frame at
+  // line 4 with seq=1 (old sort key). The old code sorted the NEWER frame
+  // BEFORE the older pending legacy receipt; the Agent ledger must instead
+  // receive legacy-first, framed-second.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-f2-mixed-order-"));
+  try {
+    const fs = new NodeExecutionEnv({ cwd: dataRoot });
+    const repo = new JsonlSessionRepository({ fs, sessionsRoot: dataRoot });
+
+    // Build the legacy part by hand: header + bare entry + legacy marker.
+    const header = JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "mixed-session-1",
+      timestamp: "2026-08-01T00:00:00.000Z",
+      cwd: dataRoot,
+    });
+    const legacyMessage = userMessage("legacy committed first");
+    const legacyHash = await computeMessageContentHash(legacyMessage);
+    const legacyEntry = JSON.stringify({
+      id: "e-legacy-a",
+      parentId: null,
+      timestamp: "2026-08-01T00:00:01.000Z",
+      type: "message",
+      message: legacyMessage,
+    });
+    const legacyMarker = JSON.stringify({
+      __piReceipt: true,
+      receipt: {
+        sessionId: "mixed-session-1",
+        entryId: "e-legacy-a",
+        contentHash: legacyHash,
+        committedAt: "2026-08-01T00:00:02.000Z",
+      },
+    });
+    const mixedPath = join(dataRoot, "mixed.jsonl");
+    writeFileSync(mixedPath, `${header}\n${legacyEntry}\n${legacyMarker}\n`);
+
+    // Append the first post-upgrade FRAMED pair through the real backend
+    // (seq=1, exactly the upgrade scenario).
+    const metadata = await loadJsonlSessionMetadata(fs, mixedPath);
+    const storage = await repo.open(metadata);
+    const framedMessage = userMessage("framed committed second");
+    const framedHash = await computeMessageContentHash(framedMessage);
+    const { entryId: framedEntryId } = await storage.appendMessageWithCommitReceipt(
+      framedMessage,
+      (id) => ({
+        sessionId: metadata.id,
+        entryId: id,
+        contentHash: framedHash,
+        committedAt: "2026-08-01T00:00:03.000Z",
+      }),
+    );
+
+    // The pending set MUST be in physical commit order: legacy first.
+    const pending = await storage.readPendingCommitReceipts();
+    assert.deepEqual(
+      pending.map((r) => r.entryId),
+      ["e-legacy-a", framedEntryId],
+      "mixed journal must replay in physical commit order",
+    );
+
+    // Drive the REAL Agent harness + RuntimeEvent ledger over the same file.
+    const { models, model, providerProfileId } = await composeProvider("mock");
+    const { harness } = createIrisHarness({
+      session: storage as unknown as import("@earendil-works/pi-agent-core").Session,
+      instanceEpoch: 1,
+      models,
+      model,
+      tools: [makeReadOnlyTestTool()],
+      currentInvocation: {
+        input: sampleAgentInput(),
+        prepared: prepareContextSources(
+          sampleAgentInput(),
+          metadata.id,
+          "invocation-mixed",
+          defaultAgentConfig(),
+          "2026-08-01T00:00:00.000Z",
+        ),
+        invocationId: "inv-f2-mixed-order",
+      },
+      now: "2026-08-01T00:00:00.000Z",
+      providerProfileId,
+    });
+    const ledger = RuntimeEventLedger.open(join(dataRoot, "runtime-events.sqlite"));
+    attachRuntimeEventSeam(harness, {
+      ledger,
+      runtimeSessionId: metadata.id,
+      piSessionId: metadata.id,
+    });
+
+    const replayed = await harness.recoverPendingCommitReceipts();
+    assert.equal(replayed, 2, "both receipts must replay (legacy + framed)");
+
+    const finalized = ledger
+      .listBySession(metadata.id)
+      .filter((e) => e.type === "message_finalized");
+    assert.deepEqual(
+      finalized.map((e) => e.entryId),
+      ["e-legacy-a", framedEntryId],
+      "Agent ledger must observe the exact physical commit order",
+    );
+    // contextSeq assignment follows the same order (ledger order = ingest
+    // order; the Context unit sequence is lineage-monotonic downstream).
+    const eventSeq = finalized.map((e) => e.entrySeq ?? 0);
+    assert.deepEqual(
+      eventSeq,
+      [0, 1],
+      "event order must be the authoritative monotonic sequence",
+    );
+
+    ledger.close();
+    await closeSessionStorage(repo);
+  } finally {
+    // OS tmpdir 管理。
+  }
+});
