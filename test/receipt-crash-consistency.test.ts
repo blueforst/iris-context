@@ -13,12 +13,15 @@ import {
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 
 import { defaultAgentConfig } from "../src/config/load.js";
+import { ContextIngest } from "../src/context/context-ingest.js";
+import { ContextStore } from "../src/context/context-store.js";
 import { initializeDataRoot, resolveDataRootPaths } from "../src/host/data-root.js";
 import { RuntimeEpochStore } from "../src/runtime/epoch-manager.js";
 import { createIrisHarness } from "../src/runtime/harness-factory.js";
 import {
   closeSessionStorage,
   composeProvider,
+  deriveLineageId,
   makeReadOnlyTestTool,
   openOrCreateSession,
   prepareContextSources,
@@ -95,6 +98,45 @@ function userMessage(text: string) {
     content: [{ type: "text" as const, text }],
     timestamp: Date.now(),
   };
+}
+
+/**
+ * Production Context wiring for the cross-repo recovery path (mirrors
+ * vertical-slice ensureLineage → ContextIngest): opens the real context.db,
+ * binds (or rebinds after restart) the runtime session to the data-root
+ * lineage, and returns the real ingestion transaction.
+ */
+function openContextWithLineage(
+  ledger: RuntimeEventLedger,
+  dataRoot: string,
+  runtimeSessionId: string,
+  providerProfileId: string,
+  now: string,
+): { store: ContextStore; ingest: ContextIngest } {
+  const store = ContextStore.open(join(dataRoot, "context.db"), {
+    lineageId: deriveLineageId(dataRoot),
+  });
+  const lineageId = store.lineageId;
+  if (store.getLineageByLineageId(lineageId) === undefined) {
+    store.createLineage({
+      lineageId,
+      runtimeSessionId,
+      contextSourceSnapshotId: `src-${runtimeSessionId}`,
+      epochId: `epoch-${runtimeSessionId}`,
+      personaSnapshotId: "persona-xrepo",
+      declarationVersion: "v1",
+      providerProfileId,
+      canonicalSystemPrompt: "system",
+      systemProjectionHash: "sys-hash",
+      preparedAt: now,
+      materializationId: "mat-xrepo",
+      contextSerializerVersion: "iris-context-golden-v1",
+      carrierSchemaVersion: "1",
+    });
+  } else {
+    store.bindCurrentSession(lineageId, runtimeSessionId);
+  }
+  return { store, ingest: new ContextIngest(ledger, store, lineageId) };
 }
 
 test("f2-xrepo: crash between durable append and publication is recovered exactly once", async () => {
@@ -706,7 +748,11 @@ test("f2-xrepo: mixed legacy+framed JSONL journal replays in physical commit ord
       "mixed journal must replay in physical commit order",
     );
 
-    // Drive the REAL Agent harness + RuntimeEvent ledger over the same file.
+    // Drive the REAL Agent harness + RuntimeEvent ledger over the same file,
+    // with the REAL Context ingestion transaction wired to the seam (the
+    // production wiring from vertical-slice: lineage binding → ContextIngest
+    // → seam). Every replayed receipt must land as a persisted
+    // ContextMessageUnit with a lineage-global monotonic contextSeq.
     const { models, model, providerProfileId } = await composeProvider("mock");
     const { harness } = createIrisHarness({
       session: storage as unknown as import("@earendil-works/pi-agent-core").Session,
@@ -729,10 +775,18 @@ test("f2-xrepo: mixed legacy+framed JSONL journal replays in physical commit ord
       providerProfileId,
     });
     const ledger = RuntimeEventLedger.open(join(dataRoot, "runtime-events.sqlite"));
+    const context = openContextWithLineage(
+      ledger,
+      dataRoot,
+      metadata.id,
+      providerProfileId,
+      "2026-08-01T00:00:00.000Z",
+    );
     attachRuntimeEventSeam(harness, {
       ledger,
       runtimeSessionId: metadata.id,
       piSessionId: metadata.id,
+      contextIngest: context.ingest,
     });
 
     const replayed = await harness.recoverPendingCommitReceipts();
@@ -746,18 +800,331 @@ test("f2-xrepo: mixed legacy+framed JSONL journal replays in physical commit ord
       ["e-legacy-a", framedEntryId],
       "Agent ledger must observe the exact physical commit order",
     );
-    // contextSeq assignment follows the same order (ledger order = ingest
-    // order; the Context unit sequence is lineage-monotonic downstream).
-    const eventSeq = finalized.map((e) => e.entrySeq ?? 0);
+
+    // REAL Context units, persisted in the same order with lineage-global
+    // monotonic contextSeq — not a stub, not an entrySeq projection.
+    const units = context.store.listUnits(metadata.id);
     assert.deepEqual(
-      eventSeq,
-      [0, 1],
-      "event order must be the authoritative monotonic sequence",
+      units.map((u) => u.entryId),
+      ["e-legacy-a", framedEntryId],
+      "Context units must follow the exact physical commit order",
+    );
+    assert.deepEqual(
+      units.map((u) => u.contextSeq),
+      [1, 2],
+      "contextSeq must be lineage-global and strictly monotonic",
+    );
+    // Unit identity binds to the canonical RuntimeEvent, not the Session.
+    assert.deepEqual(
+      units.map((u) => u.sourceEventId),
+      finalized.map((e) => e.eventId),
+      "each Context unit must bind the exact canonical RuntimeEvent",
+    );
+    assert.equal(units[0]?.contentHash, legacyHash);
+    assert.equal(units[1]?.contentHash, framedHash);
+
+    // exactly-once: re-running the ingestion transaction adds nothing.
+    context.ingest.ensureUnitsUpTo(metadata.id);
+    assert.equal(context.store.listUnits(metadata.id).length, 2);
+
+    // Restart: reopen the session + ledger + context.db from disk and repeat
+    // recovery — acked receipts replay nothing and no contextSeq is
+    // re-allocated (the persisted units are immutable).
+    const metadata2 = await loadJsonlSessionMetadata(fs, mixedPath);
+    const storage2 = await repo.open(metadata2);
+    const { harness: harness2 } = createIrisHarness({
+      session: storage2 as unknown as import("@earendil-works/pi-agent-core").Session,
+      instanceEpoch: 1,
+      models,
+      model,
+      tools: [makeReadOnlyTestTool()],
+      currentInvocation: {
+        input: sampleAgentInput(),
+        prepared: prepareContextSources(
+          sampleAgentInput(),
+          metadata2.id,
+          "invocation-mixed-restart",
+          defaultAgentConfig(),
+          "2026-08-01T00:00:00.000Z",
+        ),
+        invocationId: "inv-f2-mixed-restart",
+      },
+      now: "2026-08-01T00:00:00.000Z",
+      providerProfileId,
+    });
+    const ledger2 = RuntimeEventLedger.open(join(dataRoot, "runtime-events.sqlite"));
+    const context2 = openContextWithLineage(
+      ledger2,
+      dataRoot,
+      metadata2.id,
+      providerProfileId,
+      "2026-08-01T00:00:00.000Z",
+    );
+    attachRuntimeEventSeam(harness2, {
+      ledger: ledger2,
+      runtimeSessionId: metadata2.id,
+      piSessionId: metadata2.id,
+      contextIngest: context2.ingest,
+    });
+    assert.equal(await harness2.recoverPendingCommitReceipts(), 0, "restart must replay nothing");
+    context2.ingest.ensureUnitsUpTo(metadata2.id);
+    const unitsAfterRestart = context2.store.listUnits(metadata2.id);
+    assert.deepEqual(
+      unitsAfterRestart.map((u) => [u.entryId, u.contextSeq]),
+      [
+        ["e-legacy-a", 1],
+        [framedEntryId, 2],
+      ],
+      "restart must preserve unit identity and contextSeq exactly",
     );
 
+    context.store.close();
     ledger.close();
+    context2.store.close();
+    ledger2.close();
     await closeSessionStorage(repo);
   } finally {
     // OS tmpdir 管理。
   }
 });
+
+test("f2-xrepo: acked+pending legacy, framed and torn-tail receipts recover into persisted Context units with global monotonic contextSeq (iris_agent#77)", async () => {
+  // One mixed journal containing: an ACKED legacy pair (CJK + marker-looking
+  // text), a PENDING legacy pair, a post-upgrade FRAMED pair (CJK +
+  // marker-looking text) and a torn tail. Recovery must emit exactly the
+  // pending legacy + framed receipts in physical commit order, never the
+  // acked pair, never the torn line; every emitted event must produce one
+  // persisted ContextMessageUnit with a lineage-global monotonic contextSeq.
+  const dataRoot = mkdtempSync(join(tmpdir(), "iris-f2-ctx-matrix-"));
+  try {
+    const fs = new NodeExecutionEnv({ cwd: dataRoot });
+    const repo = new JsonlSessionRepository({ fs, sessionsRoot: dataRoot });
+
+    const header = JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "ctx-mixed-1",
+      timestamp: "2026-08-01T00:00:00.000Z",
+      cwd: dataRoot,
+    });
+    // ACKED legacy pair: CJK + marker-looking text, receipt acked before the
+    // restart — it must NEVER re-emit.
+    const ackedMessage = userMessage("旧消息正文：标记文本 __piReceipt 在正文里");
+    const ackedHash = await computeMessageContentHash(ackedMessage);
+    const ackedEntry = JSON.stringify({
+      id: "e-acked-a",
+      parentId: null,
+      timestamp: "2026-08-01T00:00:01.000Z",
+      type: "message",
+      message: ackedMessage,
+    });
+    const ackedMarker = JSON.stringify({
+      __piReceipt: true,
+      receipt: {
+        sessionId: "ctx-mixed-1",
+        entryId: "e-acked-a",
+        contentHash: ackedHash,
+        committedAt: "2026-08-01T00:00:01.500Z",
+      },
+    });
+    const ackMarker = JSON.stringify({ __piReceiptAck: true, entryId: "e-acked-a" });
+    // PENDING legacy pair.
+    const pendingMessage = userMessage("pending legacy committed second");
+    const pendingHash = await computeMessageContentHash(pendingMessage);
+    const pendingEntry = JSON.stringify({
+      id: "e-pending-b",
+      parentId: null,
+      timestamp: "2026-08-01T00:00:02.000Z",
+      type: "message",
+      message: pendingMessage,
+    });
+    const pendingMarker = JSON.stringify({
+      __piReceipt: true,
+      receipt: {
+        sessionId: "ctx-mixed-1",
+        entryId: "e-pending-b",
+        contentHash: pendingHash,
+        committedAt: "2026-08-01T00:00:03.000Z",
+      },
+    });
+    const mixedPath = join(dataRoot, "mixed.jsonl");
+    writeFileSync(
+      mixedPath,
+      `${header}\n${ackedEntry}\n${ackedMarker}\n${ackMarker}\n${pendingEntry}\n${pendingMarker}\n`,
+    );
+
+    // Post-upgrade FRAMED pair through the real backend (CJK + marker text).
+    const metadata = await loadJsonlSessionMetadata(fs, mixedPath);
+    const storage = await repo.open(metadata);
+    const framedMessage = userMessage("新帧正文：你好，世界 __piReceiptQuarantine 混排测试");
+    const framedHash = await computeMessageContentHash(framedMessage);
+    const { entryId: framedEntryId } = await storage.appendMessageWithCommitReceipt(
+      framedMessage,
+      (id) => ({
+        sessionId: metadata.id,
+        entryId: id,
+        contentHash: framedHash,
+        committedAt: "2026-08-01T00:00:04.000Z",
+      }),
+    );
+
+    // Torn tail: a truncated ack marker appended directly.
+    await fs.appendFile(mixedPath, '{"__piReceiptAck": true, "entryId": "');
+    const { session: reopened } = await openSessionFile(fs, repo, mixedPath);
+    const diagnostics = await reopened.journalDiagnostics();
+    assert.ok(
+      diagnostics.some((d) => d.includes("torn_tail")),
+      "the torn tail must be reported, not silently dropped",
+    );
+    assert.deepEqual(
+      (await reopened.readPendingCommitReceipts()).map((r) => r.entryId),
+      ["e-pending-b", framedEntryId],
+      "pending = pending legacy + framed, in physical commit order; acked and torn excluded",
+    );
+
+    // Recovery through the real harness + ledger + Context ingestion. The
+    // harness runs on the FRESH handle that observed the torn tail.
+    const { models, model, providerProfileId } = await composeProvider("mock");
+    const { harness } = createIrisHarness({
+      session: reopened as unknown as import("@earendil-works/pi-agent-core").Session,
+      instanceEpoch: 1,
+      models,
+      model,
+      tools: [makeReadOnlyTestTool()],
+      currentInvocation: {
+        input: sampleAgentInput(),
+        prepared: prepareContextSources(
+          sampleAgentInput(),
+          metadata.id,
+          "invocation-matrix",
+          defaultAgentConfig(),
+          "2026-08-01T00:00:00.000Z",
+        ),
+        invocationId: "inv-f2-ctx-matrix",
+      },
+      now: "2026-08-01T00:00:00.000Z",
+      providerProfileId,
+    });
+    const ledger = RuntimeEventLedger.open(join(dataRoot, "runtime-events.sqlite"));
+    const context = openContextWithLineage(
+      ledger,
+      dataRoot,
+      metadata.id,
+      providerProfileId,
+      "2026-08-01T00:00:00.000Z",
+    );
+    attachRuntimeEventSeam(harness, {
+      ledger,
+      runtimeSessionId: metadata.id,
+      piSessionId: metadata.id,
+      contextIngest: context.ingest,
+    });
+
+    assert.equal(await harness.recoverPendingCommitReceipts(), 2, "pending legacy + framed replay");
+    const finalized = ledger
+      .listBySession(metadata.id)
+      .filter((e) => e.type === "message_finalized");
+    assert.deepEqual(
+      finalized.map((e) => e.entryId),
+      ["e-pending-b", framedEntryId],
+      "RuntimeEvent identity/order = physical commit order",
+    );
+    // Real persisted Context units: one per emitted event, global monotonic
+    // contextSeq in the same order, content lossless (CJK + marker-looking).
+    const units = context.store.listUnits(metadata.id);
+    assert.deepEqual(
+      units.map((u) => [u.entryId, u.contextSeq]),
+      [
+        ["e-pending-b", 1],
+        [framedEntryId, 2],
+      ],
+      "one persisted Context unit per recovered receipt, monotonic contextSeq",
+    );
+    assert.equal(units[0]?.contentHash, pendingHash);
+    assert.equal(units[1]?.contentHash, framedHash);
+    assert.deepEqual(
+      units.map((u) => u.sourceEventId),
+      finalized.map((e) => e.eventId),
+      "unit identity binds the canonical RuntimeEvent",
+    );
+    // No unit may exist for the acked pair or the torn tail.
+    assert.ok(
+      !context.store.listUnits(metadata.id).some((u) => u.entryId === "e-acked-a"),
+      "acked receipts must never produce Context units",
+    );
+
+    // Repeated recovery + full restart: nothing re-emits, no contextSeq is
+    // re-allocated.
+    assert.equal(await harness.recoverPendingCommitReceipts(), 0);
+    context.ingest.ensureUnitsUpTo(metadata.id);
+    assert.equal(context.store.listUnits(metadata.id).length, 2);
+
+    const metadata2 = await loadJsonlSessionMetadata(fs, mixedPath);
+    const storage2 = await repo.open(metadata2);
+    const { harness: harness2 } = createIrisHarness({
+      session: storage2 as unknown as import("@earendil-works/pi-agent-core").Session,
+      instanceEpoch: 1,
+      models,
+      model,
+      tools: [makeReadOnlyTestTool()],
+      currentInvocation: {
+        input: sampleAgentInput(),
+        prepared: prepareContextSources(
+          sampleAgentInput(),
+          metadata2.id,
+          "invocation-matrix-restart",
+          defaultAgentConfig(),
+          "2026-08-01T00:00:00.000Z",
+        ),
+        invocationId: "inv-f2-ctx-matrix-restart",
+      },
+      now: "2026-08-01T00:00:00.000Z",
+      providerProfileId,
+    });
+    const ledger2 = RuntimeEventLedger.open(join(dataRoot, "runtime-events.sqlite"));
+    const context2 = openContextWithLineage(
+      ledger2,
+      dataRoot,
+      metadata2.id,
+      providerProfileId,
+      "2026-08-01T00:00:00.000Z",
+    );
+    attachRuntimeEventSeam(harness2, {
+      ledger: ledger2,
+      runtimeSessionId: metadata2.id,
+      piSessionId: metadata2.id,
+      contextIngest: context2.ingest,
+    });
+    assert.equal(await harness2.recoverPendingCommitReceipts(), 0, "restart must replay nothing");
+    context2.ingest.ensureUnitsUpTo(metadata2.id);
+    assert.deepEqual(
+      context2.store.listUnits(metadata2.id).map((u) => [u.entryId, u.contextSeq]),
+      [
+        ["e-pending-b", 1],
+        [framedEntryId, 2],
+      ],
+      "restart preserves persisted unit identity and contextSeq exactly",
+    );
+
+    context.store.close();
+    ledger.close();
+    context2.store.close();
+    ledger2.close();
+    await closeSessionStorage(repo);
+  } finally {
+    // OS tmpdir 管理。
+  }
+});
+
+async function openSessionFile(
+  fs: NodeExecutionEnv,
+  repo: JsonlSessionRepository,
+  sessionPath: string,
+): Promise<{
+  session: Awaited<ReturnType<JsonlSessionRepository["open"]>>;
+  repo: JsonlSessionRepository;
+}> {
+  const metadata = await loadJsonlSessionMetadata(fs, sessionPath);
+  const session = await repo.open(metadata);
+  return { session, repo };
+}

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "documentedAt": "2026-08-05",
+  "documentedAt": "2026-08-08",
   "toolchain": {
     "node": ">=22.19.0",
     "nodeCiExact": "22.19.0",
@@ -17,8 +17,8 @@
     "fork": {
       "repository": "blueforst/pi",
       "baselineCommit": "ab5f8d88ee1d400c0c8fb5c50ac10b2f4a4851d1",
-      "seamCommit": "43407a19956d93be9f0e4fdb5bf2fae184035ea4",
-      "seamTree": "e95b0a651f5d0c6b9981cb747d9368db51b74b25",
+      "seamCommit": "44dc7a115a4264b472b907a00fb744b888bfb341",
+      "seamTree": "1c88d49746df3f3c0ac6f6df2fd8da890210b36f",
       "acceptedRuntimeRepository": "blueforst/pi",
       "acceptedRuntimeCommit": "66a3ea14616a438f47d3121979c0581c22ea64bb",
       "acceptedRuntimeTree": "a6bdb67ab97a087e3e0285746462545780ea19b3",
