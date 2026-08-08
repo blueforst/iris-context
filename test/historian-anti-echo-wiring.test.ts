@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 
 import { ContextStore } from "../src/context/context-store.js";
 import { createContextHistoryReadPort } from "../src/context/history-read-port.js";
+import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
 import type { HistorianUnitView } from "../src/historian/anti-echo.js";
 import type { SequencedSessionEntry } from "../src/contracts/historian.js";
 import { PublicationService } from "../src/historian/historian-publication.js";
@@ -57,12 +58,24 @@ function makeUnitViews(overrides: Partial<HistorianUnitView>[]): HistorianUnitVi
 }
 
 /** 最小 fake historyPort(不依赖真实 ContextStore)。 */
-function fakeHistoryPort(units: HistorianUnitView[]) {
+function fakeHistoryPort(units: HistorianUnitView[]): ContextHistoryReadPort {
   return {
     getMaterializedBoundary: () => {
       throw new Error("not used in this test");
     },
     listUnitsForHistorian: () => units,
+    listUnitsWithPayload: () =>
+      units.map((unit) => ({
+        contextUnitId: unit.contextUnitId,
+        contextSeq: unit.contextSeq,
+        runtimeEventId: unit.runtimeEventId,
+        unitType: unit.unitType,
+        disposition: unit.disposition,
+        contentHash: unit.contentHash,
+        derivationRefs: unit.derivationRefs,
+        payload: { role: "user", content: `content-${unit.contextSeq}`, timestamp: 0 },
+        payloadTimestamp: new Date().toISOString(),
+      })),
     claimHistorianBatch: (input: {
       afterContextSeqExclusive: number;
       throughContextSeqInclusive: number;

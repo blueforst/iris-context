@@ -137,6 +137,14 @@ function stubHistoryPort(texts?: string[]): ContextHistoryReadPort {
       }
       return units;
     },
+    listUnitsWithPayload(_lineageId, fromContextSeq, toContextSeq) {
+      const views = this.listUnitsForHistorian(_lineageId, fromContextSeq, toContextSeq);
+      return views.map((view) => ({
+        ...view,
+        payload: { role: "user", content: `content-${view.contextSeq}`, timestamp: 0 },
+        payloadTimestamp: new Date().toISOString(),
+      }));
+    },
     claimHistorianBatch({ afterContextSeqExclusive, throughContextSeqInclusive }) {
       // iris_agent#76: full committed units (payload included), keyed by
       // global contextSeq — the runner's normal semantic input.

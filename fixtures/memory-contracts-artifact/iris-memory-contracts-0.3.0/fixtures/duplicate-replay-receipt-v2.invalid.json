@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "duplicate-replay-receipt-v2",
+  "status": "duplicate_replay",
+  "originalPublicationId": "not-a-uuid",
+  "originalContractVersion": "0.3.0",
+  "originalCanonicalPayloadHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "originalAcceptedAt": "2026-08-05T00:00:00.000Z"
+}

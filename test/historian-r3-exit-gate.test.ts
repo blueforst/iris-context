@@ -102,6 +102,7 @@ function lineagePort(representedThroughEntrySeq: number | null): ContextHistoryR
       providerProfileId: "opencode/deepseek-v4-flash",
     }),
     listUnitsForHistorian: () => [],
+    listUnitsWithPayload: () => [],
     claimHistorianBatch: ({ afterContextSeqExclusive }) =>
       emptyHistorianBatch("identity-exit-gate", afterContextSeqExclusive),
     lineageId: () => "identity-exit-gate",
@@ -115,9 +116,8 @@ function noLineageThrowingPort(): ContextHistoryReadPort {
     getMaterializedBoundary: () => {
       throw new Error("context history read port: no lineage for session (fail closed)");
     },
-    listUnitsForHistorian: () => {
-      throw new Error("context history read port: no lineage for session (fail closed)");
-    },
+    listUnitsForHistorian: () => [],
+    listUnitsWithPayload: () => [],
     claimHistorianBatch: () => {
       throw new Error("context history read port: no lineage for session (fail closed)");
     },
@@ -185,6 +185,20 @@ function publishingStubPortWithUnits(mutable: SessionTreeEntry[]): ContextHistor
         });
       }
       return units;
+    },
+    listUnitsWithPayload(_lineageId: string, fromContextSeq: number, toContextSeq: number) {
+      const views = this.listUnitsForHistorian(_lineageId, fromContextSeq, toContextSeq);
+      return views.map((view) => ({
+        contextUnitId: view.contextUnitId,
+        contextSeq: view.contextSeq,
+        runtimeEventId: view.runtimeEventId,
+        unitType: view.unitType,
+        disposition: view.disposition,
+        contentHash: view.contentHash,
+        derivationRefs: view.derivationRefs,
+        payload: { role: "user", content: `content-${view.contextSeq}`, timestamp: 0 },
+        payloadTimestamp: new Date().toISOString(),
+      }));
     },
     claimHistorianBatch: ({ afterContextSeqExclusive, throughContextSeqInclusive }) => {
       const claimed = claim(

@@ -26,6 +26,8 @@
  *    映射（与 SQL 实现语义一致，可单测）。
  */
 
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+
 import type { ContextMessageUnit, ContextUnitType } from "../contracts/context-units.js";
 import { historianBatchHash, type HistorianBatchV1 } from "../contracts/historian.js";
 import type { RuntimeEventDerivationRefs } from "../contracts/runtime-events.js";
@@ -85,6 +87,30 @@ export interface ContextHistoryReadPort {
     disposition: ContextMessageUnit["disposition"];
     contentHash: string;
     derivationRefs: RuntimeEventDerivationRefs;
+  }>;
+
+  /**
+   * iris_memory#11: read the lineage range WITH the canonical
+   * provider-visible payloads (values-only — the same materialized rows
+   * the Context pipeline committed; the Historian renders canonical
+   * episode content from these and never touches raw archives). Used ONLY
+   * by the publication envelope builder; the anti-echo view stays
+   * content-free.
+   */
+  listUnitsWithPayload(
+    lineageId: string,
+    fromContextSeq: number,
+    toContextSeq: number,
+  ): Array<{
+    contextUnitId: string;
+    contextSeq: number;
+    runtimeEventId: string;
+    unitType: ContextUnitType;
+    disposition: ContextMessageUnit["disposition"];
+    contentHash: string;
+    derivationRefs: RuntimeEventDerivationRefs;
+    payload: AgentMessage;
+    payloadTimestamp?: string;
   }>;
 
   /**
@@ -184,6 +210,22 @@ export function createContextHistoryReadPort(store: ContextStore): ContextHistor
         disposition: unit.disposition,
         contentHash: unit.contentHash,
         derivationRefs: unit.derivationRefs,
+      }));
+    },
+    listUnitsWithPayload(lineageId, fromContextSeq, toContextSeq) {
+      // iris_memory#11: 同一物化行的 payload 视图（canonical
+      // provider-visible 序列化，非 raw 原文副本）——只用于 publication
+      // envelope 的 episode content 渲染。
+      return store.listUnitsByLineageRange(lineageId, fromContextSeq, toContextSeq).map((unit) => ({
+        contextUnitId: unit.unitId,
+        contextSeq: unit.contextSeq,
+        runtimeEventId: unit.runtimeEventId ?? unit.sourceEventId,
+        unitType: unit.unitType,
+        disposition: unit.disposition,
+        contentHash: unit.contentHash,
+        derivationRefs: unit.derivationRefs,
+        payload: unit.payload,
+        payloadTimestamp: unit.createdAt,
       }));
     },
     claimHistorianBatch({

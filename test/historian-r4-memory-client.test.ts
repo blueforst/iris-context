@@ -10,6 +10,7 @@
  *  6. envelope 字段与 historian-publication-v2 schema 对齐(anti-echo
  *     evidenceBasis/derivedOnly 传递)。
  */
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +18,7 @@ import test from "node:test";
 
 import assert from "node:assert/strict";
 
+import { canonicalJson } from "../src/contracts/tool.js";
 import {
   HistorianManager,
   type HistorianManagerOptions,
@@ -65,6 +67,19 @@ function fakeHistoryPort(): ContextHistoryReadPort {
         disposition: "include",
         contentHash: "d".repeat(64),
         derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+      },
+    ],
+    listUnitsWithPayload: () => [
+      {
+        contextUnitId: "unit-1",
+        contextSeq: 1,
+        runtimeEventId: "evt-1",
+        unitType: "input",
+        disposition: "include",
+        contentHash: "d".repeat(64),
+        derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+        payload: { role: "user", content: "hello", timestamp: 0 },
+        payloadTimestamp: "2026-08-01T00:00:00.000Z",
       },
     ],
     claimHistorianBatch: ({ afterContextSeqExclusive, throughContextSeqInclusive }) => {
@@ -157,64 +172,110 @@ function outboxState(
     .get(publicationId) as { state: string; delivered_receipt_hash: string | null };
 }
 
-const SAMPLE_ENVELOPE = {
-  schemaVersion: "historian-publication-v2",
-  publicationId: `publication-${SESSION}-1`,
-  sourceSequence: 1,
-  publishedAt: "2026-08-06T00:00:00Z",
-  payloadHash: "a".repeat(64),
-  contextRange: {
-    contextLineageId: "identity-x",
-    fromContextSeq: 1,
-    toContextSeq: 2,
-    rangeHash: "b".repeat(64),
-  },
-  semanticSourceVersion: "context-unit-v1",
-  compartmentCount: 1,
-  segmentCount: 1,
-  evidenceCount: 1,
-  evidenceBasis: [
-    {
-      contextUnitId: "u1",
-      contextSeq: 1,
-      runtimeEventId: "evt-1",
-      contentHash: "c".repeat(64),
-      historianDisposition: "include",
+const SAMPLE_ENVELOPE = (() => {
+  // iris_memory#11: the Graphiti-ready v3 envelope (episode-source batch +
+  // compartment revisions; no Segment/EvidenceSet wire objects).
+  const lineageId = "identity-x";
+  const rangeHash = "b".repeat(64);
+  const episodeSourceBase = {
+    episodeId: `episode:${lineageId}:1..2:${rangeHash.slice(0, 12)}`,
+    lineageId,
+    contextRange: {
+      contextLineageId: lineageId,
+      fromContextSeq: 1,
+      toContextSeq: 2,
+      rangeHash,
     },
-  ],
-  derivedOnly: false,
-  summary: "summary",
-};
+    sourceUnitIds: ["u1", "u2"],
+    canonicalContent: "[1] user: hello\n[2] assistant: hi",
+    targetGroupId: `group:${lineageId}`,
+    temporal: {
+      startedAt: "2026-08-06T00:00:00Z",
+      endedAt: "2026-08-06T00:00:01Z",
+    },
+    isDerivedOnly: false,
+    derivation: {
+      memoryRefs: [],
+      compartmentIds: ["comp-x"],
+      sourceContextUnitIds: [],
+    },
+  };
+  const episodeSourceHash = createHash("sha256")
+    .update(canonicalJson(episodeSourceBase), "utf8")
+    .digest("hex");
+  const envelopeBase = {
+    schemaVersion: "historian-publication-v3",
+    publicationId: `publication-${SESSION}-1`,
+    sourceSequence: 1,
+    publishedAt: "2026-08-06T00:00:00Z",
+    contractVersion: "0.3.0",
+    projectionVersion: "graphiti-0.29.2",
+    lineageId,
+    contextRange: {
+      contextLineageId: lineageId,
+      fromContextSeq: 1,
+      toContextSeq: 2,
+      rangeHash,
+    },
+    compartmentRevisions: [
+      {
+        compartmentId: "comp-x",
+        sequence: 1,
+        headContextSeq: 2,
+        summary: "summary",
+        memoryRefs: [],
+      },
+    ],
+    episodeSources: [{ ...episodeSourceBase, episodeSourceHash }],
+    derivationSummary: {
+      derivedOnly: false,
+      memoryRefs: [],
+    },
+    temporal: {
+      startedAt: "2026-08-06T00:00:00Z",
+      endedAt: "2026-08-06T00:00:01Z",
+    },
+  };
+  const payloadHash = createHash("sha256")
+    .update(canonicalJson({ ...envelopeBase, payloadHash: "" }), "utf8")
+    .digest("hex");
+  return { ...envelopeBase, payloadHash };
+})();
 
 /** iris_agent#64:construct a receipt BOUND to the sample envelope
  * (publicationId + canonical payload hash + contract version all match). */
 function boundReceipt(
   receiptId: string,
   overrides: Partial<Record<string, unknown>> = {},
-): NonNullable<
-  ReturnType<(typeof import("../src/historian/memory-client.js"))["parseBoundReceipt"]>
-> {
+): {
+  schemaVersion: "acceptance-receipt-v1";
+  status: "accepted";
+  receiptId: string;
+  publicationId: string;
+  canonicalPayloadHash: string;
+  contractVersion: string;
+  acceptedAt: string;
+} {
   const receipt = {
     schemaVersion: "acceptance-receipt-v1",
     status: "accepted",
     receiptId,
     publicationId: SAMPLE_ENVELOPE.publicationId,
     canonicalPayloadHash: canonicalPayloadHash(SAMPLE_ENVELOPE),
-    contractVersion: "0.2.0",
+    contractVersion: "0.3.0",
     acceptedAt: "2026-08-06T00:00:01Z",
   };
-  const merged = { ...receipt, ...overrides } as unknown as Record<string, string>;
+  const merged = { ...receipt, ...overrides };
   return {
     schemaVersion: "acceptance-receipt-v1",
     status: "accepted",
-    receiptId: merged["receiptId"] ?? receiptId,
-    publicationId: merged["publicationId"],
-    canonicalPayloadHash: merged["canonicalPayloadHash"],
-    contractVersion: merged["contractVersion"],
-    acceptedAt: merged["acceptedAt"],
-  } as NonNullable<
-    ReturnType<(typeof import("../src/historian/memory-client.js"))["parseBoundReceipt"]>
-  >;
+    receiptId: (merged.receiptId as string | undefined) ?? receiptId,
+    publicationId: (merged.publicationId as string | undefined) ?? receipt.publicationId,
+    canonicalPayloadHash:
+      (merged.canonicalPayloadHash as string | undefined) ?? receipt.canonicalPayloadHash,
+    contractVersion: (merged.contractVersion as string | undefined) ?? receipt.contractVersion,
+    acceptedAt: (merged.acceptedAt as string | undefined) ?? receipt.acceptedAt,
+  };
 }
 
 test("r4 memory client: success delivers with real receipt hash", async () => {
@@ -412,7 +473,7 @@ test("r4 memory client: envelope carries anti-echo basis and derivedOnly", async
   }
 });
 
-test("r4 memory client: real envelope (from commitSafePrefix) validates against pinned 0.2.0 schema", async () => {
+test("r4 memory client: real envelope (from commitSafePrefix) validates against pinned 0.3.0 schema", async () => {
   // 驱动真实生产路径:PublicationService.commitSafePrefix → buildCompartment
   // (带 unitViews)→ buildPublicationEnvelope → outbox payload_json。
   const dir = mkdtempSync(join(tmpdir(), "iris-r4-schema-"));
@@ -482,11 +543,11 @@ test("r4 memory client: real envelope (from commitSafePrefix) validates against 
     assert.ok(row.payload_json, "envelope must be persisted");
     const sent = JSON.parse(row.payload_json) as Record<string, unknown>;
 
-    // 用 pinned 0.2.0 schema(与 memory-contract-gate 相同方式)校验
+    // 用 pinned 0.3.0 schema(与 memory-contract-gate 相同方式)校验
     const { Ajv2020 } = await import("ajv/dist/2020.js");
     const formatsModule = await import("ajv-formats");
     const formatsPlugin = formatsModule.default as unknown as (validator: unknown) => void;
-    const ARTIFACT = "fixtures/memory-contracts-artifact/iris-memory-contracts-0.2.0";
+    const ARTIFACT = "fixtures/memory-contracts-artifact/iris-memory-contracts-0.3.0";
     const manifest = JSON.parse(readFileSync(join(ARTIFACT, "manifest.json"), "utf8")) as {
       schemas: string[];
     };
@@ -499,7 +560,7 @@ test("r4 memory client: real envelope (from commitSafePrefix) validates against 
       };
       if (typeof s.$id === "string") {
         ajv.addSchema(s, s.$id);
-        if (schemaRelative === "schemas/historian-publication-v2.schema.json") {
+        if (schemaRelative === "schemas/historian-publication-v3.schema.json") {
           targetId = s.$id;
         }
       }
@@ -578,7 +639,7 @@ test("r4 memory client: delivered persists the FULL verified binding (receiptId 
     assert.equal(row.delivered_receipt_schema_version, "acceptance-receipt-v1");
     assert.equal(row.delivered_receipt_publication_id, SAMPLE_ENVELOPE.publicationId);
     assert.equal(row.delivered_canonical_payload_hash, canonicalPayloadHash(SAMPLE_ENVELOPE));
-    assert.equal(row.delivered_contract_version, "0.2.0");
+    assert.equal(row.delivered_contract_version, "0.3.0");
     assert.equal(row.delivered_duplicate_replay, 0);
   } finally {
     store.close();

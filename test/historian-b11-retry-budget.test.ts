@@ -107,6 +107,14 @@ function stubHistoryPort(): ContextHistoryReadPort {
       }
       return units;
     },
+    listUnitsWithPayload(_lineageId: string, fromContextSeq: number, toContextSeq: number) {
+      const views = this.listUnitsForHistorian(_lineageId, fromContextSeq, toContextSeq);
+      return views.map((view) => ({
+        ...view,
+        payload: { role: "user", content: `content-${view.contextSeq}`, timestamp: 0 },
+        payloadTimestamp: new Date().toISOString(),
+      }));
+    },
     claimHistorianBatch({ afterContextSeqExclusive, throughContextSeqInclusive }) {
       // Real committed units in the claimed window — the freeze and the
       // runner need a non-empty claim to make progress. The fixture head is

@@ -10,8 +10,40 @@
  */
 import { createHash } from "node:crypto";
 
+import { canonicalJson } from "../contracts/tool.js";
 import type { HistorianBoundarySnapshot, SequencedSessionEntry } from "../contracts/historian.js";
 import type { ContextHistoryReadPort } from "../context/history-read-port.js";
+
+/**
+ * iris_memory#11: render ONE ordered Context unit as a canonical episode
+ * content line `[contextSeq] role: text` — the same canonical
+ * provider-visible rendering basis the Context pipeline uses (text parts
+ * only; companions/tool internals are never rendered). Deterministic for a
+ * given unit row.
+ */
+function renderEpisodeUnitLine(unit: {
+  contextSeq: number;
+  contextUnitId: string;
+  unitType: string;
+  payload: unknown;
+}): string {
+  const candidate = unit.payload as {
+    message?: { role?: string; content?: unknown };
+  };
+  const message = candidate?.message;
+  const role = message?.role ?? unit.unitType;
+  const content = message?.content;
+  let text = "";
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
+    text = (content as Array<{ type?: string; text?: string }>)
+      .filter((part) => part?.type === "text" && typeof part.text === "string")
+      .map((part) => part.text ?? "")
+      .join("\n");
+  }
+  return `[${unit.contextSeq}] ${role}: ${text}`;
+}
 import type { HistorianStore } from "./historian-store.js";
 import type { RunnerCommitHook } from "./historian-runner.js";
 import type { HistorianAnalysisView } from "./historian-analysis.js";
@@ -399,35 +431,106 @@ export class PublicationService {
     // identities (contextSeq, unitId, runtimeEventId, contentHash) — never
     // the Session source-range hash.
     const rangeHash = canonicalUnitRangeHash(unitViews ?? [], basis);
+    const lineageId = this.historyPort.lineageId();
+
+    // iris_memory#11 (2026-08-08 Graphiti-ready boundary): the envelope is
+    // built from ONE deterministic episode source over the batch's ordered
+    // Context units, with the canonical provider-visible payloads read via
+    // the narrow port view (values-only; raw archives are never touched).
+    const payloadUnits = this.historyPort.listUnitsWithPayload(
+      lineageId,
+      fromContextSeq,
+      toContextSeq,
+    );
+    if (payloadUnits.length === 0) {
+      // unitViews/basis 非空但 payload 视图为空 = 物化边界不一致 → FAIL CLOSED
+      // (绝不发布无内容 episode)。
+      throw new HistorianProvenanceError(
+        built.compartment.runtimeSessionId,
+        `no payload units in [${fromContextSeq}..${toContextSeq}] for lineage ` +
+          `${lineageId}; refusing to publish an empty episode source`,
+      );
+    }
+    const canonicalContent = payloadUnits.map((unit) => renderEpisodeUnitLine(unit)).join("\n");
+    const timestamps = payloadUnits
+      .map((unit) => unit.payloadTimestamp)
+      .filter((t): t is string => typeof t === "string" && t.length > 0);
+    const startedAt = timestamps.length > 0 ? timestamps[0] : now;
+    const endedAt = timestamps.length > 0 ? timestamps[timestamps.length - 1] : now;
+    const memoryRefs = [...new Set(basis.flatMap((ref) => ref.derivationRefs?.memoryRefs ?? []))];
+    const derivedOnly = evidence.derivedOnly ?? basis.length === 0;
+    // iris_agent#76/#11: the wire compartment identity is lineage-scoped and
+    // Session-boundary-independent (the historian.db-internal id embeds the
+    // runtime session for local bookkeeping only and never reaches Memory).
+    const wireCompartmentId = `compartment:${lineageId}:${built.compartment.compartmentSequence}`;
+    const episodeSourceBase = {
+      episodeId: `episode:${lineageId}:${fromContextSeq}..${toContextSeq}:${rangeHash.slice(0, 12)}`,
+      lineageId,
+      contextRange: {
+        contextLineageId: lineageId,
+        fromContextSeq,
+        toContextSeq,
+        rangeHash,
+      },
+      sourceUnitIds: payloadUnits.map((unit) => unit.contextUnitId),
+      canonicalContent,
+      targetGroupId: `group:${lineageId}`,
+      temporal: { startedAt, endedAt },
+      isDerivedOnly: derivedOnly,
+      derivation: {
+        memoryRefs,
+        compartmentIds: [wireCompartmentId],
+        sourceContextUnitIds: [],
+      },
+    };
+    // episodeSourceHash must equal iris_memory's deterministic canonical
+    // re-hash (sorted keys + compact separators — canonicalJson is
+    // byte-identical to the Python `_canonical_json_bytes`).
+    const episodeSourceHash = createHash("sha256")
+      .update(canonicalJson(episodeSourceBase), "utf8")
+      .digest("hex");
+    const episodeSource = { ...episodeSourceBase, episodeSourceHash };
+
     const envelopeBase = {
-      schemaVersion: "historian-publication-v2",
-      // 0.2.0 schema 要求 format: uuid;确定性派生(sha256 of
+      schemaVersion: "historian-publication-v3",
+      // 0.3.0 schema 要求 format: uuid;确定性派生(sha256 of
       // session:seq)保证跨重启稳定、可被 iris_memory 强校验通过。
       publicationId: deterministicUuid(
         `iris:historian-publication:${built.compartment.runtimeSessionId}:${publicationSequence}`,
       ),
       sourceSequence: publicationSequence,
       publishedAt: now,
+      contractVersion: "0.3.0",
+      projectionVersion: "graphiti-0.29.2",
+      lineageId,
       contextRange: {
-        contextLineageId: this.historyPort.lineageId(),
+        contextLineageId: lineageId,
         fromContextSeq,
         toContextSeq,
         rangeHash,
       },
-      semanticSourceVersion: "context-unit-v1",
-      compartmentCount: 1,
-      segmentCount: built.segments.length,
-      evidenceCount: basis.length,
-      evidenceBasis: basis,
-      derivedOnly: evidence.derivedOnly ?? basis.length === 0,
-      summary: built.compartment.content.slice(0, 4000),
+      compartmentRevisions: [
+        {
+          compartmentId: wireCompartmentId,
+          sequence: built.compartment.compartmentSequence,
+          headContextSeq: toContextSeq,
+          summary: built.compartment.content.slice(0, 4000),
+          memoryRefs,
+        },
+      ],
+      episodeSources: [episodeSource],
+      derivationSummary: {
+        derivedOnly,
+        memoryRefs,
+      },
+      temporal: { startedAt, endedAt },
     };
     // iris_agent#45: payloadHash = canonical sha256 over the COMPLETE
     // versioned payload, with the payloadHash field blanked (documented
     // no-self-reference rule). Any provenance change (basis, disposition,
     // content hash, derivation refs, range, summary) changes it.
     const payloadHash = createHash("sha256")
-      .update(JSON.stringify({ ...envelopeBase, payloadHash: "" }), "utf8")
+      .update(canonicalJson({ ...envelopeBase, payloadHash: "" }), "utf8")
       .digest("hex");
     const envelope = { ...envelopeBase, payloadHash };
     return JSON.stringify(envelope);
@@ -536,12 +639,22 @@ export class PublicationService {
       )
       .run(
         now,
-        input.receipt.receiptId,
-        input.receipt.receiptId,
+        input.receipt.schemaVersion === "duplicate-replay-receipt-v2"
+          ? `dup:${input.receipt.originalPublicationId}`
+          : input.receipt.receiptId,
+        input.receipt.schemaVersion === "duplicate-replay-receipt-v2"
+          ? `dup:${input.receipt.originalPublicationId}`
+          : input.receipt.receiptId,
         input.receipt.schemaVersion,
-        input.receipt.publicationId,
-        input.receipt.canonicalPayloadHash,
-        input.receipt.contractVersion,
+        input.receipt.schemaVersion === "duplicate-replay-receipt-v2"
+          ? input.receipt.originalPublicationId
+          : input.receipt.publicationId,
+        input.receipt.schemaVersion === "duplicate-replay-receipt-v2"
+          ? input.receipt.originalCanonicalPayloadHash
+          : input.receipt.canonicalPayloadHash,
+        input.receipt.schemaVersion === "duplicate-replay-receipt-v2"
+          ? input.receipt.originalContractVersion
+          : input.receipt.contractVersion,
         input.receipt.status === "duplicate_replay" ? 1 : 0,
         now,
         input.publicationId,

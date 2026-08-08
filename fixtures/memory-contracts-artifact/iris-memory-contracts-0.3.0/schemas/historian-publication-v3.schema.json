@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:historian-publication:v3",
+  "title": "HistorianPublicationV3",
+  "description": "Graphiti-ready Historian publication envelope (iris_memory#11, 2026-08-08 Notion boundary override): the exact episode-source batch + compartment revisions with contract/projection versions. Segment / standalone EvidenceSet / Historian-emitted MemoryAssessmentDelta are NOT part of this version's wire shape.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "publicationId",
+    "sourceSequence",
+    "publishedAt",
+    "payloadHash",
+    "contractVersion",
+    "projectionVersion",
+    "lineageId",
+    "contextRange",
+    "compartmentRevisions",
+    "episodeSources",
+    "derivationSummary",
+    "temporal"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "historian-publication-v3"
+    },
+    "publicationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sourceSequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "publishedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payloadHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "contractVersion": {
+      "type": "string",
+      "pattern": "^0\\.3\\.0$"
+    },
+    "projectionVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "The accepted Graphiti projection version this batch targets (e.g. \"graphiti-0.29.2\")."
+    },
+    "lineageId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "contextRange": {
+      "$ref": "urn:iris:memory:context-range:v1"
+    },
+    "compartmentRevisions": {
+      "type": "array",
+      "items": {
+        "$ref": "urn:iris:memory:compartment-revision:v1"
+      },
+      "maxItems": 256
+    },
+    "episodeSources": {
+      "type": "array",
+      "items": {
+        "$ref": "urn:iris:memory:graphiti-episode-source:v1"
+      },
+      "minItems": 1,
+      "maxItems": 1024
+    },
+    "derivationSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["derivedOnly", "memoryRefs"],
+      "properties": {
+        "derivedOnly": {
+          "type": "boolean"
+        },
+        "memoryRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "maxItems": 256
+        }
+      }
+    },
+    "temporal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startedAt", "endedAt"],
+      "properties": {
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "endedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

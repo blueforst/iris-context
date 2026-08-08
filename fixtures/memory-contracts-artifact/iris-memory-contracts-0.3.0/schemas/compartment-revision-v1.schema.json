@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:compartment-revision:v1",
+  "title": "CompartmentRevisionV1",
+  "description": "Memory-owned CompartmentRevision reference (iris_memory#11): the immutable Historian compartment identity + summary + memory refs that accompany a Graphiti-ready publication. Agent constructs the revision; Memory stores it as immutable provenance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "compartmentId",
+    "sequence",
+    "headContextSeq",
+    "summary",
+    "memoryRefs"
+  ],
+  "properties": {
+    "compartmentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "headContextSeq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "memoryRefs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "maxItems": 256
+    }
+  }
+}

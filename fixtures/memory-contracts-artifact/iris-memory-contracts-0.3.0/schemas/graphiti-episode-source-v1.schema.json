@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:graphiti-episode-source:v1",
+  "title": "GraphitiEpisodeSourceV1",
+  "description": "Memory-owned Graphiti episode source (iris_memory#11): the deterministic, Context-owned unit of ordered ingestion into Graphiti.add_episode. Carries source/episode identity inputs, ordered Context semantic provenance, target group, canonical content, temporal metadata and derivation/anti-echo provenance. Never exposes Graphiti SDK objects, Neo4j records, embeddings or internal graph UUIDs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "episodeSourceHash",
+    "episodeId",
+    "lineageId",
+    "contextRange",
+    "sourceUnitIds",
+    "canonicalContent",
+    "targetGroupId",
+    "temporal",
+    "isDerivedOnly",
+    "derivation"
+  ],
+  "properties": {
+    "episodeSourceHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Deterministic canonical hash of THIS episode source (identity + provenance + content). Re-hashed by the Memory on acceptance; a changed provenance/content is a different payload."
+    },
+    "episodeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Memory-owned deterministic episode identity (stable across replay; NOT a Graphiti/Neo4j internal id)."
+    },
+    "lineageId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "The identity-level Context lineage this episode's semantic units belong to."
+    },
+    "contextRange": {
+      "$ref": "urn:iris:memory:context-range:v1"
+    },
+    "sourceUnitIds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1,
+      "maxItems": 4096,
+      "description": "Ordered Context unit ids (contextSeq order) that constitute this episode's semantic basis."
+    },
+    "canonicalContent": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200000,
+      "description": "Canonical episode body required for Graphiti episode ingestion (ordered message content)."
+    },
+    "targetGroupId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Target group / partition identity for the accepted Graphiti projection."
+    },
+    "temporal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startedAt", "endedAt"],
+      "properties": {
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "endedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "isDerivedOnly": {
+      "type": "boolean",
+      "description": "True when the episode contains NO new observation truth (recalled/derived/anti-echo material) — it must not be treated as new observation evidence."
+    },
+    "derivation": {
+      "$ref": "urn:iris:memory:semantic-derivation-refs:v1"
+    },
+    "rawArchiveRef": {
+      "$ref": "urn:iris:memory:raw-archive-ref:v1"
+    }
+  }
+}
