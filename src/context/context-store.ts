@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
@@ -59,7 +59,7 @@ interface UnitRow {
  * if the on-disk schema_migrations.max(version) is NEWER than this constant
  * (a newer binary wrote state this binary cannot read).
  */
-export const LATEST_MIGRATION_VERSION = "0006_binding_retention";
+export const LATEST_MIGRATION_VERSION = "0007_archive_staging";
 
 /**
  * R2-P3：每 session 的 context_units 软 cap（语义 ledger 有界化的第一级）。
@@ -139,6 +139,34 @@ export class ContextBindingLedgerExceededError extends Error {
   }
 }
 
+/**
+ * iris_agent#74: typed fail-closed for an unbounded binding AUDIT STAGING
+ * backlog inside the active context.db. Reclaimed rows are staged in
+ * session_lineage_bindings_audit and drained to the EXTERNAL archive
+ * (context-archive.db) by archiveBindingAudit(); if the drain cannot keep
+ * up (archive unavailable/disk failure) and the staging backlog crosses the
+ * hard cap, binding a new current Session fails closed — the active
+ * context.db must never become a lifetime archive.
+ */
+export class ContextAuditBacklogExceededError extends Error {
+  constructor(readonly hardCap: number) {
+    super(
+      `session_lineage_bindings_audit staging backlog exceeded the hard cap ` +
+        `${hardCap} (fail closed); the external binding archive is not draining — ` +
+        "restore archive write access or raise the cap",
+    );
+    this.name = "ContextAuditBacklogExceededError";
+  }
+}
+
+/**
+ * iris_agent#74: binding audit staging caps — the active context.db only
+ * holds the in-flight staging window; the lifetime archive lives in the
+ * external context-archive.db.
+ */
+export const AUDIT_STAGING_SOFT_CAP = 1_024;
+export const AUDIT_STAGING_HARD_CAP = 16_384;
+
 /** ContextStore.open 的构造选项（R2-P3 cap 注入：测试用极小值在少量单元内触发 cap 路径）。 */
 export interface ContextStoreOpenOptions {
   /** 每 session 软 cap（超限单元标记 disposition="exclude"）。缺省 = MAX_UNITS_PER_SESSION。 */
@@ -159,6 +187,16 @@ export interface ContextStoreOpenOptions {
   bindingSoftLimit?: number;
   bindingHardLimit?: number;
   bindingRetainRecent?: number;
+  /**
+   * iris_agent#74: external binding-audit archive path. Defaults to
+   * `<dirname(contextDbPath)>/context-archive.db` — a SEPARATE SQLite file
+   * owned outside the active context.db (the active db stays bounded).
+   */
+  archiveDbPath?: string;
+  /** iris_agent#74: audit staging soft cap (default AUDIT_STAGING_SOFT_CAP). */
+  auditStagingSoftCap?: number;
+  /** iris_agent#74: audit staging hard cap (default AUDIT_STAGING_HARD_CAP). */
+  auditStagingHardCap?: number;
 }
 
 export interface ContextLineage {
@@ -400,6 +438,12 @@ export class ContextStore implements ContextUnitStorePort {
   private readonly bindingSoftLimit: number;
   private readonly bindingHardLimit: number;
   private readonly bindingRetainRecent: number;
+  /** iris_agent#74: external binding-audit archive path (separate file). */
+  private readonly archiveDbPath: string;
+  private readonly auditStagingSoftCap: number;
+  private readonly auditStagingHardCap: number;
+  /** iris_agent#74: attached archive handle (lazy). */
+  private archiveDb: DatabaseSync | undefined;
   /** R2 (iris_agent#9)：identity-level lineage id（one per data root）。 */
   readonly lineageId: string;
   private closed = false;
@@ -412,6 +456,10 @@ export class ContextStore implements ContextUnitStorePort {
     this.bindingSoftLimit = options.bindingSoftLimit ?? SOFT_LIMIT_HISTORICAL_BINDINGS;
     this.bindingHardLimit = options.bindingHardLimit ?? HARD_LIMIT_HISTORICAL_BINDINGS;
     this.bindingRetainRecent = options.bindingRetainRecent ?? RETAIN_RECENT_HISTORICAL_BINDINGS;
+    this.archiveDbPath =
+      options.archiveDbPath ?? join(dirname(process.cwd()), "context-archive.db");
+    this.auditStagingSoftCap = options.auditStagingSoftCap ?? AUDIT_STAGING_SOFT_CAP;
+    this.auditStagingHardCap = options.auditStagingHardCap ?? AUDIT_STAGING_HARD_CAP;
   }
 
   static open(contextDbPath: string, options: ContextStoreOpenOptions = {}): ContextStore {
@@ -454,7 +502,10 @@ export class ContextStore implements ContextUnitStorePort {
           );
         }
       }
-      return new ContextStore(db, options);
+      return new ContextStore(db, {
+        ...options,
+        archiveDbPath: options.archiveDbPath ?? join(dirname(contextDbPath), "context-archive.db"),
+      });
     } catch (error) {
       try {
         db.close();
@@ -470,6 +521,8 @@ export class ContextStore implements ContextUnitStorePort {
       return;
     }
     this.closed = true;
+    this.archiveDb?.close();
+    this.archiveDb = undefined;
     this.db.close();
   }
 
@@ -1072,7 +1125,7 @@ export class ContextStore implements ContextUnitStorePort {
     }
   }
 
-  /** iris_agent#63: capacity metrics for the binding ledger (health/readiness). */
+  /** iris_agent#63/#74: capacity metrics for the binding ledger (health/readiness). */
   bindingLedgerStats(): {
     total: number;
     current: number;
@@ -1080,6 +1133,7 @@ export class ContextStore implements ContextUnitStorePort {
     reconciled: number;
     reclaimable: number;
     auditRows: number;
+    staged: number;
   } {
     const count = (sql: string): number => {
       const row = this.db.prepare(sql).get() as { n: number };
@@ -1107,7 +1161,298 @@ export class ContextStore implements ContextUnitStorePort {
          )`,
     );
     const auditRows = count("SELECT COUNT(*) AS n FROM session_lineage_bindings_audit");
-    return { total, current, historical, reconciled, reclaimable, auditRows };
+    const staged = count(
+      "SELECT COUNT(*) AS n FROM session_lineage_bindings_audit WHERE archived_batch_id IS NOT NULL",
+    );
+    return { total, current, historical, reconciled, reclaimable, auditRows, staged };
+  }
+
+  // ---- iris_agent#74: external binding-audit archive ----
+
+  /**
+   * External archive (context-archive.db): the LIFETIME provenance store for
+   * reclaimed Session→lineage bindings. It lives in a SEPARATE SQLite file
+   * owned outside the active context.db — the active database only ever
+   * holds the in-flight staging window, so repeated safe reclamation cannot
+   * grow the active context.db by rows/bytes over the lifetime of the data
+   * root. The archive is opened lazily and kept as its own handle (never
+   * ATTACHed), so every phase below is a SINGLE-file atomic transaction —
+   * no cross-file atomicity assumptions.
+   */
+  private ensureArchiveAttached(): DatabaseSync {
+    if (this.archiveDb === undefined) {
+      mkdirSync(dirname(this.archiveDbPath), { recursive: true });
+      const archive = new DatabaseSync(this.archiveDbPath);
+      archive.exec("PRAGMA busy_timeout = 5000");
+      archive.exec("PRAGMA journal_mode = WAL");
+      // The archive is an audit store whose handoff is REPLAYABLE: the
+      // active rows are only deleted after the archive manifest exists, so
+      // a power-loss that drops the archive's last uncheckpointed commit
+      // simply leaves the active staging rows for the next drain. NORMAL
+      // keeps the archive fsync-cheap under heavy rollover churn.
+      archive.exec("PRAGMA synchronous = NORMAL");
+      archive.exec("PRAGMA foreign_keys = ON");
+      archive.exec(`
+        CREATE TABLE IF NOT EXISTS binding_audit_archive (
+          batch_id INTEGER NOT NULL,
+          runtime_session_id TEXT NOT NULL,
+          context_lineage_id TEXT NOT NULL,
+          binding_role TEXT NOT NULL,
+          bound_at TEXT NOT NULL,
+          superseded_at TEXT,
+          binding_checksum TEXT NOT NULL,
+          reconciled_at TEXT,
+          pruned_at TEXT NOT NULL,
+          PRIMARY KEY (batch_id, runtime_session_id, context_lineage_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_binding_audit_archive_batch
+          ON binding_audit_archive(batch_id);
+        CREATE TABLE IF NOT EXISTS archive_manifest (
+          batch_id INTEGER PRIMARY KEY,
+          archived_at TEXT NOT NULL,
+          row_count INTEGER NOT NULL,
+          rows_hash TEXT NOT NULL,
+          lineage_id TEXT NOT NULL
+        );
+      `);
+      this.archiveDb = archive;
+    }
+    return this.archiveDb;
+  }
+
+  /**
+   * iris_agent#74: drain the audit staging backlog out of the ACTIVE
+   * context.db into the external archive. Crash-safe handoff protocol:
+   *
+   *  Phase A (active db, one atomic txn): mark up to `batchLimit` unmarked
+   *    audit rows with a fresh batch id (monotonic, derived from the
+   *    archive's max batch + 1).
+   *  Phase B (archive db, one atomic txn): copy EVERY staged batch (rows +
+   *    manifest row with count + deterministic rows_hash) into the archive
+   *    (INSERT OR IGNORE / OR REPLACE — idempotent replay).
+   *  Phase C (active db, one atomic txn): delete active rows whose batch id
+   *    is already present in the archive manifest.
+   *
+   * Crash at ANY point is safe: rows are either still in the active staging
+   * window (provenance intact, next call re-drains) or already manifest'd in
+   * the archive (Phase C replay deletes them). A still-recoverable Session
+   * is never affected — only already-reconciled historical bindings are
+   * ever staged (reclaim eligibility is evidence-driven).
+   *
+   * Returns the total rows moved out of the active db by this call.
+   */
+  archiveBindingAudit(options: { batchLimit?: number } = {}): {
+    archived: number;
+    stagedRemaining: number;
+    batchId: number | null;
+  } {
+    const archive = this.ensureArchiveAttached();
+    const batchLimit = options.batchLimit ?? 512;
+
+    // Phase A: stage a fresh batch (only if unmarked rows exist).
+    const unmarkedCount = (
+      this.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM session_lineage_bindings_audit WHERE archived_batch_id IS NULL",
+        )
+        .get() as { n: number }
+    ).n;
+    let newBatchId: number | null = null;
+    if (unmarkedCount > 0) {
+      const archiveMax = archive
+        .prepare("SELECT COALESCE(MAX(batch_id), 0) AS m FROM archive_manifest")
+        .get() as { m: number };
+      newBatchId = archiveMax.m + 1;
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        this.db
+          .prepare(
+            `UPDATE session_lineage_bindings_audit SET archived_batch_id = ?
+             WHERE rowid IN (
+               SELECT rowid FROM session_lineage_bindings_audit
+               WHERE archived_batch_id IS NULL
+               LIMIT ?
+             )`,
+          )
+          .run(newBatchId, batchLimit);
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+
+    // Phase B + C: drain EVERY staged batch (covers crash-replay of older
+    // batches too).
+    const stagedRows = this.db
+      .prepare(
+        `SELECT archived_batch_id AS batch_id, runtime_session_id, context_lineage_id,
+                binding_role, bound_at, superseded_at, binding_checksum, reconciled_at, pruned_at
+         FROM session_lineage_bindings_audit
+         WHERE archived_batch_id IS NOT NULL
+         ORDER BY archived_batch_id, pruned_at`,
+      )
+      .all() as Array<{
+      batch_id: number;
+      runtime_session_id: string;
+      context_lineage_id: string;
+      binding_role: string;
+      bound_at: string;
+      superseded_at: string | null;
+      binding_checksum: string;
+      reconciled_at: string | null;
+      pruned_at: string;
+    }>;
+    const byBatch = new Map<number, typeof stagedRows>();
+    for (const row of stagedRows) {
+      const batch = byBatch.get(row.batch_id);
+      if (batch === undefined) {
+        byBatch.set(row.batch_id, [row]);
+      } else {
+        batch.push(row);
+      }
+    }
+
+    archive.exec("BEGIN IMMEDIATE");
+    try {
+      for (const [batchId, rows] of byBatch) {
+        const canonical = rows
+          .map(
+            (row) =>
+              `${row.batch_id}|${row.runtime_session_id}|${row.context_lineage_id}|` +
+              `${row.binding_role}|${row.bound_at}|${row.superseded_at ?? ""}|` +
+              `${row.binding_checksum}|${row.reconciled_at ?? ""}|${row.pruned_at}`,
+          )
+          .join("\n");
+        const rowsHash = createHash("sha256").update(canonical).digest("hex");
+        const insertRow = archive.prepare(
+          `INSERT OR IGNORE INTO binding_audit_archive
+            (batch_id, runtime_session_id, context_lineage_id, binding_role, bound_at,
+             superseded_at, binding_checksum, reconciled_at, pruned_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        );
+        for (const row of rows) {
+          insertRow.run(
+            row.batch_id,
+            row.runtime_session_id,
+            row.context_lineage_id,
+            row.binding_role,
+            row.bound_at,
+            row.superseded_at,
+            row.binding_checksum,
+            row.reconciled_at,
+            row.pruned_at,
+          );
+        }
+        archive
+          .prepare(
+            `INSERT OR REPLACE INTO archive_manifest
+              (batch_id, archived_at, row_count, rows_hash, lineage_id)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .run(batchId, new Date().toISOString(), rows.length, rowsHash, this.lineageId);
+      }
+      archive.exec("COMMIT");
+    } catch (error) {
+      archive.exec("ROLLBACK");
+      throw error;
+    }
+
+    // Phase C: delete active rows whose batch was copied IN THIS CALL (the
+    // staged scan above already includes every batch still present after a
+    // crash, so replay deletes old batches too — but only the batches
+    // actually present, never the whole archive manifest: that would make
+    // every drain O(archive lifetime)).
+    const drainedBatchIds = [...byBatch.keys()];
+    if (drainedBatchIds.length > 0) {
+      const deleteRow = this.db.prepare(
+        `DELETE FROM session_lineage_bindings_audit WHERE archived_batch_id IN (${drainedBatchIds
+          .map(() => "?")
+          .join(", ")})`,
+      );
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        deleteRow.run(...drainedBatchIds);
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+
+    const stagedRemaining = (
+      this.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM session_lineage_bindings_audit WHERE archived_batch_id IS NOT NULL",
+        )
+        .get() as { n: number }
+    ).n;
+    return { archived: stagedRows.length, stagedRemaining, batchId: newBatchId };
+  }
+
+  /** iris_agent#74: binding-audit archive capacity metrics (health). */
+  bindingArchiveStats(): {
+    archiveRows: number;
+    archiveBatches: number;
+    staged: number;
+    stagingSoftCap: number;
+    stagingHardCap: number;
+    activeDbBytes: number;
+    walBytes: number;
+  } {
+    const archive = this.ensureArchiveAttached();
+    const archiveRows = (
+      archive.prepare("SELECT COUNT(*) AS n FROM binding_audit_archive").get() as { n: number }
+    ).n;
+    const archiveBatches = (
+      archive.prepare("SELECT COUNT(*) AS n FROM archive_manifest").get() as { n: number }
+    ).n;
+    const staged = (
+      this.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM session_lineage_bindings_audit WHERE archived_batch_id IS NOT NULL",
+        )
+        .get() as { n: number }
+    ).n;
+    const pageCount = (this.db.prepare("PRAGMA page_count").get() as { page_count: number })
+      .page_count;
+    const pageSize = (this.db.prepare("PRAGMA page_size").get() as { page_size: number }).page_size;
+    const checkpoint = this.db.prepare("PRAGMA wal_checkpoint(PASSIVE)").get() as {
+      busy: number;
+      log: number;
+      checkpointed: number;
+    };
+    return {
+      archiveRows,
+      archiveBatches,
+      staged,
+      stagingSoftCap: this.auditStagingSoftCap,
+      stagingHardCap: this.auditStagingHardCap,
+      activeDbBytes: pageCount * pageSize,
+      walBytes: checkpoint.log * pageSize,
+    };
+  }
+
+  /**
+   * iris_agent#74: capacity maintenance — truncating checkpoint + full
+   * vacuum, then report the resulting active DB/WAL sizes. Capacity tests
+   * use this to prove the active context.db returns to a plateau after
+   * long-running rollover churn; operators can call it during idle windows.
+   */
+  maintenance(): { walBytesAfter: number; activeDbBytesAfter: number } {
+    const checkpoint = this.db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as {
+      busy: number;
+      log: number;
+      checkpointed: number;
+    };
+    this.db.exec("VACUUM");
+    const pageCount = (this.db.prepare("PRAGMA page_count").get() as { page_count: number })
+      .page_count;
+    const pageSize = (this.db.prepare("PRAGMA page_size").get() as { page_size: number }).page_size;
+    return {
+      walBytesAfter: checkpoint.log * pageSize,
+      activeDbBytesAfter: pageCount * pageSize,
+    };
   }
 
   /**
@@ -1160,6 +1505,17 @@ export class ContextStore implements ContextUnitStorePort {
         ).n;
         if (afterReclaim >= this.bindingHardLimit) {
           throw new ContextBindingLedgerExceededError(this.bindingHardLimit);
+        }
+        // iris_agent#74: the reclaim staged audit rows inside this
+        // transaction — the staging backlog must stay bounded too (the
+        // external archive drain is the only thing that can shrink it).
+        const totalAudit = (
+          this.db.prepare("SELECT COUNT(*) AS n FROM session_lineage_bindings_audit").get() as {
+            n: number;
+          }
+        ).n;
+        if (totalAudit > this.auditStagingHardCap) {
+          throw new ContextAuditBacklogExceededError(this.auditStagingHardCap);
         }
       }
       // iris_agent#52: a runtime session may be the current binding of at most
@@ -1218,6 +1574,20 @@ export class ContextStore implements ContextUnitStorePort {
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
+    }
+    // iris_agent#74: after the binding transaction commits, drain any
+    // staging backlog into the EXTERNAL archive — the active context.db
+    // only holds the in-flight window. A failure here propagates (the
+    // binding itself is committed; the next operation sees the typed
+    // backlog error once the hard cap is hit, and health metrics expose
+    // the staging level continuously).
+    const pendingAudit = (
+      this.db.prepare("SELECT COUNT(*) AS n FROM session_lineage_bindings_audit").get() as {
+        n: number;
+      }
+    ).n;
+    if (pendingAudit > 0) {
+      this.archiveBindingAudit();
     }
   }
 
