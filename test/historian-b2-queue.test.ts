@@ -29,8 +29,11 @@ function snapshot(session: string, head = 10): HistorianBoundarySnapshot {
   return {
     boundarySnapshotId: `bs-${session}-${head}`,
     runtimeSessionId: session,
+    lineageId: "identity-b2",
     observedHeadEntrySeq: head,
+    observedHeadContextSeq: head,
     eligibleThroughEntrySeq: head - 3,
+    eligibleThroughContextSeq: head - 3,
     protectedTailStartEntrySeq: head - 2,
     trueRawEligibleTokens: 100,
     narratableEligibleTokens: 80,

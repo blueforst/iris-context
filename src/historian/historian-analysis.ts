@@ -9,7 +9,7 @@
  * m0-clamp 等）。
  */
 import type { HistorianBoundarySnapshot, SequencedSessionEntry } from "../contracts/historian.js";
-import { rangeHash } from "./historian-boundary.js";
+import { historianBatchHash } from "../contracts/historian.js";
 
 /**
  * R3 Historian analysis view + PURE validation (issue #8 Phase B Feature B3).
@@ -59,7 +59,12 @@ export interface HistorianAnalysisView {
 }
 
 export type ValidationOutcome =
-  | { ok: true; commitThroughEntrySeq: number; discardedFromEntrySeq: number | null }
+  | {
+      ok: true;
+      commitThroughEntrySeq: number;
+      commitThroughContextSeq: number;
+      discardedFromEntrySeq: number | null;
+    }
   | { ok: false; errorCode: string; detail: string };
 
 export interface ValidateRangeInput {
@@ -67,13 +72,14 @@ export interface ValidateRangeInput {
   boundary: HistorianBoundarySnapshot;
   eligibleEntries: SequencedSessionEntry[];
   /**
-   * iris_agent#66: the durable cursor + 1 — the SAME start anchor the freeze
-   * used for sourceRangeHash. Kept explicit so the range-hash invariant is
-   * anchored to the cursor, not to whichever entry happens to be first in a
-   * claim window (derived-only units can leave entrySeq gaps). Required by
-   * validateRange; buildAnalysisView does not need it.
+   * iris_agent#76: the durable contextSeq cursor + 1 — the SAME start anchor
+   * the freeze used for sourceRangeHash (Context coordinates). Kept explicit
+   * so the range-hash invariant is anchored to the cursor, not to whichever
+   * unit happens to be first in a claim window (derived-only units can leave
+   * entrySeq gaps). Required by validateRange; buildAnalysisView does not
+   * need it.
    */
-  unprocessedFromEntrySeq?: number;
+  unprocessedFromContextSeq?: number;
 }
 
 /** Build the analysis view (pure). The range must already be ≤ snapshot. */
@@ -195,11 +201,12 @@ function renderProviderVisible(entry: SequencedSessionEntry, role: string | unde
 }
 
 export function validateRange(input: ValidateRangeInput): ValidationOutcome {
-  const { boundary, eligibleEntries, runtimeSessionId } = input;
+  const { boundary, eligibleEntries } = input;
 
   // 1. Endpoint invariant: the runner must never exceed the snapshot's
-  //    eligibleThroughEntrySeq. The caller reads 鈮?that ceiling, so the last
-  //    entry here must be 鈮?the snapshot ceiling.
+  //    eligible ceilings — in CONTEXT coordinates (the authority) and in
+  //    ordinal attribution. The caller reads ≤ those ceilings, so the last
+  //    entry here must be ≤ the snapshot ceilings.
   const last = eligibleEntries[eligibleEntries.length - 1];
   if (last !== undefined && last.entrySeq > boundary.eligibleThroughEntrySeq) {
     return {
@@ -208,24 +215,40 @@ export function validateRange(input: ValidateRangeInput): ValidationOutcome {
       detail: `runner widened the range: last ${last.entrySeq} > frozen ${boundary.eligibleThroughEntrySeq}`,
     };
   }
+  // iris_agent#76: entries carry contextSeq attribution; fixtures without
+  // one fall back to the ordinal (identical semantics).
+  const contextSeqOf = (entry: SequencedSessionEntry | undefined): number =>
+    entry?.contextSeq ?? entry?.entrySeq ?? 0;
+  if (last !== undefined && contextSeqOf(last) > boundary.eligibleThroughContextSeq) {
+    return {
+      ok: false,
+      errorCode: "range_exceeds_frozen_boundary",
+      detail: `runner widened the range: last contextSeq ${contextSeqOf(last)} > frozen ${boundary.eligibleThroughContextSeq}`,
+    };
+  }
 
   // 2. Source range hash invariant: the frozen hash must match the range.
-  //    The hash start is the durable cursor + 1 (unprocessedFromEntrySeq) —
-  //    the SAME anchor the freeze used — NOT the first present entry's seq:
-  //    with Context-owned claim input (iris_agent#66) the claimed window can
-  //    legitimately start after a gap (derived-only units carry no entrySeq
-  //    and are skipped), so anchoring on the first entry would diverge from
-  //    the frozen hash on every cycle.
-  const computedHash = rangeHash(
-    runtimeSessionId,
-    input.unprocessedFromEntrySeq ?? eligibleEntries[0]?.entrySeq ?? 0,
-    last?.entrySeq ?? 0,
-    eligibleEntries,
-  );
+  //    The hash start is the durable contextSeq cursor (the SAME anchor the
+  //    freeze used) — NOT the first present unit's seq: the claimed window
+  //    can legitimately start after a gap (derived-only units carry no
+  //    entrySeq), and iris_agent#76 hashes Context coordinates, never
+  //    Session-local entry sequences.
+  const unprocessedFromContextSeq =
+    input.unprocessedFromContextSeq ?? contextSeqOf(last ?? eligibleEntries[0]);
+  const computedHash = historianBatchHash({
+    lineageId: boundary.lineageId,
+    afterContextSeqExclusive: unprocessedFromContextSeq - 1,
+    throughContextSeqInclusive: last === undefined ? 0 : contextSeqOf(last),
+    units: eligibleEntries.map((entry) => ({
+      contextSeq: contextSeqOf(entry),
+      unitId: entry.entryId,
+      contentHash: entry.contentHash,
+    })),
+  });
   if (computedHash !== boundary.sourceRangeHash) {
     // The frozen range was read from a snapshot at freeze time; the runner
-    // re-reads the Session. If content changed, fail closed (never commit
-    // against drift) 鈥?the next freeze captures the new head.
+    // re-claims the same window. If content changed, fail closed (never
+    // commit against drift) — the next freeze captures the new head.
     return {
       ok: false,
       errorCode: "source_range_hash_mismatch",
@@ -315,5 +338,15 @@ export function validateRange(input: ValidateRangeInput): ValidationOutcome {
     };
   }
   const discardedFromEntrySeq = commitThrough < (last?.entrySeq ?? 0) ? commitThrough + 1 : null;
-  return { ok: true, commitThroughEntrySeq: commitThrough, discardedFromEntrySeq };
+  const committed = eligibleEntries.filter((entry) => entry.entrySeq <= commitThrough);
+  const commitThroughContextSeq =
+    committed.length === 0
+      ? (input.unprocessedFromContextSeq ?? 0) - 1
+      : contextSeqOf(committed[committed.length - 1]);
+  return {
+    ok: true,
+    commitThroughEntrySeq: commitThrough,
+    commitThroughContextSeq,
+    discardedFromEntrySeq,
+  };
 }

@@ -207,9 +207,19 @@ export function runWrapup(input: WrapupInput): WrapupResult {
       const write = (): void => {
         store.upsertSessionState({
           runtimeSessionId,
-          processedThroughEntrySeq: input.state.processedThroughEntrySeq,
+          ...(input.state.processedThroughEntrySeq !== undefined
+            ? { processedThroughEntrySeq: input.state.processedThroughEntrySeq }
+            : {}),
+          // iris_agent#76: the Context semantic cursor must survive the
+          // terminal transition (attribution + authority).
+          ...(input.state.processedThroughContextSeq !== undefined
+            ? { processedThroughContextSeq: input.state.processedThroughContextSeq }
+            : {}),
           status: "closed",
           observedHeadEntrySeq: boundary.observedHeadEntrySeq,
+          ...(boundary.observedHeadContextSeq !== undefined
+            ? { observedHeadContextSeq: boundary.observedHeadContextSeq }
+            : {}),
           updatedAt: new Date((input.nowMs ?? (() => Date.now()))()).toISOString(),
         });
       };
@@ -246,9 +256,19 @@ export function runWrapup(input: WrapupInput): WrapupResult {
   const write = (): void => {
     store.upsertSessionState({
       runtimeSessionId,
-      processedThroughEntrySeq: input.state.processedThroughEntrySeq,
+      ...(input.state.processedThroughEntrySeq !== undefined
+        ? { processedThroughEntrySeq: input.state.processedThroughEntrySeq }
+        : {}),
+      // iris_agent#76: the Context semantic cursor must survive the
+      // terminal transition (attribution + authority).
+      ...(input.state.processedThroughContextSeq !== undefined
+        ? { processedThroughContextSeq: input.state.processedThroughContextSeq }
+        : {}),
       status,
       observedHeadEntrySeq: boundary.observedHeadEntrySeq,
+      ...(boundary.observedHeadContextSeq !== undefined
+        ? { observedHeadContextSeq: boundary.observedHeadContextSeq }
+        : {}),
       updatedAt: new Date((input.nowMs ?? (() => Date.now()))()).toISOString(),
     });
     store.insertContinuitySnapshot(finalSnapshot);

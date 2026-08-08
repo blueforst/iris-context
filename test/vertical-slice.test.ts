@@ -14,6 +14,7 @@ import {
   createContextHistoryReadPort,
   type ContextHistoryReadPort,
 } from "../src/context/history-read-port.js";
+import { historianBatchHash } from "../src/contracts/historian.js";
 import type { LineageBoundaryInput } from "../src/historian/historian-boundary.js";
 import { HistorianManager } from "../src/historian/historian-manager.js";
 import { HistorianStore } from "../src/historian/historian-store.js";
@@ -62,11 +63,18 @@ function emptyHistoryPort(): ContextHistoryReadPort {
     listUnitsForHistorian() {
       return [];
     },
-    listUnitsForHistorianByEntrySeq() {
-      return [];
-    },
-    claimUnitsForHistorian() {
-      return [];
+    claimHistorianBatch: ({ afterContextSeqExclusive }) => {
+      const batch: import("../src/contracts/historian.js").HistorianBatchV1 = {
+        schemaVersion: "historian-batch-v1",
+        lineageId: "identity-slice",
+        afterContextSeqExclusive,
+        throughContextSeqInclusive: afterContextSeqExclusive,
+        units: [],
+        batchHash: "",
+        frozenAt: new Date().toISOString(),
+      };
+      batch.batchHash = historianBatchHash(batch);
+      return batch;
     },
     lineageId() {
       return "identity-slice";
@@ -214,8 +222,8 @@ test("R3-P1 vertical slice: wired historianManager triggers enqueueIncremental o
         result.runtimeSessionId,
       );
       assert.equal(
-        call.lineageBoundary?.representedThroughEntrySeq,
-        boundary.representedThroughEntrySeq,
+        call.lineageBoundary?.representedThroughContextSeq,
+        boundary.representedThroughContextSeq,
         "wired boundary matches the durable lineage boundary",
       );
     } finally {

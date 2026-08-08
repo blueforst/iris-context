@@ -243,8 +243,11 @@ test("B1: session state + boundary snapshot round-trip", () => {
     const snapshot: HistorianBoundarySnapshot = {
       boundarySnapshotId: "bs-1",
       runtimeSessionId: SESSION,
+      lineageId: "identity-b1",
       observedHeadEntrySeq: 9,
+      observedHeadContextSeq: 9,
       eligibleThroughEntrySeq: 6,
+      eligibleThroughContextSeq: 6,
       protectedTailStartEntrySeq: 7,
       trueRawEligibleTokens: 1000,
       narratableEligibleTokens: 800,

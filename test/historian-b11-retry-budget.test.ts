@@ -28,6 +28,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
+import { historianBatchHash } from "../src/contracts/historian.js";
 import {
   HistorianQueue,
   HistorianWorker,
@@ -89,12 +90,11 @@ function stubHistoryPort(): ContextHistoryReadPort {
         providerProfileId: "mock",
       };
     },
-    listUnitsForHistorian() {
-      return [];
-    },
-    listUnitsForHistorianByEntrySeq(_r: string, fromEntrySeq: number, toEntrySeq: number) {
+    listUnitsForHistorian(_lineageId: string, fromContextSeq: number, toContextSeq: number) {
+      // iris_agent#76: anti-echo views are keyed by CONTEXT coordinates —
+      // one view per claimed seq (same window the batch served).
       const units: import("../src/historian/anti-echo.js").HistorianUnitView[] = [];
-      for (let seq = fromEntrySeq; seq <= toEntrySeq; seq++) {
+      for (let seq = fromContextSeq; seq <= toContextSeq; seq++) {
         units.push({
           contextUnitId: `unit-${seq}`,
           contextSeq: seq,
@@ -107,14 +107,20 @@ function stubHistoryPort(): ContextHistoryReadPort {
       }
       return units;
     },
-    claimUnitsForHistorian(_r: string, fromEntrySeq: number, toEntrySeq: number) {
+    claimHistorianBatch({ afterContextSeqExclusive, throughContextSeqInclusive }) {
       // Real committed units in the claimed window — the freeze and the
-      // runner need a non-empty claim to make progress.
+      // runner need a non-empty claim to make progress. The fixture head is
+      // capped at 4096 (the old freeze-head window bound) so the manager's
+      // MAX_SAFE_INTEGER head probe stays bounded.
       const units: import("../src/contracts/context-units.js").ContextMessageUnit[] = [];
-      for (let seq = fromEntrySeq; seq <= toEntrySeq; seq++) {
+      for (
+        let seq = afterContextSeqExclusive + 1;
+        seq <= Math.min(throughContextSeqInclusive, 4096);
+        seq++
+      ) {
         units.push({
           lineageId: "identity-b11",
-          runtimeSessionId: _r,
+          runtimeSessionId: "attribution-stub",
           contextSeq: seq,
           unitId: `unit-${seq}`,
           sourceEventId: `evt-${seq}`,
@@ -131,7 +137,20 @@ function stubHistoryPort(): ContextHistoryReadPort {
           createdAt: "2026-08-01T00:00:00.000Z",
         });
       }
-      return units;
+      const batch: import("../src/contracts/historian.js").HistorianBatchV1 = {
+        schemaVersion: "historian-batch-v1",
+        lineageId: "identity-b11",
+        afterContextSeqExclusive,
+        throughContextSeqInclusive:
+          units.length === 0
+            ? afterContextSeqExclusive
+            : (units[units.length - 1]?.contextSeq ?? afterContextSeqExclusive),
+        units,
+        batchHash: "",
+        frozenAt: new Date().toISOString(),
+      };
+      batch.batchHash = historianBatchHash(batch);
+      return batch;
     },
     lineageId() {
       return "identity-b11";
@@ -149,8 +168,11 @@ function flakyHistoryPort(
   const port = stubHistoryPort() as ContextHistoryReadPort & { remainingFailures: number };
   port.remainingFailures = failures;
   let claimCalls = 0;
-  const original = port.claimUnitsForHistorian.bind(port);
-  port.claimUnitsForHistorian = (...args) => {
+  const original = port.claimHistorianBatch.bind(port);
+  port.claimHistorianBatch = (input: {
+    afterContextSeqExclusive: number;
+    throughContextSeqInclusive: number;
+  }) => {
     claimCalls += 1;
     // The freeze path is the first claim of each admission; the runner's
     // execution claim is every later one.
@@ -158,7 +180,7 @@ function flakyHistoryPort(
       port.remainingFailures -= 1;
       throw new Error("claim unavailable (injected failure)");
     }
-    return original(...args);
+    return original(input);
   };
   return port;
 }

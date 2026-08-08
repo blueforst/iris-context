@@ -24,25 +24,60 @@ import {
 } from "./historian-analysis.js";
 
 /**
- * iris_agent#66: adapt a committed Context semantic unit to the runner's
+ * iris_agent#66/#76: adapt committed Context semantic units to the runner's
  * internal SequencedSessionEntry shape. The payload IS the canonical
  * AgentMessage (role/content/toolCall), so the existing pure freeze/
- * analysis functions keep working — but the SOURCE is now Context-owned
- * committed units, never Pi Session transcript. The session id survives
- * only as opaque attribution; semantic identity/order come from contextSeq
- * (entrySeq is the narrow archive mapping).
+ * analysis functions keep working — but the SOURCE is Context-owned
+ * committed units, never Pi Session transcript. The session id and the
+ * entrySeq survive only as opaque attribution; semantic identity/order come
+ * from contextSeq (entrySeq is the narrow archive mapping).
+ *
+ * iris_agent#76: units without a Pi entrySeq (e.g. legacy-recovered units)
+ * are still full batch members — the caller assigns a deterministic
+ * monotonic attribution ordinal so the pure seam/arc analysis keeps a total
+ * order.
  */
 export function contextUnitToSequencedEntry(
   runtimeSessionId: string,
   unit: ContextMessageUnit,
+  ordinalFallback?: number,
 ): SequencedSessionEntry {
   return {
     runtimeSessionId,
-    entrySeq: unit.entrySeq ?? 0,
+    entrySeq: unit.entrySeq ?? ordinalFallback ?? 0,
+    ...(unit.contextSeq !== undefined ? { contextSeq: unit.contextSeq } : {}),
     entryId: unit.unitId,
     entry: { type: "message", message: unit.payload },
     contentHash: unit.contentHash,
   };
+}
+
+/**
+ * iris_agent#76: map a claimed Context batch (ascending contextSeq order) to
+ * the runner's internal entries. The attribution ordinal is ALWAYS the
+ * strictly-increasing batch position: units WITH a monotonic Pi entrySeq
+ * keep it verbatim; units whose raw entrySeq would break monotonicity (a
+ * new Session's reset numbering, gaps, duplicates) get the next ordinal —
+ * so the seam/arc math stays total and the frozen hash window covers the
+ * WHOLE batch (never silently dropping units because their attribution
+ * collides with another Session's numbering).
+ */
+export function unitsToSequencedEntries(
+  runtimeSessionId: string,
+  units: ContextMessageUnit[],
+): SequencedSessionEntry[] {
+  let ordinal = 0;
+  return units.map((unit) => {
+    ordinal = unit.entrySeq !== undefined ? Math.max(unit.entrySeq, ordinal + 1) : ordinal + 1;
+    return {
+      runtimeSessionId,
+      entrySeq: ordinal,
+      ...(unit.contextSeq !== undefined ? { contextSeq: unit.contextSeq } : {}),
+      entryId: unit.unitId,
+      entry: { type: "message", message: unit.payload },
+      contentHash: unit.contentHash,
+    };
+  });
 }
 
 /**
@@ -98,6 +133,8 @@ export interface RunnerResult {
   /** True when a safe prefix was committed (cursor advanced). */
   committed: boolean;
   commitThroughEntrySeq: number;
+  /** iris_agent#76: the committed ceiling in Context coordinates. */
+  commitThroughContextSeq: number;
   unprocessedFromEntrySeq: number;
   discardedFromEntrySeq: number | null;
   status: "committed" | "nothing_new" | "validation_failed";
@@ -105,9 +142,16 @@ export interface RunnerResult {
   detail?: string;
 }
 
-/** Deterministic first-unprocessed entrySeq from the durable cursor. */
+/** Deterministic first-unprocessed entrySeq from the durable cursor
+ * (attribution). */
 export function unprocessedFromEntrySeq(state: HistorianSessionState | undefined): number {
   return Math.max(1, (state?.processedThroughEntrySeq ?? 0) + 1);
+}
+
+/** iris_agent#76: deterministic first-unprocessed contextSeq from the
+ * AUTHORITATIVE durable cursor (Context coordinates). */
+export function unprocessedFromContextSeq(state: HistorianSessionState | undefined): number {
+  return (state?.processedThroughContextSeq ?? 0) + 1;
 }
 
 export class HistorianRunner {
@@ -124,11 +168,15 @@ export class HistorianRunner {
   }
 
   /**
-   * Run one job: consume the frozen snapshot, read the finite range, build
-   * the analysis view, PURE-validate, discard the unsafe suffix, commit the
-   * safe prefix (cursor + optional B5 hook) atomically. Never throws on
-   * validation failure; throws only on real storage errors (the caller
-   * requeues with retry).
+   * Run one job: consume the frozen snapshot, claim the finite Context
+   * batch, build the analysis view, PURE-validate, discard the unsafe
+   * suffix, commit the safe prefix (cursor + optional B5 hook) atomically.
+   * Never throws on validation failure; throws only on real storage errors
+   * (the caller requeues with retry).
+   *
+   * iris_agent#76: batch membership/order/cursor are CONTEXT coordinates
+   * (lineage + global contextSeq). The Session id and entrySeq ordinals are
+   * attribution only.
    */
   async run(input: {
     runtimeSessionId: string;
@@ -137,31 +185,34 @@ export class HistorianRunner {
     const { runtimeSessionId, boundary } = input;
     const state = this.store.getSessionState(runtimeSessionId);
 
-    // The durable cursor is the authoritative processed watermark; the
-    // snapshot's range starts strictly after it (unprocessedFromEntrySeq).
+    // The durable contextSeq cursor is the authoritative processed
+    // watermark; the snapshot's batch starts strictly after it.
+    const fromContextSeq = unprocessedFromContextSeq(state);
     const fromEntrySeq = unprocessedFromEntrySeq(state);
-    if (boundary.eligibleThroughEntrySeq < fromEntrySeq) {
+    if (boundary.eligibleThroughContextSeq < fromContextSeq) {
       return {
         committed: false,
         commitThroughEntrySeq: state?.processedThroughEntrySeq ?? 0,
+        commitThroughContextSeq: state?.processedThroughContextSeq ?? 0,
         unprocessedFromEntrySeq: fromEntrySeq,
         discardedFromEntrySeq: null,
         status: "nothing_new",
       };
     }
 
-    // Read the FINITE eligible range (capped by the FROZEN ceiling). The
-    // read happens BEFORE the transaction; the transaction itself is a
+    // Claim the FROZEN Context batch (capped by the frozen ceiling). The
+    // claim happens BEFORE the transaction; the transaction itself is a
     // synchronous, atomic segment (BEGIN → writes → COMMIT).
-    const eligibleEntries = await this.readRange(
-      runtimeSessionId,
-      fromEntrySeq - 1,
-      boundary.eligibleThroughEntrySeq,
-    );
+    const batch = this.historyPort.claimHistorianBatch({
+      afterContextSeqExclusive: fromContextSeq - 1,
+      throughContextSeqInclusive: boundary.eligibleThroughContextSeq,
+    });
+    const eligibleEntries = unitsToSequencedEntries(runtimeSessionId, batch.units);
     if (eligibleEntries.length === 0) {
       return {
         committed: false,
         commitThroughEntrySeq: state?.processedThroughEntrySeq ?? 0,
+        commitThroughContextSeq: state?.processedThroughContextSeq ?? 0,
         unprocessedFromEntrySeq: fromEntrySeq,
         discardedFromEntrySeq: null,
         status: "nothing_new",
@@ -178,15 +229,16 @@ export class HistorianRunner {
       runtimeSessionId,
       boundary,
       eligibleEntries,
-      // iris_agent#66: the range-hash anchor is the durable cursor + 1 (the
-      // freeze used the same anchor) — NOT the first present entry (claim
-      // windows can start after derived-only unit gaps).
-      unprocessedFromEntrySeq: fromEntrySeq,
+      // iris_agent#76: the range-hash anchor is the durable contextSeq
+      // cursor + 1 (the freeze used the same anchor) — NOT the first
+      // present unit (claim windows can start after entrySeq gaps).
+      unprocessedFromContextSeq: fromContextSeq,
     });
     if (!outcome.ok) {
       return {
         committed: false,
         commitThroughEntrySeq: state?.processedThroughEntrySeq ?? 0,
+        commitThroughContextSeq: state?.processedThroughContextSeq ?? 0,
         unprocessedFromEntrySeq: fromEntrySeq,
         discardedFromEntrySeq: null,
         status: "validation_failed",
@@ -201,11 +253,17 @@ export class HistorianRunner {
     try {
       const nextState: HistorianSessionState = {
         runtimeSessionId,
+        // iris_agent#76: the AUTHORITATIVE cursor is the Context semantic
+        // ceiling; the entrySeq cursor is attribution.
+        processedThroughContextSeq: outcome.commitThroughContextSeq,
         processedThroughEntrySeq: outcome.commitThroughEntrySeq,
         status: state?.status ?? "active",
         ...(state?.observedHeadEntrySeq === undefined
           ? {}
           : { observedHeadEntrySeq: state.observedHeadEntrySeq }),
+        ...(state?.observedHeadContextSeq === undefined
+          ? {}
+          : { observedHeadContextSeq: state.observedHeadContextSeq }),
         updatedAt: new Date(this.store.now()).toISOString(),
       };
       this.store.upsertSessionState(nextState);
@@ -226,40 +284,10 @@ export class HistorianRunner {
     return {
       committed: true,
       commitThroughEntrySeq: outcome.commitThroughEntrySeq,
+      commitThroughContextSeq: outcome.commitThroughContextSeq,
       unprocessedFromEntrySeq: outcome.commitThroughEntrySeq + 1,
       discardedFromEntrySeq: outcome.discardedFromEntrySeq,
       status: "committed",
     };
-  }
-
-  private async readRange(
-    runtimeSessionId: string,
-    afterEntrySeqExclusive: number,
-    throughEntrySeqInclusive: number,
-  ): Promise<SequencedSessionEntry[]> {
-    // iris_agent#66: the normal semantic input is committed Context units
-    // claimed through the Context-owned history port (contextSeq order,
-    // immutable, lineage-bound). Session ids/ranges survive only as opaque
-    // attribution; no Session transcript is scanned here.
-    const from = afterEntrySeqExclusive + 1;
-    const units = this.historyPort.claimUnitsForHistorian(
-      runtimeSessionId,
-      from,
-      throughEntrySeqInclusive,
-    );
-    const out: SequencedSessionEntry[] = [];
-    for (const unit of units) {
-      if (unit.entrySeq === undefined) {
-        // Derived-only units (no narrow archive mapping) carry no entrySeq;
-        // they are not part of the Session-scoped safe-prefix space. The
-        // semantic units themselves were already committed by Context ingest.
-        continue;
-      }
-      if (unit.entrySeq > throughEntrySeqInclusive) {
-        return out; // frozen ceiling — never widen
-      }
-      out.push(contextUnitToSequencedEntry(runtimeSessionId, unit));
-    }
-    return out;
   }
 }

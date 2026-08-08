@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 import type { SessionTreeEntry } from "@earendil-works/pi-agent-core";
 
 import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
+import { historianBatchHash } from "../src/contracts/historian.js";
 import { freezeBoundary } from "../src/historian/historian-boundary.js";
 import { HistorianRunner } from "../src/historian/historian-runner.js";
 import { createPublicationCommitHook } from "../src/historian/historian-publication.js";
@@ -59,15 +60,15 @@ function unit(contextSeq: number, overrides: Partial<HistorianUnitView> = {}): H
 }
 
 /** Fake ContextHistoryReadPort: configurable unit views + a fixed lineage id.
- * iris_agent#66: claimUnitsForHistorian serves FULL committed ContextMessageUnit
+ * iris_agent#76: claimHistorianBatch serves FULL committed ContextMessageUnit
  * rows (the normal semantic input); the narrow views stay values-only. */
 function stubPort(units: HistorianUnitView[], lineageId = LINEAGE): ContextHistoryReadPort {
-  const claim = (_r: string, fromEntrySeq: number, toEntrySeq: number) =>
+  const claim = (fromContextSeq: number, toContextSeq: number) =>
     units
-      .filter((u) => u.contextSeq >= fromEntrySeq && u.contextSeq <= toEntrySeq)
+      .filter((u) => u.contextSeq >= fromContextSeq && u.contextSeq <= toContextSeq)
       .map((u) => ({
         lineageId,
-        runtimeSessionId: _r,
+        runtimeSessionId: "attribution-stub",
         contextSeq: u.contextSeq,
         unitId: u.contextUnitId,
         sourceEventId: u.runtimeEventId,
@@ -77,7 +78,7 @@ function stubPort(units: HistorianUnitView[], lineageId = LINEAGE): ContextHisto
         entryId: `entry-${u.contextSeq}`,
         entrySeq: u.contextSeq,
         contentHash: u.contentHash,
-        payload: { role: "user", content: `content-${u.contextSeq}`, timestamp: 1 },
+        payload: { role: "user" as const, content: `content-${u.contextSeq}`, timestamp: 1 },
         paired: false,
         derivationRefs: u.derivationRefs,
         schemaVersion: "context-unit-v1",
@@ -96,11 +97,25 @@ function stubPort(units: HistorianUnitView[], lineageId = LINEAGE): ContextHisto
     listUnitsForHistorian() {
       return units;
     },
-    listUnitsForHistorianByEntrySeq(_r: string, fromEntrySeq: number, toEntrySeq: number) {
-      return units.filter((u) => u.contextSeq >= fromEntrySeq && u.contextSeq <= toEntrySeq);
-    },
-    claimUnitsForHistorian(_r: string, fromEntrySeq: number, toEntrySeq: number) {
-      return claim(_r, fromEntrySeq, toEntrySeq);
+    claimHistorianBatch({ afterContextSeqExclusive, throughContextSeqInclusive }) {
+      const claimed = claim(
+        afterContextSeqExclusive + 1,
+        Math.min(throughContextSeqInclusive, units.length),
+      );
+      const batch: import("../src/contracts/historian.js").HistorianBatchV1 = {
+        schemaVersion: "historian-batch-v1",
+        lineageId,
+        afterContextSeqExclusive,
+        throughContextSeqInclusive:
+          claimed.length === 0
+            ? afterContextSeqExclusive
+            : (claimed[claimed.length - 1]?.contextSeq ?? afterContextSeqExclusive),
+        units: claimed,
+        batchHash: "",
+        frozenAt: new Date().toISOString(),
+      };
+      batch.batchHash = historianBatchHash(batch);
+      return batch;
     },
     lineageId() {
       return lineageId;
@@ -126,7 +141,10 @@ function fixture(port: ContextHistoryReadPort): Fixture {
       // the SAME Context claim path (committed units) — the freeze must see
       // exactly what the runner consumes, or the frozen sourceRangeHash
       // would never match the claimed range.
-      const claimed = port.claimUnitsForHistorian(sessionId, 1, 4096);
+      const claimed = port.claimHistorianBatch({
+        afterContextSeqExclusive: 0,
+        throughContextSeqInclusive: 4096,
+      }).units;
       const claimedEntries = claimed
         .filter((unit) => unit.entrySeq !== undefined)
         .map((unit) => contextUnitToSequencedEntry(sessionId, unit));
@@ -134,6 +152,7 @@ function fixture(port: ContextHistoryReadPort): Fixture {
       const freeze = freezeBoundary({
         rawSeamInput: {
           runtimeSessionId: sessionId,
+          lineageId: "identity-stub",
           entries: claimedEntries,
           processedThroughEntrySeq: 0,
           tailMarginEntries: 0,
@@ -303,12 +322,13 @@ test("B10-AC5: production Historian cannot publish without the Context read/clai
     const store = HistorianStore.open({ databasePath: join(dir, "historian.db") });
     const hp = stubPort([unit(1)]);
     const claimedEntries = hp
-      .claimUnitsForHistorian(SESSION, 1, 1)
-      .filter((unit) => unit.entrySeq !== undefined)
+      .claimHistorianBatch({ afterContextSeqExclusive: 0, throughContextSeqInclusive: 1 })
+      .units.filter((unit) => unit.entrySeq !== undefined)
       .map((unit) => contextUnitToSequencedEntry(SESSION, unit));
     const freeze = freezeBoundary({
       rawSeamInput: {
         runtimeSessionId: SESSION,
+        lineageId: "identity-stub",
         entries: claimedEntries,
         processedThroughEntrySeq: 0,
         tailMarginEntries: 0,

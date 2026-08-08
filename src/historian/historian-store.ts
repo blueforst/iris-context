@@ -55,14 +55,19 @@ export interface HistorianStoreOptions {
 
 const SESSION_STATE_SQL = {
   select:
-    "SELECT runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, retry_attempts, retry_exhausted_at, updated_at FROM session_state WHERE runtime_session_id = ?",
+    "SELECT runtime_session_id, processed_through_entry_seq, processed_through_context_seq, status, observed_head_entry_seq, observed_head_context_seq, finalization_requested_at, retry_attempts, retry_exhausted_at, updated_at FROM session_state WHERE runtime_session_id = ?",
   upsert:
-    "INSERT INTO session_state (runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, retry_attempts, retry_exhausted_at, updated_at) " +
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
+    "INSERT INTO session_state (runtime_session_id, processed_through_entry_seq, processed_through_context_seq, status, observed_head_entry_seq, observed_head_context_seq, finalization_requested_at, retry_attempts, retry_exhausted_at, updated_at) " +
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
     "ON CONFLICT(runtime_session_id) DO UPDATE SET " +
-    "processed_through_entry_seq = excluded.processed_through_entry_seq, " +
+    // iris_agent#76: both cursors are sticky — an upsert that does not
+    // carry a cursor value (NULL) must never reset the durable watermark;
+    // only explicit values advance it.
+    "processed_through_entry_seq = COALESCE(excluded.processed_through_entry_seq, session_state.processed_through_entry_seq), " +
+    "processed_through_context_seq = COALESCE(excluded.processed_through_context_seq, session_state.processed_through_context_seq), " +
     "status = excluded.status, " +
     "observed_head_entry_seq = excluded.observed_head_entry_seq, " +
+    "observed_head_context_seq = excluded.observed_head_context_seq, " +
     // iris_agent#53: the finalization intent timestamp is set ONCE (first
     // transition into closing) and never reset by re-enqueues / recovery /
     // status flapping — it feeds readiness age and FIFO backlog refill.
@@ -76,7 +81,7 @@ const SESSION_STATE_SQL = {
     "retry_exhausted_at = COALESCE(session_state.retry_exhausted_at, excluded.retry_exhausted_at), " +
     "updated_at = excluded.updated_at",
   listClosing:
-    "SELECT runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, retry_attempts, retry_exhausted_at, updated_at " +
+    "SELECT runtime_session_id, processed_through_entry_seq, processed_through_context_seq, status, observed_head_entry_seq, observed_head_context_seq, finalization_requested_at, retry_attempts, retry_exhausted_at, updated_at " +
     "FROM session_state WHERE status = 'closing' " +
     "ORDER BY finalization_requested_at ASC, runtime_session_id ASC LIMIT ?",
   countClosing: "SELECT COUNT(*) AS count FROM session_state WHERE status = 'closing'",
@@ -86,7 +91,7 @@ const SESSION_STATE_SQL = {
   // explicitly EXCLUDED from the durable backlog refill (they must not be
   // re-admitted automatically).
   listClosingNotExhausted:
-    "SELECT runtime_session_id, processed_through_entry_seq, status, observed_head_entry_seq, finalization_requested_at, retry_attempts, retry_exhausted_at, updated_at " +
+    "SELECT runtime_session_id, processed_through_entry_seq, processed_through_context_seq, status, observed_head_entry_seq, observed_head_context_seq, finalization_requested_at, retry_attempts, retry_exhausted_at, updated_at " +
     "FROM session_state WHERE status = 'closing' AND retry_exhausted_at IS NULL " +
     "ORDER BY finalization_requested_at ASC, runtime_session_id ASC LIMIT ?",
   countExhausted:
@@ -96,12 +101,15 @@ const SESSION_STATE_SQL = {
 const BOUNDARY_SQL = {
   insert:
     "INSERT INTO boundary_snapshots " +
-    "(boundary_snapshot_id, runtime_session_id, observed_head_entry_seq, eligible_through_entry_seq, " +
+    "(boundary_snapshot_id, runtime_session_id, lineage_id, observed_head_entry_seq, observed_head_context_seq, eligible_through_entry_seq, eligible_through_context_seq, " +
     "protected_tail_start_entry_seq, true_raw_eligible_tokens, narratable_eligible_tokens, " +
     "source_range_hash, model_provider_profile, frozen_at, consumed_at) " +
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL) " +
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL) " +
     "ON CONFLICT(runtime_session_id, observed_head_entry_seq) DO UPDATE SET " +
+    "lineage_id = excluded.lineage_id, " +
+    "observed_head_context_seq = excluded.observed_head_context_seq, " +
     "eligible_through_entry_seq = excluded.eligible_through_entry_seq, " +
+    "eligible_through_context_seq = excluded.eligible_through_context_seq, " +
     "protected_tail_start_entry_seq = excluded.protected_tail_start_entry_seq, " +
     "true_raw_eligible_tokens = excluded.true_raw_eligible_tokens, " +
     "narratable_eligible_tokens = excluded.narratable_eligible_tokens, " +
@@ -109,7 +117,7 @@ const BOUNDARY_SQL = {
     "model_provider_profile = excluded.model_provider_profile, " +
     "frozen_at = excluded.frozen_at",
   selectBySession:
-    "SELECT boundary_snapshot_id, runtime_session_id, observed_head_entry_seq, eligible_through_entry_seq, " +
+    "SELECT boundary_snapshot_id, runtime_session_id, lineage_id, observed_head_entry_seq, observed_head_context_seq, eligible_through_entry_seq, eligible_through_context_seq, " +
     "protected_tail_start_entry_seq, true_raw_eligible_tokens, narratable_eligible_tokens, " +
     "source_range_hash, model_provider_profile, frozen_at, consumed_at " +
     "FROM boundary_snapshots WHERE runtime_session_id = ? ORDER BY observed_head_entry_seq DESC LIMIT ?",
@@ -165,8 +173,10 @@ export class HistorianStore {
       | {
           runtime_session_id: string;
           processed_through_entry_seq: number;
+          processed_through_context_seq: number | null;
           status: string;
           observed_head_entry_seq: number | null;
+          observed_head_context_seq: number | null;
           finalization_requested_at: string | null;
           retry_attempts: number;
           retry_exhausted_at: string | null;
@@ -179,10 +189,18 @@ export class HistorianStore {
     return {
       runtimeSessionId: row.runtime_session_id,
       processedThroughEntrySeq: row.processed_through_entry_seq,
+      // iris_agent#76: the authoritative Context cursor (NULL on legacy rows
+      // = nothing processed).
+      ...(row.processed_through_context_seq === null
+        ? {}
+        : { processedThroughContextSeq: row.processed_through_context_seq }),
       status: row.status as HistorianSessionState["status"],
       ...(row.observed_head_entry_seq === null
         ? {}
         : { observedHeadEntrySeq: row.observed_head_entry_seq }),
+      ...(row.observed_head_context_seq === null
+        ? {}
+        : { observedHeadContextSeq: row.observed_head_context_seq }),
       ...(row.finalization_requested_at === null
         ? {}
         : { finalizationRequestedAt: row.finalization_requested_at }),
@@ -197,9 +215,11 @@ export class HistorianStore {
   upsertSessionState(state: HistorianSessionState): void {
     this.db.prepare(SESSION_STATE_SQL.upsert).run(
       state.runtimeSessionId,
-      state.processedThroughEntrySeq,
+      state.processedThroughEntrySeq ?? 0,
+      state.processedThroughContextSeq ?? null,
       state.status,
       state.observedHeadEntrySeq ?? null,
+      state.observedHeadContextSeq ?? null,
       // iris_agent#53: the intent timestamp is only meaningful (and only
       // ever set) when the session is/was closing; the upsert's COALESCE
       // keeps the FIRST recorded time.
@@ -365,8 +385,11 @@ export class HistorianStore {
       .run(
         snapshot.boundarySnapshotId,
         snapshot.runtimeSessionId,
+        snapshot.lineageId,
         snapshot.observedHeadEntrySeq,
+        snapshot.observedHeadContextSeq,
         snapshot.eligibleThroughEntrySeq,
+        snapshot.eligibleThroughContextSeq,
         snapshot.protectedTailStartEntrySeq,
         snapshot.trueRawEligibleTokens,
         snapshot.narratableEligibleTokens,
@@ -383,8 +406,11 @@ export class HistorianStore {
       .all(runtimeSessionId, limit) as Array<{
       boundary_snapshot_id: string;
       runtime_session_id: string;
+      lineage_id: string;
       observed_head_entry_seq: number;
+      observed_head_context_seq: number;
       eligible_through_entry_seq: number;
+      eligible_through_context_seq: number;
       protected_tail_start_entry_seq: number;
       true_raw_eligible_tokens: number;
       narratable_eligible_tokens: number;
@@ -396,8 +422,11 @@ export class HistorianStore {
     return rows.map((row) => ({
       boundarySnapshotId: row.boundary_snapshot_id,
       runtimeSessionId: row.runtime_session_id,
+      lineageId: row.lineage_id,
       observedHeadEntrySeq: row.observed_head_entry_seq,
+      observedHeadContextSeq: row.observed_head_context_seq,
       eligibleThroughEntrySeq: row.eligible_through_entry_seq,
+      eligibleThroughContextSeq: row.eligible_through_context_seq,
       protectedTailStartEntrySeq: row.protected_tail_start_entry_seq,
       trueRawEligibleTokens: row.true_raw_eligible_tokens,
       narratableEligibleTokens: row.narratable_eligible_tokens,

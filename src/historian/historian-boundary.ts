@@ -10,7 +10,11 @@
  */
 import { createHash } from "node:crypto";
 
-import type { HistorianBoundarySnapshot, SequencedSessionEntry } from "../contracts/historian.js";
+import {
+  historianBatchHash,
+  type HistorianBoundarySnapshot,
+  type SequencedSessionEntry,
+} from "../contracts/historian.js";
 
 /**
  * R3 Historian boundary freeze (issue #8 Phase B Feature B3).
@@ -29,21 +33,32 @@ import type { HistorianBoundarySnapshot, SequencedSessionEntry } from "../contra
  * deterministically from the durable cursor + the snapshot.
  */
 
-/** R3-P1：Context lineage 物化边界输入（m0-clamp）。representedThroughEntrySeq
- * 为 lineage 物化 watermark（represented_through_context_seq）对应的 entrySeq
- * （由 ContextHistoryReadPort 提供）；null = 从未物化 / 前缀内无 entry_seq
- * 映射 → 不 clamp。 */
+/** R3-P1：Context lineage 物化边界输入（m0-clamp）。representedThroughContextSeq
+ * 为 lineage 物化 watermark（represented_through_context_seq）。null = 从未
+ * 物化 → 不 clamp。iris_agent#76: the clamp is a CONTEXT coordinate — the
+ * lineage materialization watermark, never a Session-local entrySeq. */
 export interface LineageBoundaryInput {
-  representedThroughEntrySeq: number | null;
+  representedThroughContextSeq: number | null;
 }
 
 /** raw 部分：Session head 的纯 raw 输入（与 R3-P0 原 BoundaryFreezeInput 一致）。 */
 export interface RawBoundaryFreezeInput {
   runtimeSessionId: string;
-  /** Raw sequenced entries of the CURRENT Session head (from the read port). */
+  /**
+   * iris_agent#76: the identity-level Context lineage id — the batch
+   * identity domain for the frozen sourceRangeHash.
+   */
+  lineageId: string;
+  /** Raw sequenced entries of the CURRENT Session head (from the claim). */
   entries: SequencedSessionEntry[];
-  /** The durable processed cursor (highest committed entrySeq). */
+  /** The durable processed cursor (highest committed entrySeq, attribution). */
   processedThroughEntrySeq: number;
+  /**
+   * iris_agent#76: the AUTHORITATIVE durable cursor — the highest committed
+   * contextSeq (Context-owned semantic coordinate). Absent = nothing
+   * processed.
+   */
+  processedThroughContextSeq?: number;
   /** Tail margin in entrySeqs (how many raw entries stay in the protected
    * tail beyond the eligible seam). Default 2. */
   tailMarginEntries?: number;
@@ -148,11 +163,20 @@ export function freezeBoundary(input: BoundaryFreezeInput): BoundaryFreezeResult
   const raw = input.rawSeamInput;
   const tailMargin = raw.tailMarginEntries ?? 2;
   const head = raw.entries.length === 0 ? 0 : (raw.entries[raw.entries.length - 1]?.entrySeq ?? 0);
+  const headContextSeq =
+    raw.entries.length === 0
+      ? (raw.processedThroughContextSeq ?? 0)
+      : (raw.entries[raw.entries.length - 1]?.contextSeq ??
+        raw.entries[raw.entries.length - 1]?.entrySeq ??
+        raw.processedThroughContextSeq ??
+        0);
+  const processedThroughContextSeq = raw.processedThroughContextSeq ?? 0;
   const unprocessedFromEntrySeq = Math.max(1, raw.processedThroughEntrySeq + 1);
+  const unprocessedFromContextSeq = processedThroughContextSeq + 1;
 
-  if (head <= raw.processedThroughEntrySeq) {
+  if (head <= raw.processedThroughEntrySeq || headContextSeq <= processedThroughContextSeq) {
     return {
-      snapshot: emptySnapshot(raw, head),
+      snapshot: emptySnapshot(raw, head, headContextSeq),
       unprocessedFromEntrySeq,
       nothingNew: true,
     };
@@ -197,45 +221,67 @@ export function freezeBoundary(input: BoundaryFreezeInput): BoundaryFreezeResult
   // Ensure the seam never exceeds the head or falls below the cursor.
   seam = Math.max(raw.processedThroughEntrySeq, Math.min(seam, tailBoundary));
 
-  // R3-P1 m0-clamp：只有已进入 m0/m1 的 compartment 才可被 raw 替换。
-  // rawSafeSeam 是纯 raw 安全接缝（arc/tail/in-flight 语义，不变）；
-  // lineage 物化边界（representedThroughEntrySeq）进一步收紧 eligible 范围：
-  //   eligibleThrough = min(rawSafeSeam, lineageBoundary)；
-  // protectedTailStart 保持 rawSafeSeam —— 动态保护尾部始终以 raw 语义为准，
-  // 永不被 lineage 边界挤压（尾部始终保留 raw 原样）。
+  // iris_agent#76: the eligible window in ORDINAL space
+  // [unprocessedFromEntrySeq .. rawSafeSeam] maps to CONTEXT coordinates via
+  // the units' contextSeq attribution. The m0-clamp (lineage materialization
+  // watermark) is a CONTEXT coordinate and tightens eligibleThroughContextSeq
+  // only; protectedTailStart stays raw (the dynamic tail is never squeezed by
+  // the lineage boundary).
   const rawSafeSeam = seam;
-  const lineageEntrySeq = input.lineageBoundary?.representedThroughEntrySeq;
+  const ordinalEligible = raw.entries.filter(
+    (e) => e.entrySeq >= unprocessedFromEntrySeq && e.entrySeq <= rawSafeSeam,
+  );
+  // iris_agent#76: entries carry their Context coordinate (contextSeq) as
+  // attribution; hand-built fixtures without one fall back to the ordinal
+  // (the pure freeze semantics stay identical in that case).
+  const contextSeqOf = (entry: SequencedSessionEntry | undefined): number =>
+    entry?.contextSeq ?? entry?.entrySeq ?? 0;
+  const lineageContextSeq = input.lineageBoundary?.representedThroughContextSeq;
+  const contextEligible =
+    lineageContextSeq !== null && lineageContextSeq !== undefined
+      ? ordinalEligible.filter((e) => contextSeqOf(e) <= lineageContextSeq)
+      : ordinalEligible;
+  const eligibleThroughContextSeq =
+    contextEligible.length === 0
+      ? processedThroughContextSeq
+      : contextSeqOf(contextEligible[contextEligible.length - 1]);
+  // Attribution mapping of the Context ceiling back to the raw archive.
   const eligibleThroughEntrySeq =
-    lineageEntrySeq !== null && lineageEntrySeq !== undefined
-      ? Math.min(rawSafeSeam, lineageEntrySeq)
-      : rawSafeSeam;
+    contextEligible.length === 0
+      ? raw.processedThroughEntrySeq
+      : (contextEligible[contextEligible.length - 1]?.entrySeq ?? raw.processedThroughEntrySeq);
   const protectedTailStartEntrySeq = Math.min(head, rawSafeSeam + 1);
-  // The source range hash covers ONLY the unprocessed window
-  // [unprocessedFromEntrySeq .. eligibleThroughEntrySeq] — the SAME window
-  // the runner re-reads and re-verifies on its next run. Including already-
-  // processed entries below unprocessedFromEntrySeq would make the frozen
-  // hash diverge from the runner's re-read on every cycle after the first
-  // commit (the runner starts from the durable cursor), permanently
-  // stalling the Historian (issue #8 R3 B3 review blocker).
-  const eligibleEntries = raw.entries.filter(
-    (e) => e.entrySeq >= unprocessedFromEntrySeq && e.entrySeq <= eligibleThroughEntrySeq,
-  );
-  const sourceRangeHash = rangeHash(
-    raw.runtimeSessionId,
-    unprocessedFromEntrySeq,
-    eligibleThroughEntrySeq,
-    eligibleEntries,
-  );
-  const rawText = eligibleEntries.map((e) => JSON.stringify(e.entry)).join("");
+  // The source range hash covers ONLY the unprocessed window in CONTEXT
+  // coordinates [unprocessedFromContextSeq .. eligibleThroughContextSeq] —
+  // the SAME window the runner re-claims and re-verifies on its next run
+  // (the runner starts from the durable contextSeq cursor). Including
+  // already-processed units below the cursor would make the frozen hash
+  // diverge on every cycle after the first commit (issue #8 R3 B3 review
+  // blocker). iris_agent#76: hashed over Context coordinates, never over
+  // Session-local entry sequences.
+  const sourceRangeHash = historianBatchHash({
+    lineageId: raw.lineageId,
+    afterContextSeqExclusive: unprocessedFromContextSeq - 1,
+    throughContextSeqInclusive: eligibleThroughContextSeq,
+    units: contextEligible.map((entry) => ({
+      contextSeq: entry.contextSeq ?? entry.entrySeq,
+      unitId: entry.entryId,
+      contentHash: entry.contentHash,
+    })),
+  });
+  const rawText = contextEligible.map((e) => JSON.stringify(e.entry)).join("");
   const trueRawEligibleTokens =
     raw.estimateTokens === undefined ? rawText.length : raw.estimateTokens(rawText);
   const narratableEligibleTokens = trueRawEligibleTokens;
 
   return {
     snapshot: {
-      boundarySnapshotId: `bs-${raw.runtimeSessionId}-${head}`,
+      boundarySnapshotId: `bs-${raw.runtimeSessionId}-${headContextSeq}`,
       runtimeSessionId: raw.runtimeSessionId,
+      lineageId: raw.lineageId,
+      observedHeadContextSeq: headContextSeq,
       observedHeadEntrySeq: head,
+      eligibleThroughContextSeq,
       eligibleThroughEntrySeq,
       protectedTailStartEntrySeq,
       trueRawEligibleTokens,
@@ -249,16 +295,29 @@ export function freezeBoundary(input: BoundaryFreezeInput): BoundaryFreezeResult
   };
 }
 
-function emptySnapshot(input: RawBoundaryFreezeInput, head: number): HistorianBoundarySnapshot {
+function emptySnapshot(
+  input: RawBoundaryFreezeInput,
+  head: number,
+  headContextSeq: number,
+): HistorianBoundarySnapshot {
+  const processedThroughContextSeq = input.processedThroughContextSeq ?? 0;
   return {
-    boundarySnapshotId: `bs-${input.runtimeSessionId}-${head}-empty`,
+    boundarySnapshotId: `bs-${input.runtimeSessionId}-${headContextSeq}-empty`,
     runtimeSessionId: input.runtimeSessionId,
+    lineageId: input.lineageId,
+    observedHeadContextSeq: headContextSeq,
     observedHeadEntrySeq: head,
+    eligibleThroughContextSeq: processedThroughContextSeq,
     eligibleThroughEntrySeq: input.processedThroughEntrySeq,
     protectedTailStartEntrySeq: Math.max(1, head + 1),
     trueRawEligibleTokens: 0,
     narratableEligibleTokens: 0,
-    sourceRangeHash: rangeHash(input.runtimeSessionId, 0, 0, []),
+    sourceRangeHash: historianBatchHash({
+      lineageId: input.lineageId,
+      afterContextSeqExclusive: processedThroughContextSeq,
+      throughContextSeqInclusive: processedThroughContextSeq,
+      units: [],
+    }),
     modelProviderProfile: input.modelProviderProfile,
     frozenAt: input.frozenAt,
   };

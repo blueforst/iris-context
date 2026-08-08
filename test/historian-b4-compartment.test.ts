@@ -103,6 +103,7 @@ async function buildFixture(entries: SessionTreeEntry[], tailMargin = 0) {
   const freeze = freezeBoundary({
     rawSeamInput: {
       runtimeSessionId: SESSION,
+      lineageId: "identity-stub",
       entries: page.entries,
       processedThroughEntrySeq: 0,
       tailMarginEntries: tailMargin,

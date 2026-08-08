@@ -36,6 +36,8 @@ import type {
 } from "../src/contracts/historian.js";
 import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
 import { freezeBoundary } from "../src/historian/historian-boundary.js";
+
+import { historianBatchHash } from "../src/contracts/historian.js";
 import { buildAnalysisView } from "../src/historian/historian-analysis.js";
 import { runWrapup } from "../src/historian/historian-continuity.js";
 import {
@@ -75,6 +77,21 @@ function c(id: string, parentId: string, ts = 2): SessionTreeEntry {
 }
 
 /** 固定 lineage 物化边界的 mock ContextHistoryReadPort（values-only）。 */
+/** iris_agent#76: an empty frozen batch (nothing claimed). */
+function emptyHistorianBatch(lineageId: string, afterContextSeqExclusive: number) {
+  const batch: import("../src/contracts/historian.js").HistorianBatchV1 = {
+    schemaVersion: "historian-batch-v1",
+    lineageId,
+    afterContextSeqExclusive,
+    throughContextSeqInclusive: afterContextSeqExclusive,
+    units: [],
+    batchHash: "",
+    frozenAt: new Date().toISOString(),
+  };
+  batch.batchHash = historianBatchHash(batch);
+  return batch;
+}
+
 function lineagePort(representedThroughEntrySeq: number | null): ContextHistoryReadPort {
   return {
     getMaterializedBoundary: () => ({
@@ -85,8 +102,8 @@ function lineagePort(representedThroughEntrySeq: number | null): ContextHistoryR
       providerProfileId: "opencode/deepseek-v4-flash",
     }),
     listUnitsForHistorian: () => [],
-    listUnitsForHistorianByEntrySeq: () => [],
-    claimUnitsForHistorian: () => [],
+    claimHistorianBatch: ({ afterContextSeqExclusive }) =>
+      emptyHistorianBatch("identity-exit-gate", afterContextSeqExclusive),
     lineageId: () => "identity-exit-gate",
   };
 }
@@ -101,10 +118,7 @@ function noLineageThrowingPort(): ContextHistoryReadPort {
     listUnitsForHistorian: () => {
       throw new Error("context history read port: no lineage for session (fail closed)");
     },
-    listUnitsForHistorianByEntrySeq: () => {
-      throw new Error("context history read port: no lineage for session (fail closed)");
-    },
-    claimUnitsForHistorian: () => {
+    claimHistorianBatch: () => {
       throw new Error("context history read port: no lineage for session (fail closed)");
     },
   };
@@ -118,7 +132,7 @@ function publishingStubPort(): ContextHistoryReadPort {
 }
 
 function publishingStubPortWithUnits(mutable: SessionTreeEntry[]): ContextHistoryReadPort {
-  const claim = (_id: string, fromEntrySeq: number, toEntrySeq: number) => {
+  const claim = (fromEntrySeq: number, toEntrySeq: number) => {
     const units: import("../src/contracts/context-units.js").ContextMessageUnit[] = [];
     const head = mutable.length; // the fixture's notion of the session head
     for (let seq = fromEntrySeq; seq <= Math.min(toEntrySeq, head); seq++) {
@@ -126,7 +140,7 @@ function publishingStubPortWithUnits(mutable: SessionTreeEntry[]): ContextHistor
       const message = (entry as { message?: unknown } | undefined)?.message;
       units.push({
         lineageId: "identity-exit-gate",
-        runtimeSessionId: _id,
+        runtimeSessionId: "identity-exit-gate",
         contextSeq: seq,
         unitId: `unit-${seq}`,
         sourceEventId: `evt-${seq}`,
@@ -155,10 +169,11 @@ function publishingStubPortWithUnits(mutable: SessionTreeEntry[]): ContextHistor
       lineageStatus: "ok",
       providerProfileId: "mock",
     }),
-    listUnitsForHistorian: () => [],
-    listUnitsForHistorianByEntrySeq: (_id: string, fromEntrySeq: number, toEntrySeq: number) => {
+    listUnitsForHistorian: (_lineageId: string, fromContextSeq: number, toContextSeq: number) => {
+      // iris_agent#76: anti-echo views are keyed by CONTEXT coordinates —
+      // one view per claimed seq (same window the batch served).
       const units: import("../src/historian/anti-echo.js").HistorianUnitView[] = [];
-      for (let seq = fromEntrySeq; seq <= toEntrySeq; seq++) {
+      for (let seq = fromContextSeq; seq <= Math.min(toContextSeq, mutable.length); seq++) {
         units.push({
           contextUnitId: `unit-${seq}`,
           contextSeq: seq,
@@ -171,8 +186,26 @@ function publishingStubPortWithUnits(mutable: SessionTreeEntry[]): ContextHistor
       }
       return units;
     },
-    claimUnitsForHistorian: (_id: string, fromEntrySeq: number, toEntrySeq: number) =>
-      claim(_id, fromEntrySeq, toEntrySeq),
+    claimHistorianBatch: ({ afterContextSeqExclusive, throughContextSeqInclusive }) => {
+      const claimed = claim(
+        afterContextSeqExclusive + 1,
+        Math.min(throughContextSeqInclusive, mutable.length),
+      );
+      const batch: import("../src/contracts/historian.js").HistorianBatchV1 = {
+        schemaVersion: "historian-batch-v1",
+        lineageId: "identity-exit-gate",
+        afterContextSeqExclusive,
+        throughContextSeqInclusive:
+          claimed.length === 0
+            ? afterContextSeqExclusive
+            : (claimed[claimed.length - 1]?.contextSeq ?? afterContextSeqExclusive),
+        units: claimed,
+        batchHash: "",
+        frozenAt: new Date().toISOString(),
+      };
+      batch.batchHash = historianBatchHash(batch);
+      return batch;
+    },
     lineageId: () => "identity-exit-gate",
   };
 }
@@ -249,8 +282,11 @@ test("R3 Exit Gate: createCompactionAuthorizer 原因分类（materialized / no_
   const boundary: HistorianBoundarySnapshot = {
     boundarySnapshotId: "bs-exit-1",
     runtimeSessionId: SESSION,
+    lineageId: "identity-exit-gate",
     observedHeadEntrySeq: 100,
+    observedHeadContextSeq: 100,
     eligibleThroughEntrySeq: 80,
+    eligibleThroughContextSeq: 80,
     protectedTailStartEntrySeq: 90,
     trueRawEligibleTokens: 1000,
     narratableEligibleTokens: 800,
@@ -310,8 +346,11 @@ test("R3 Exit Gate: HistorianManager.authorizeCompaction 端到端（historyPort
     const boundary: HistorianBoundarySnapshot = {
       boundarySnapshotId: "bs-exit-e2e",
       runtimeSessionId: SESSION,
+      lineageId: "identity-exit-gate",
       observedHeadEntrySeq: 100,
+      observedHeadContextSeq: 100,
       eligibleThroughEntrySeq: 80,
+      eligibleThroughContextSeq: 80,
       protectedTailStartEntrySeq: 90,
       trueRawEligibleTokens: 1000,
       narratableEligibleTokens: 800,
@@ -367,8 +406,11 @@ test("R3 Exit Gate: compaction 授权崩溃确定性——authorize → 崩溃�
     store1.saveBoundarySnapshot({
       boundarySnapshotId: "bs-exit-crash",
       runtimeSessionId: SESSION,
+      lineageId: "identity-exit-gate",
       observedHeadEntrySeq: 100,
+      observedHeadContextSeq: 100,
       eligibleThroughEntrySeq: 80,
+      eligibleThroughContextSeq: 80,
       protectedTailStartEntrySeq: 90,
       trueRawEligibleTokens: 1000,
       narratableEligibleTokens: 800,
@@ -542,6 +584,7 @@ test("R3 Exit Gate: wrapup 事务失败 → 整事务回滚（continuity + state
     const freeze = freezeBoundary({
       rawSeamInput: {
         runtimeSessionId: SESSION,
+        lineageId: "identity-exit-gate",
         entries: page.entries,
         processedThroughEntrySeq: 0,
         tailMarginEntries: 0,
@@ -671,8 +714,11 @@ test("R3 Exit Gate: 单 worker 优先级队列——highest→normal→low→man
   const boundary = (session: string): HistorianBoundarySnapshot => ({
     boundarySnapshotId: `bs-${session}-1`,
     runtimeSessionId: session,
+    lineageId: "identity-exit-gate",
     observedHeadEntrySeq: 1,
+    observedHeadContextSeq: 1,
     eligibleThroughEntrySeq: 1,
+    eligibleThroughContextSeq: 1,
     protectedTailStartEntrySeq: 2,
     trueRawEligibleTokens: 10,
     narratableEligibleTokens: 10,
