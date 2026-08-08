@@ -63,8 +63,18 @@ function fakeHistoryPort(units: HistorianUnitView[]) {
       throw new Error("not used in this test");
     },
     listUnitsForHistorian: () => units,
-    listUnitsForHistorianByEntrySeq: () => units,
-    claimUnitsForHistorian: () => [],
+    claimHistorianBatch: (input: {
+      afterContextSeqExclusive: number;
+      throughContextSeqInclusive: number;
+    }) => ({
+      schemaVersion: "historian-batch-v1" as const,
+      lineageId: "identity-anti-echo",
+      afterContextSeqExclusive: input.afterContextSeqExclusive,
+      throughContextSeqInclusive: input.throughContextSeqInclusive,
+      units: [],
+      batchHash: "",
+      frozenAt: new Date().toISOString(),
+    }),
     lineageId: () => "identity-anti-echo",
   };
 }
@@ -79,6 +89,9 @@ function runPublication(
   const safePrefix: SequencedSessionEntry[] = entrySeqs.map((seq) => ({
     runtimeSessionId: SESSION,
     entrySeq: seq,
+    // iris_agent#76: entries carry their Context coordinate so the
+    // publication's anti-echo view maps to the Context range.
+    contextSeq: seq,
     entryId: `entry-${seq}`,
     entry: {
       type: "message",
@@ -94,8 +107,11 @@ function runPublication(
     boundary: {
       boundarySnapshotId: "bs-1",
       runtimeSessionId: SESSION,
+      lineageId: "identity-anti-echo",
       observedHeadEntrySeq: Math.max(...entrySeqs),
+      observedHeadContextSeq: Math.max(...entrySeqs),
       eligibleThroughEntrySeq: Math.max(...entrySeqs),
+      eligibleThroughContextSeq: Math.max(...entrySeqs),
       protectedTailStartEntrySeq: Math.max(...entrySeqs) + 1,
       trueRawEligibleTokens: 10,
       narratableEligibleTokens: 10,
@@ -218,7 +234,9 @@ test("r3 anti-echo wiring: reference_only unit never enters basis", () => {
 
 test("r3 anti-echo wiring: real ContextStore port end-to-end", () => {
   const dir = mkdtempSync(join(tmpdir(), "iris-r3-anti-echo-ctx-"));
-  const store = ContextStore.open(join(dir, "context.db"));
+  // iris_agent#76: the store's authoritative lineage id must match the
+  // inserted units (production passes the data-root-derived id at open).
+  const store = ContextStore.open(join(dir, "context.db"), { lineageId: "identity-test" });
   try {
     store.createLineage(makeLineageInput());
     // 插入一个 include input + 一个 derived-only assistant(有 entry_seq)。
@@ -262,7 +280,7 @@ test("r3 anti-echo wiring: real ContextStore port end-to-end", () => {
     const port = createContextHistoryReadPort(store);
     const historian = HistorianStore.open({ databasePath: join(dir, "historian.db") });
     try {
-      const units = port.listUnitsForHistorianByEntrySeq(SESSION, 1, 2);
+      const units = port.listUnitsForHistorian(port.lineageId(), 1, 2);
       assert.equal(units.length, 2);
       const derived = units.find((u) => u.contextUnitId === "u2");
       assert.ok(derived);

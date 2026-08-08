@@ -25,6 +25,7 @@ import { HistorianStore } from "../src/historian/historian-store.js";
 import { canonicalPayloadHash, FakeMemoryClient } from "../src/historian/memory-client.js";
 import type { MemoryClientPort } from "../src/contracts/ports.js";
 import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
+import { historianBatchHash } from "../src/contracts/historian.js";
 
 const SESSION = "iris-runtime-2026-08-01-1";
 
@@ -55,8 +56,7 @@ function fakeHistoryPort(): ContextHistoryReadPort {
       lineageStatus: "ok",
       providerProfileId: "mock",
     }),
-    listUnitsForHistorian: () => [],
-    listUnitsForHistorianByEntrySeq: () => [
+    listUnitsForHistorian: () => [
       {
         contextUnitId: "unit-1",
         contextSeq: 1,
@@ -67,7 +67,40 @@ function fakeHistoryPort(): ContextHistoryReadPort {
         derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
       },
     ],
-    claimUnitsForHistorian: () => [],
+    claimHistorianBatch: ({ afterContextSeqExclusive, throughContextSeqInclusive }) => {
+      const units: import("../src/contracts/context-units.js").ContextMessageUnit[] = [];
+      if (afterContextSeqExclusive < 1 && throughContextSeqInclusive >= 1) {
+        units.push({
+          lineageId: "identity-r4",
+          runtimeSessionId: SESSION,
+          contextSeq: 1,
+          unitId: "unit-1",
+          sourceEventId: "evt-1",
+          runtimeEventId: "evt-1",
+          unitType: "input",
+          disposition: "include",
+          entryId: "entry-1",
+          entrySeq: 1,
+          contentHash: "d".repeat(64),
+          payload: { role: "user", content: "hello", timestamp: 1 },
+          paired: false,
+          derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+          schemaVersion: "context-unit-v1",
+          createdAt: "2026-08-01T00:00:00.000Z",
+        });
+      }
+      const batch: import("../src/contracts/historian.js").HistorianBatchV1 = {
+        schemaVersion: "historian-batch-v1",
+        lineageId: "identity-r4",
+        afterContextSeqExclusive,
+        throughContextSeqInclusive: units.length === 0 ? afterContextSeqExclusive : 1,
+        units,
+        batchHash: "",
+        frozenAt: new Date().toISOString(),
+      };
+      batch.batchHash = historianBatchHash(batch);
+      return batch;
+    },
     lineageId: () => "identity-r4",
   };
 }
@@ -391,6 +424,9 @@ test("r4 memory client: real envelope (from commitSafePrefix) validates against 
       {
         runtimeSessionId: SESSION,
         entrySeq: 1,
+        // iris_agent#76: entries carry their Context coordinate so the
+        // publication's anti-echo view maps to the Context range.
+        contextSeq: 1,
         entryId: "entry-1",
         entry: {
           type: "message",
@@ -407,8 +443,11 @@ test("r4 memory client: real envelope (from commitSafePrefix) validates against 
       boundary: {
         boundarySnapshotId: "bs-1",
         runtimeSessionId: SESSION,
+        lineageId: "identity-r4",
         observedHeadEntrySeq: 1,
+        observedHeadContextSeq: 1,
         eligibleThroughEntrySeq: 1,
+        eligibleThroughContextSeq: 1,
         protectedTailStartEntrySeq: 2,
         trueRawEligibleTokens: 10,
         narratableEligibleTokens: 10,

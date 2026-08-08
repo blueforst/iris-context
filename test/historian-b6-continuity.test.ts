@@ -93,6 +93,7 @@ async function freezeFor(
   const freeze = freezeBoundary({
     rawSeamInput: {
       runtimeSessionId: session,
+      lineageId: "identity-stub",
       entries: page.entries,
       processedThroughEntrySeq,
       tailMarginEntries: 0,
@@ -180,6 +181,7 @@ test("B6: incomplete drain marks closed_incomplete when a protected tail remains
     const freeze = freezeBoundary({
       rawSeamInput: {
         runtimeSessionId: OLD_SESSION,
+        lineageId: "identity-stub",
         entries: page.entries,
         processedThroughEntrySeq: 0,
         tailMarginEntries: 2,

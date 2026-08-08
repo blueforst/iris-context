@@ -27,6 +27,7 @@
  */
 
 import type { ContextMessageUnit, ContextUnitType } from "../contracts/context-units.js";
+import { historianBatchHash, type HistorianBatchV1 } from "../contracts/historian.js";
 import type { RuntimeEventDerivationRefs } from "../contracts/runtime-events.js";
 import type { ContextLineage, ContextStore } from "./context-store.js";
 
@@ -87,42 +88,19 @@ export interface ContextHistoryReadPort {
   }>;
 
   /**
-   * R3 (anti-echo)：按 Session entrySeq 区间读取单元窄视图。Historian 的
-   * 工作空间是 Session-scoped entrySeq(safe prefix),本方法在其内部完成
-   * session → lineage 解析,返回与 listUnitsForHistorian 相同的 values-only
-   * 视图;entry_seq IS NULL 的单元不参与。无 lineage → fail-closed 抛错。
-   */
-  listUnitsForHistorianByEntrySeq(
-    runtimeSessionId: string,
-    fromEntrySeq: number,
-    toEntrySeq: number,
-  ): Array<{
-    contextUnitId: string;
-    contextSeq: number;
-    runtimeEventId: string;
-    unitType: ContextUnitType;
-    disposition: ContextMessageUnit["disposition"];
-    contentHash: string;
-    derivationRefs: RuntimeEventDerivationRefs;
-  }>;
-
-  /**
-   * iris_agent#66: the NORMAL semantic input path for the Historian. Claims
-   * committed, immutable Context semantic units (with payload) from the
-   * identity-level lineage, in global contextSeq order. Session ids/ranges
-   * survive only as optional opaque rawArchiveRef/audit attribution (the
-   * entrySeq window is a narrow archive mapping, never the semantic order).
-   * This is the ONLY interface the production Historian consumes for
-   * batch/analysis/finalization input; Pi Session access stays behind the
-   * explicitly separated recovery/audit interface and can never be selected
-   * by the normal Historian path.
+   * iris_agent#76: the Context-owned CLAIM — the Historian's ONLY normal
+   * semantic batch selector. Claims committed, immutable Context semantic
+   * units from the identity-level lineage by global contextSeq, and freezes
+   * them into an immutable, replayable HistorianBatchV1. Batch membership,
+   * order and identity are decided by Context coordinates ONLY:
+   * runtimeSessionId, Pi entry ids and entry ranges are optional
+   * attribution on the units and can be absent without changing the batch.
    * Missing lineage → fail-closed throw (same as the other port methods).
    */
-  claimUnitsForHistorian(
-    runtimeSessionId: string,
-    fromEntrySeq: number,
-    toEntrySeq: number,
-  ): ContextMessageUnit[];
+  claimHistorianBatch(input: {
+    afterContextSeqExclusive: number;
+    throughContextSeqInclusive: number;
+  }): HistorianBatchV1;
 }
 
 /**
@@ -208,41 +186,36 @@ export function createContextHistoryReadPort(store: ContextStore): ContextHistor
         derivationRefs: unit.derivationRefs,
       }));
     },
-    listUnitsForHistorianByEntrySeq(runtimeSessionId, fromEntrySeq, toEntrySeq) {
-      // Session → lineage 解析后,按 entrySeq 闭区间读取单元窄视图
-      // (Historian 的 safe prefix 是 Session-scoped 空间)。无 lineage →
-      // fail-closed。
-      const lineage = store.getLineage(runtimeSessionId);
-      if (lineage === undefined) {
-        throw new Error(
-          `context history read port: no lineage for ${runtimeSessionId} (fail closed)`,
-        );
-      }
-      return store
-        .listUnitsByEntrySeqRange(lineage.lineageId, fromEntrySeq, toEntrySeq)
-        .map((unit) => ({
-          contextUnitId: unit.unitId,
-          contextSeq: unit.contextSeq,
-          runtimeEventId: unit.runtimeEventId ?? unit.sourceEventId,
-          unitType: unit.unitType,
-          disposition: unit.disposition,
-          contentHash: unit.contentHash,
-          derivationRefs: unit.derivationRefs,
-        }));
-    },
-    claimUnitsForHistorian(runtimeSessionId, fromEntrySeq, toEntrySeq) {
-      // iris_agent#66: the normal Historian semantic input is committed
-      // Context units (identity-level lineage, contextSeq order). Same
-      // session→lineage resolution as the narrow view, but returns the FULL
-      // immutable unit (payload included) — the Historian's batch/analysis/
-      // finalization source. No lineage → fail-closed.
-      const lineage = store.getLineage(runtimeSessionId);
-      if (lineage === undefined) {
-        throw new Error(
-          `context history read port: no lineage for ${runtimeSessionId} (fail closed)`,
-        );
-      }
-      return store.listUnitsByEntrySeqRange(lineage.lineageId, fromEntrySeq, toEntrySeq);
+    claimHistorianBatch({
+      afterContextSeqExclusive,
+      throughContextSeqInclusive,
+    }): HistorianBatchV1 {
+      // iris_agent#76: the Context-owned claim — lineage-scoped, keyed by
+      // global contextSeq ONLY (never by Session ids/entry ranges). The
+      // lineage is the port's own authoritative identity; NO session→lineage
+      // resolution is involved, so the same semantic units claimed across
+      // different Runtime Session boundaries produce the IDENTICAL batch.
+      const units = store.listUnitsByLineageRange(
+        store.lineageId,
+        afterContextSeqExclusive + 1,
+        throughContextSeqInclusive,
+      );
+      const actualThrough =
+        units.length === 0
+          ? afterContextSeqExclusive
+          : (units[units.length - 1]?.contextSeq ?? afterContextSeqExclusive);
+      const batch: HistorianBatchV1 = {
+        schemaVersion: "historian-batch-v1",
+        lineageId: store.lineageId,
+        afterContextSeqExclusive,
+        throughContextSeqInclusive: actualThrough,
+        units,
+        batchHash: "",
+        frozenAt: new Date().toISOString(),
+      };
+      // 先确定实际端点再计算哈希（哈希覆盖真实窗口）。
+      batch.batchHash = historianBatchHash(batch);
+      return batch;
     },
   };
 }

@@ -123,6 +123,7 @@ async function producePublication(): Promise<{
   const frozen = freezeBoundary({
     rawSeamInput: {
       runtimeSessionId: SESSION,
+      lineageId: "identity-pin",
       entries: page.entries,
       processedThroughEntrySeq: 0,
       tailMarginEntries: 0,
@@ -139,9 +140,9 @@ async function producePublication(): Promise<{
     runtimeSessionId: SESSION,
     boundary: frozen.snapshot,
     eligibleEntries: page.entries,
-    // iris_agent#66: the fixture's durable cursor is 0 → anchor = 1 (same as
-    // the freeze's unprocessedFromEntrySeq).
-    unprocessedFromEntrySeq: 1,
+    // iris_agent#76: the fixture's durable contextSeq cursor is 0 → anchor
+    // = 1 (same as the freeze's unprocessedFromContextSeq).
+    unprocessedFromContextSeq: 1,
   });
   assert.ok(outcome.ok, "fixture range must validate");
 
@@ -157,8 +158,7 @@ async function producePublication(): Promise<{
         lineageStatus: "ok",
         providerProfileId: "mock",
       }),
-      listUnitsForHistorian: () => [],
-      listUnitsForHistorianByEntrySeq: () => [
+      listUnitsForHistorian: () => [
         {
           contextUnitId: "unit-1",
           contextSeq: 1,
@@ -169,7 +169,15 @@ async function producePublication(): Promise<{
           derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
         },
       ],
-      claimUnitsForHistorian: () => [],
+      claimHistorianBatch: ({ afterContextSeqExclusive, throughContextSeqInclusive }) => ({
+        schemaVersion: "historian-batch-v1",
+        lineageId: "identity-pin",
+        afterContextSeqExclusive,
+        throughContextSeqInclusive,
+        units: [],
+        batchHash: "",
+        frozenAt: new Date().toISOString(),
+      }),
       lineageId: () => "identity-pin",
     },
   }).commitSafePrefix({
@@ -180,6 +188,7 @@ async function producePublication(): Promise<{
     outcome: {
       ok: true,
       commitThroughEntrySeq: outcome.commitThroughEntrySeq,
+      commitThroughContextSeq: outcome.commitThroughContextSeq,
       discardedFromEntrySeq: outcome.discardedFromEntrySeq,
     },
     previousProcessedThroughEntrySeq: 0,

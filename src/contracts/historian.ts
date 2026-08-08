@@ -75,8 +75,17 @@ export interface RuntimeSessionHistoryReadPort {
 /** One raw Session entry with its durable identity (entrySeq + hash). */
 export interface SequencedSessionEntry {
   runtimeSessionId: string;
-  /** Session-local raw ordinal (1-based, matches the Context projection). */
+  /** Session-local raw ordinal (1-based, matches the Context projection).
+   * iris_agent#76: attribution only — for units without a Pi entrySeq the
+   * caller assigns a deterministic monotonic ordinal; it NEVER decides
+   * semantic batch membership or order. */
   entrySeq: number;
+  /**
+   * iris_agent#76: the Context semantic coordinate (global contextSeq) this
+   * entry was derived from. Attribution for hash/audit purposes; the
+   * authoritative batch coordinates live on the boundary snapshot.
+   */
+  contextSeq?: number;
   /** The raw Pi entry id (authoritative; never derived from position). */
   entryId: string;
   /** The raw entry payload (identity-preserving; may be a non-message type). */
@@ -105,13 +114,25 @@ export interface HistorianRangeRef {
 /** Session processing state (the Historian's durable cursor + status). */
 export interface HistorianSessionState {
   runtimeSessionId: string;
-  /** Highest entrySeq successfully committed by the Historian (exclusive
-   * cursor: the next eligible range starts at +1). Never advances on a
-   * failed transaction. */
-  processedThroughEntrySeq: number;
+  /**
+   * iris_agent#76: the AUTHORITATIVE durable cursor — the highest
+   * contextSeq successfully committed by the Historian (exclusive cursor:
+   * the next eligible batch starts at +1). Context-owned semantic
+   * coordinates: lineage + global contextSeq. Never advances on a failed
+   * transaction. Sessions may carry no value yet (nothing processed).
+   */
+  processedThroughContextSeq?: number;
+  /**
+   * Legacy attribution cursor (Session-local entrySeq). Kept for
+   * audit/attribution only — it never decides batch membership, ordering
+   * or the next claim window.
+   */
+  processedThroughEntrySeq?: number;
   status: "active" | "closing" | "closed" | "closed_incomplete" | "corrupt";
   /** Set when a boundary freeze captured the session head (B3). */
   observedHeadEntrySeq?: number;
+  /** iris_agent#76: the frozen head in Context coordinates (attribution). */
+  observedHeadContextSeq?: number;
   /**
    * iris_agent#53: durable finalization-intent timestamp. Set ONCE when the
    * session enters 'closing' (idempotent, never reset). Feeds readiness
@@ -137,34 +158,101 @@ export interface HistorianSessionState {
  * Frozen boundary snapshot (Notion 02 Historian): captured by the cheap
  * trigger and consumed by the runner. The trigger and the runner MUST use
  * the SAME snapshot — the runner never widens the range.
+ *
+ * iris_agent#76: semantic batch authority lives in CONTEXT coordinates
+ * (lineage + global contextSeq): eligibleThroughContextSeq is the frozen
+ * ceiling that decides batch membership; the Session-local entrySeq fields
+ * survive ONLY as attribution (the raw archive mapping), never as batch
+ * selectors.
  */
 export interface HistorianBoundarySnapshot {
   boundarySnapshotId: string;
   runtimeSessionId: string;
-  /** Session head observed at freeze time (inclusive entrySeq). */
+  /**
+   * iris_agent#76: the identity-level Context lineage id — the batch
+   * identity domain for sourceRangeHash (Context coordinates).
+   */
+  lineageId: string;
+  /**
+   * The frozen head in Context coordinates (inclusive contextSeq). The
+   * semantic authority for "what the freeze observed".
+   */
+  observedHeadContextSeq: number;
+  /** Session head observed at freeze time (inclusive entrySeq, attribution). */
   observedHeadEntrySeq: number;
   /**
-   * Last entrySeq eligible for semantic processing at freeze time
-   * (inclusive). The protected tail (dynamic) is EXCLUDED: entrySeq >
-   * eligibleThroughEntrySeq belongs to the tail and is never cut by a
-   * compartment boundary.
+   * Last contextSeq eligible for semantic processing at freeze time
+   * (inclusive). The protected tail (dynamic) is EXCLUDED: units with
+   * contextSeq > eligibleThroughContextSeq belong to the tail and are never
+   * cut by a compartment boundary. Batch membership is decided by this
+   * Context-owned coordinate.
+   */
+  eligibleThroughContextSeq: number;
+  /**
+   * Last entrySeq eligible at freeze time (attribution — the raw archive
+   * mapping of eligibleThroughContextSeq).
    */
   eligibleThroughEntrySeq: number;
   /**
-   * First entrySeq of the protected tail at freeze time (inclusive).
-   * Compartments never cross this seam; the tail is always preserved raw.
+   * First entrySeq of the protected tail at freeze time (inclusive,
+   * attribution). Compartments never cross this seam; the tail is always
+   * preserved raw.
    */
   protectedTailStartEntrySeq: number;
   /** True raw eligible tokens at freeze time (semantic estimate). */
   trueRawEligibleTokens: number;
   /** Eligible tokens the Narrator may actually narrate (budgeted). */
   narratableEligibleTokens: number;
-  /** sha256 over the entire eligible range (endpoints + content). */
+  /**
+   * sha256 over the entire eligible range in CONTEXT coordinates
+   * (lineageId + contextSeq endpoints + unit identity/hash sequence) —
+   * iris_agent#76: never over Session-local entry sequences.
+   */
   sourceRangeHash: string;
   /** Model/provider profile that produced the projection at freeze time. */
   modelProviderProfile: string;
   /** Frozen at (ISO). */
   frozenAt: string;
+}
+
+/**
+ * iris_agent#76: the frozen Context-owned claim batch — the Historian's
+ * normal semantic input. Batch membership/identity/order are defined by
+ * lineage + global contextSeq ONLY; runtimeSessionId, Pi entry ids and
+ * entry ranges are optional attribution on the units and can be absent
+ * without changing the batch. The batch is immutable and replayable across
+ * crash/restart (same window + same units ⇒ same batchHash).
+ */
+export interface HistorianBatchV1 {
+  schemaVersion: "historian-batch-v1";
+  lineageId: string;
+  afterContextSeqExclusive: number;
+  throughContextSeqInclusive: number;
+  /** Immutable snapshot of the claimed units, ascending contextSeq order. */
+  units: Array<import("./context-units.js").ContextMessageUnit>;
+  /** sha256 over (lineageId, endpoints, unit contextSeq+unitId+contentHash). */
+  batchHash: string;
+  frozenAt: string;
+}
+
+/** Deterministic hash of a frozen Context-owned batch (pure). */
+export function historianBatchHash(input: {
+  lineageId: string;
+  afterContextSeqExclusive: number;
+  throughContextSeqInclusive: number;
+  units: ReadonlyArray<
+    Pick<import("./context-units.js").ContextMessageUnit, "contextSeq" | "unitId" | "contentHash">
+  >;
+}): string {
+  const body = input.units
+    .map((unit) => `${unit.contextSeq}:${unit.unitId}:${unit.contentHash}`)
+    .join("\n");
+  return createHash("sha256")
+    .update(
+      `${input.lineageId}|${input.afterContextSeqExclusive}|${input.throughContextSeqInclusive}|${body}`,
+      "utf8",
+    )
+    .digest("hex");
 }
 
 /**

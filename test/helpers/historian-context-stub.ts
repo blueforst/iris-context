@@ -1,13 +1,16 @@
 /**
- * iris_agent#66 test helper: build a ContextHistoryReadPort stub whose
- * claimUnitsForHistorian serves ContextMessageUnit rows derived from a
- * mutable SessionTreeEntry[] fixture. The Historian's normal semantic input
- * is Context units (never Pi Session transcript), so fixtures that used to
- * feed SessionHistoryReadPort now feed claimUnitsForHistorian through this
- * adapter — keeping the SAME entry data while exercising the #66 boundary.
+ * iris_agent#66/#76 test helper: build a ContextHistoryReadPort stub whose
+ * claimHistorianBatch serves ContextMessageUnit rows derived from a
+ * mutable SessionTreeEntry[] fixture, keyed by global contextSeq. The
+ * Historian's normal semantic input is Context units (never Pi Session
+ * transcript), so fixtures that used to feed SessionHistoryReadPort now
+ * feed claimHistorianBatch through this adapter — keeping the SAME entry
+ * data while exercising the #76 boundary (batch membership = lineage +
+ * contextSeq, entrySeq is attribution only).
  */
 import type { SessionTreeEntry } from "@earendil-works/pi-agent-core";
 
+import { historianBatchHash, type HistorianBatchV1 } from "../../src/contracts/historian.js";
 import type { ContextMessageUnit } from "../../src/contracts/context-units.js";
 import type { ContextHistoryReadPort } from "../../src/context/history-read-port.js";
 
@@ -66,17 +69,18 @@ export function contextUnitsFromEntries(entries: SessionTreeEntry[]): ContextMes
 }
 
 /** Build a ContextHistoryReadPort stub that serves the fixture units
- * through claimUnitsForHistorian (the #66 normal input path). */
+ * through claimHistorianBatch (the #76 normal input path, keyed by lineage
+ * + global contextSeq). */
 export function createFixtureHistoryPort(options: {
   units?: () => ContextMessageUnit[];
-  representedThroughEntrySeq?: number;
+  representedThroughContextSeq?: number;
 }): ContextHistoryReadPort {
   const units = options.units ?? (() => []);
   return {
     getMaterializedBoundary() {
       return {
-        representedThroughContextSeq: 0,
-        representedThroughEntrySeq: options.representedThroughEntrySeq ?? 0,
+        representedThroughContextSeq: options.representedThroughContextSeq ?? 0,
+        representedThroughEntrySeq: 0,
         m0ContentHash: null,
         lineageStatus: "ok",
         providerProfileId: "mock",
@@ -96,31 +100,30 @@ export function createFixtureHistoryPort(options: {
         derivationRefs: unit.derivationRefs,
       }));
     },
-    listUnitsForHistorianByEntrySeq(_r: string, fromEntrySeq: number, toEntrySeq: number) {
-      return units()
-        .filter(
-          (unit) =>
-            unit.entrySeq !== undefined &&
-            unit.entrySeq >= fromEntrySeq &&
-            unit.entrySeq <= toEntrySeq,
-        )
-        .map((unit) => ({
-          contextUnitId: unit.unitId,
-          contextSeq: unit.contextSeq,
-          runtimeEventId: unit.runtimeEventId ?? unit.sourceEventId,
-          unitType: unit.unitType,
-          disposition: unit.disposition,
-          contentHash: unit.contentHash,
-          derivationRefs: unit.derivationRefs,
-        }));
-    },
-    claimUnitsForHistorian(_r: string, fromEntrySeq: number, toEntrySeq: number) {
-      return units().filter(
+    claimHistorianBatch({
+      afterContextSeqExclusive,
+      throughContextSeqInclusive,
+    }): HistorianBatchV1 {
+      const claimed = units().filter(
         (unit) =>
-          unit.entrySeq !== undefined &&
-          unit.entrySeq >= fromEntrySeq &&
-          unit.entrySeq <= toEntrySeq,
+          unit.contextSeq > afterContextSeqExclusive &&
+          unit.contextSeq <= throughContextSeqInclusive,
       );
+      const actualThrough =
+        claimed.length === 0
+          ? afterContextSeqExclusive
+          : (claimed[claimed.length - 1]?.contextSeq ?? afterContextSeqExclusive);
+      const batch: HistorianBatchV1 = {
+        schemaVersion: "historian-batch-v1",
+        lineageId: "identity-stub",
+        afterContextSeqExclusive,
+        throughContextSeqInclusive: actualThrough,
+        units: claimed,
+        batchHash: "",
+        frozenAt: new Date().toISOString(),
+      };
+      batch.batchHash = historianBatchHash(batch);
+      return batch;
     },
   };
 }

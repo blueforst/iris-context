@@ -497,7 +497,7 @@ test("iris_agent#66: Evidence identity is independent of Session segmentation â€
     ];
     const port = createFixtureHistoryPort({
       units: () => contextUnitsFromEntries(mutable),
-      representedThroughEntrySeq: 4,
+      representedThroughContextSeq: 4,
     });
     // Process the SAME committed units under two DIFFERENT session ids â€”
     // the lineage (and therefore the semantic Evidence identity) must not

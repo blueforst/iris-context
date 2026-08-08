@@ -63,21 +63,22 @@ function toolResultEntry(entrySeq: number, toolCallId: string): SequencedSession
 
 function freezeInput(
   entries: SequencedSessionEntry[],
-  lineageEntrySeq: number | null | undefined,
+  lineageContextSeq: number | null | undefined,
   processedThroughEntrySeq = 0,
 ): BoundaryFreezeInput {
   return {
     rawSeamInput: {
       runtimeSessionId: SESSION,
+      lineageId: "identity-stub",
       entries,
       processedThroughEntrySeq,
       tailMarginEntries: 0,
       modelProviderProfile: "mock-iris-provider-v1",
       frozenAt: "2026-08-01T00:00:00.000Z",
     },
-    ...(lineageEntrySeq === undefined
+    ...(lineageContextSeq === undefined
       ? {}
-      : { lineageBoundary: { representedThroughEntrySeq: lineageEntrySeq } }),
+      : { lineageBoundary: { representedThroughContextSeq: lineageContextSeq } }),
   };
 }
 

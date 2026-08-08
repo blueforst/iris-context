@@ -16,15 +16,17 @@ import type {
 import type { HistorianStore } from "./historian-store.js";
 import { HistorianQueue, HistorianWorker, type HistorianJob } from "./historian-queue.js";
 import {
-  contextUnitToSequencedEntry,
+  unitsToSequencedEntries,
   HistorianRunner,
-  unprocessedFromEntrySeq,
+  unprocessedFromContextSeq,
   type RunnerCommitHook,
 } from "./historian-runner.js";
 import { freezeBoundary, type LineageBoundaryInput } from "./historian-boundary.js";
 
-/** iris_agent#66: freeze head window (matches the old readPort 4096 page). */
-const MAX_FREEZE_HEAD_ENTRY_SEQ = 4096;
+/** iris_agent#76: freeze-head probe ceiling in CONTEXT coordinates. The
+ * claim clamps to the store's actual max contextSeq, so this is only a
+ * bound for the freeze's head observation (never a batch ceiling). */
+const MAX_FREEZE_HEAD_CONTEXT_SEQ = Number.MAX_SAFE_INTEGER;
 import { buildAnalysisView, validateRange } from "./historian-analysis.js";
 import { PublicationService } from "./historian-publication.js";
 import { runWrapup } from "./historian-continuity.js";
@@ -298,6 +300,9 @@ export class HistorianManager {
       ...durable,
       status: "closing",
       observedHeadEntrySeq: frozen.snapshot.observedHeadEntrySeq,
+      ...(frozen.snapshot.observedHeadContextSeq !== undefined
+        ? { observedHeadContextSeq: frozen.snapshot.observedHeadContextSeq }
+        : {}),
       updatedAt: new Date(this.nowMs()).toISOString(),
     };
     this.store.upsertSessionState(closing);
@@ -668,8 +673,9 @@ export class HistorianManager {
       runtimeSessionId: input.runtimeSessionId,
       boundary: input.boundary,
       eligibleEntries: unprocessed,
-      // iris_agent#66: same anchor as the freeze (durable cursor + 1).
-      unprocessedFromEntrySeq: unprocessedFromEntrySeq(input.state),
+      // iris_agent#76: same anchor as the freeze (durable contextSeq cursor
+      // + 1, Context coordinates).
+      unprocessedFromContextSeq: unprocessedFromContextSeq(input.state),
     });
     if (!outcome.ok) {
       return; // 边界漂移 → 本次 wrapup 只落快照（不推进、不发布）
@@ -706,24 +712,31 @@ export class HistorianManager {
   ): Promise<{ snapshot: HistorianBoundarySnapshot; nothingNew: boolean } | null> {
     const state = this.store.getSessionState(runtimeSessionId);
     const processed = state?.processedThroughEntrySeq ?? 0;
-    // iris_agent#66: the freeze head comes from committed Context units
-    // (the normal semantic input), not from a Pi Session read.
-    const units = this.historyPort.claimUnitsForHistorian(
-      runtimeSessionId,
-      1,
-      MAX_FREEZE_HEAD_ENTRY_SEQ,
-    );
-    const entries = units
-      .filter((unit) => unit.entrySeq !== undefined)
-      .map((unit) => contextUnitToSequencedEntry(runtimeSessionId, unit));
+    const processedContextSeq = state?.processedThroughContextSeq ?? 0;
+    // iris_agent#76: the freeze head comes from a CONTEXT claim (global
+    // contextSeq, lineage-scoped) — never a Pi Session read and never an
+    // entrySeq window. The claim starts AT the durable cursor (inclusive)
+    // so a fully-processed lineage still yields a non-empty batch: the
+    // freeze must observe the current head to conclude nothingNew and
+    // finalize (F5 — a rollover wrapup must never be refused just because
+    // the last incremental already committed everything). The batch's
+    // below-cursor unit is excluded from the ordinal window, so the frozen
+    // sourceRangeHash still covers ONLY the unprocessed range.
+    const batch = this.historyPort.claimHistorianBatch({
+      afterContextSeqExclusive: Math.max(0, processedContextSeq - 1),
+      throughContextSeqInclusive: MAX_FREEZE_HEAD_CONTEXT_SEQ,
+    });
+    const entries = unitsToSequencedEntries(runtimeSessionId, batch.units);
     if (entries.length === 0) {
       return null;
     }
     const result = freezeBoundary({
       rawSeamInput: {
         runtimeSessionId,
+        lineageId: this.historyPort.lineageId(),
         entries,
         processedThroughEntrySeq: processed,
+        processedThroughContextSeq: processedContextSeq,
         // No fixed tail margin: the freeze's arc/in-flight seam logic is the
         // protected-tail authority (a fixed margin would leave short sessions
         // permanently nothing_new). The runner's validation re-verifies the
@@ -751,19 +764,14 @@ export class HistorianManager {
         if (state === undefined) {
           return { ok: false, errorCode: "session_state_missing" };
         }
-        // iris_agent#66: wrapup claims committed Context units through the
-        // Context-owned port (never a Pi Session read).
-        const units = this.historyPort.claimUnitsForHistorian(
-          runtimeSessionId,
-          1,
-          boundary.eligibleThroughEntrySeq,
-        );
-        const eligible = units
-          .filter(
-            (unit) =>
-              unit.entrySeq !== undefined && unit.entrySeq <= boundary.eligibleThroughEntrySeq,
-          )
-          .map((unit) => contextUnitToSequencedEntry(runtimeSessionId, unit));
+        // iris_agent#76: wrapup claims committed Context units through the
+        // Context-owned port by global contextSeq (the frozen ceiling) —
+        // never a Pi Session read, never an entrySeq window.
+        const batch = this.historyPort.claimHistorianBatch({
+          afterContextSeqExclusive: state.processedThroughContextSeq ?? 0,
+          throughContextSeqInclusive: boundary.eligibleThroughContextSeq,
+        });
+        const eligible = unitsToSequencedEntries(runtimeSessionId, batch.units);
         const analysis = buildAnalysisView({
           runtimeSessionId,
           boundary,

@@ -28,6 +28,7 @@ import assert from "node:assert/strict";
 import type { SessionTreeEntry } from "@earendil-works/pi-agent-core";
 
 import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
+import { historianBatchHash } from "../src/contracts/historian.js";
 
 import { freezeBoundary } from "../src/historian/historian-boundary.js";
 import { contextUnitToSequencedEntry, HistorianRunner } from "../src/historian/historian-runner.js";
@@ -119,14 +120,11 @@ function stubHistoryPort(texts?: string[]): ContextHistoryReadPort {
         providerProfileId: "mock",
       };
     },
-    listUnitsForHistorian() {
-      return [];
-    },
-    listUnitsForHistorianByEntrySeq(_runtimeSessionId, fromEntrySeq, toEntrySeq) {
-      // One committed unit per claimed entry — the B5 mechanics tests are
-      // not provenance tests; they need a REAL (non-empty) Context range.
+    listUnitsForHistorian(_lineageId, fromContextSeq, toContextSeq) {
+      // iris_agent#76: anti-echo views are keyed by CONTEXT coordinates.
+      // One committed unit view per claimed seq.
       const units: import("../src/historian/anti-echo.js").HistorianUnitView[] = [];
-      for (let seq = fromEntrySeq; seq <= toEntrySeq; seq++) {
+      for (let seq = fromContextSeq; seq <= toContextSeq; seq++) {
         units.push({
           contextUnitId: `unit-${seq}`,
           contextSeq: seq,
@@ -139,14 +137,14 @@ function stubHistoryPort(texts?: string[]): ContextHistoryReadPort {
       }
       return units;
     },
-    claimUnitsForHistorian(_runtimeSessionId, fromEntrySeq, toEntrySeq) {
-      // iris_agent#66: full committed units (payload included) — the
-      // runner's normal semantic input.
+    claimHistorianBatch({ afterContextSeqExclusive, throughContextSeqInclusive }) {
+      // iris_agent#76: full committed units (payload included), keyed by
+      // global contextSeq — the runner's normal semantic input.
       const units: import("../src/contracts/context-units.js").ContextMessageUnit[] = [];
-      for (let seq = fromEntrySeq; seq <= toEntrySeq; seq++) {
+      for (let seq = afterContextSeqExclusive + 1; seq <= throughContextSeqInclusive; seq++) {
         units.push({
-          lineageId: "identity-stub",
-          runtimeSessionId: _runtimeSessionId,
+          lineageId: "identity-b5",
+          runtimeSessionId: SESSION,
           contextSeq: seq,
           unitId: `unit-${seq}`,
           sourceEventId: `evt-${seq}`,
@@ -167,7 +165,20 @@ function stubHistoryPort(texts?: string[]): ContextHistoryReadPort {
           createdAt: "2026-08-01T00:00:00.000Z",
         });
       }
-      return units;
+      const batch: import("../src/contracts/historian.js").HistorianBatchV1 = {
+        schemaVersion: "historian-batch-v1",
+        lineageId: "identity-b5",
+        afterContextSeqExclusive,
+        throughContextSeqInclusive:
+          units.length === 0
+            ? afterContextSeqExclusive
+            : (units[units.length - 1]?.contextSeq ?? afterContextSeqExclusive),
+        units,
+        batchHash: "",
+        frozenAt: new Date().toISOString(),
+      };
+      batch.batchHash = historianBatchHash(batch);
+      return batch;
     },
     lineageId() {
       return "identity-b5";
@@ -187,7 +198,10 @@ async function runOneCycle(
   // the freeze head matches the test's notion of "the session so far".
   const historyPort = stubHistoryPort();
   const head = entries.length;
-  const claimed = historyPort.claimUnitsForHistorian(SESSION, 1, head);
+  const claimed = historyPort.claimHistorianBatch({
+    afterContextSeqExclusive: 0,
+    throughContextSeqInclusive: head,
+  }).units;
   const claimedEntries = claimed
     .filter((unit) => unit.entrySeq !== undefined)
     .map((unit) => contextUnitToSequencedEntry(SESSION, unit));
@@ -197,8 +211,15 @@ async function runOneCycle(
   const freeze = freezeBoundary({
     rawSeamInput: {
       runtimeSessionId: SESSION,
+      lineageId: "identity-stub",
       entries: claimedEntries,
       processedThroughEntrySeq,
+      // iris_agent#76: the fixture's Context cursor mirrors the durable
+      // entrySeq cursor (entrySeq == contextSeq in these fixtures) — the
+      // frozen hash window must start at the SAME anchor the runner's
+      // durable contextSeq cursor implies, or second-cycle validation
+      // fails with a range-hash mismatch.
+      processedThroughContextSeq: processedThroughEntrySeq,
       tailMarginEntries: 0,
       modelProviderProfile: "opencode/deepseek-v4-flash",
       frozenAt: "2026-08-01T00:00:00.000Z",
@@ -461,13 +482,17 @@ test("B5: a publication with recall projections commits assessment deltas in the
     // the fixture message verbatim.
     const hp = stubHistoryPort(["the user confirms the deployment plan is correct"]);
     const claimedEntries = hp
-      .claimUnitsForHistorian(SESSION, 1, entries.length)
-      .filter((unit) => unit.entrySeq !== undefined)
+      .claimHistorianBatch({
+        afterContextSeqExclusive: 0,
+        throughContextSeqInclusive: entries.length,
+      })
+      .units.filter((unit) => unit.entrySeq !== undefined)
       .map((unit) => contextUnitToSequencedEntry(SESSION, unit));
     // R3-P1 适配：freezeBoundary 拆分为 { rawSeamInput }。
     const freeze = freezeBoundary({
       rawSeamInput: {
         runtimeSessionId: SESSION,
+        lineageId: "identity-stub",
         entries: claimedEntries,
         processedThroughEntrySeq: 0,
         tailMarginEntries: 0,
@@ -527,13 +552,17 @@ test("B5: a publication commit-hook failure rolls back cursor + publication + ou
     // runner (stub port window capped at the fixture entry count).
     const hp = stubHistoryPort();
     const claimedEntries = hp
-      .claimUnitsForHistorian(SESSION, 1, entries.length)
-      .filter((unit) => unit.entrySeq !== undefined)
+      .claimHistorianBatch({
+        afterContextSeqExclusive: 0,
+        throughContextSeqInclusive: entries.length,
+      })
+      .units.filter((unit) => unit.entrySeq !== undefined)
       .map((unit) => contextUnitToSequencedEntry(SESSION, unit));
     // R3-P1 适配：freezeBoundary 拆分为 { rawSeamInput }。
     const freeze = freezeBoundary({
       rawSeamInput: {
         runtimeSessionId: SESSION,
+        lineageId: "identity-stub",
         entries: claimedEntries,
         processedThroughEntrySeq: 0,
         tailMarginEntries: 0,

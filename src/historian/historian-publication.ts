@@ -238,18 +238,23 @@ export class PublicationService {
     // Build the immutable compartment from the VERIFIED safe prefix.
     const nextSequence = this.store.maxCompartmentSequence(runtimeSessionId) + 1;
 
-    // R3 (anti-echo):把 Session-safe-prefix 的 entrySeq 范围映射到 Context
-    // 单元窄视图,使 EvidenceSet 携带 evidenceBasis/derivedOnly(derived-only
-    // 内容不产生新 Evidence)。
+    // R3 (anti-echo):把 Context-safe-prefix 的 contextSeq 范围映射到单元窄
+    // 视图,使 EvidenceSet 携带 evidenceBasis/derivedOnly(derived-only 内容
+    // 不产生新 Evidence)。iris_agent#76: the mapping is CONTEXT coordinates
+    // (lineage + global contextSeq) — never a Session entrySeq window.
+    // Entries without a contextSeq attribution (legacy/recovery readers)
+    // fall back to the ordinal, mirroring the freeze/validate fallback.
     let unitViews: HistorianUnitView[] | undefined;
     if (safePrefix.length > 0) {
       const first = safePrefix[0];
       const last = safePrefix[safePrefix.length - 1];
-      if (first !== undefined && last !== undefined) {
-        unitViews = this.historyPort.listUnitsForHistorianByEntrySeq(
-          runtimeSessionId,
-          first.entrySeq,
-          last.entrySeq,
+      const firstContextSeq = first?.contextSeq ?? first?.entrySeq;
+      const lastContextSeq = last?.contextSeq ?? last?.entrySeq;
+      if (firstContextSeq !== undefined && lastContextSeq !== undefined) {
+        unitViews = this.historyPort.listUnitsForHistorian(
+          this.historyPort.lineageId(),
+          firstContextSeq,
+          lastContextSeq,
         );
       }
     }
