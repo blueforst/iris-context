@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "historian-publication-v3",
+  "publicationId": "11111111-2222-4333-8444-555555555555",
+  "sourceSequence": 1,
+  "publishedAt": "2026-08-05T00:00:00.000Z",
+  "payloadHash": "6a62e9b4c140e03fb947726f358f77736d5c21c6d54a6becac65c7ac4e7b68bf",
+  "contractVersion": "0.3.0",
+  "projectionVersion": "graphiti-0.29.2",
+  "lineageId": "identity-0123456789abcdef",
+  "contextRange": {
+    "contextLineageId": "identity-0123456789abcdef",
+    "fromContextSeq": 1,
+    "toContextSeq": 2,
+    "rangeHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "compartmentRevisions": [
+    {
+      "compartmentId": "comp-1",
+      "sequence": 1,
+      "headContextSeq": 2,
+      "summary": "fixture compartment",
+      "memoryRefs": []
+    }
+  ],
+  "episodeSources": [],
+  "derivationSummary": {
+    "derivedOnly": false,
+    "memoryRefs": []
+  },
+  "temporal": {
+    "startedAt": "2026-08-05T00:00:00.000Z",
+    "endedAt": "2026-08-05T00:01:00.000Z"
+  }
+}

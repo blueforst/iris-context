@@ -21,8 +21,10 @@ import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 
+import { canonicalJson } from "../src/contracts/tool.js";
 import {
   canonicalPayloadHash,
   HttpMemoryClient,
@@ -46,34 +48,74 @@ function sampleEnvelope(
   publicationId: string,
   sourceSequence = nextSourceSequence++,
 ): Record<string, unknown> {
-  return {
-    schemaVersion: "historian-publication-v2",
+  // iris_memory#11: the Graphiti-ready v3 envelope. The episode source hash
+  // MUST equal iris_memory's deterministic canonical re-hash, otherwise the
+  // cross-process acceptance fails validation (tampered provenance).
+  const lineageId = "identity-x";
+  const rangeHash = "b".repeat(64);
+  const episodeSourceBase = {
+    episodeId: `episode:${lineageId}:1..2:${rangeHash.slice(0, 12)}`,
+    lineageId,
+    contextRange: {
+      contextLineageId: lineageId,
+      fromContextSeq: 1,
+      toContextSeq: 2,
+      rangeHash,
+    },
+    sourceUnitIds: ["u1", "u2"],
+    canonicalContent: "[1] user: hello\n[2] assistant: hi",
+    targetGroupId: `group:${lineageId}`,
+    temporal: {
+      startedAt: "2026-08-06T00:00:00Z",
+      endedAt: "2026-08-06T00:00:01Z",
+    },
+    isDerivedOnly: false,
+    derivation: {
+      memoryRefs: [],
+      compartmentIds: ["comp-x"],
+      sourceContextUnitIds: [],
+    },
+  };
+  const episodeSourceHash = createHash("sha256")
+    .update(canonicalJson(episodeSourceBase), "utf8")
+    .digest("hex");
+  const envelopeBase = {
+    schemaVersion: "historian-publication-v3",
     publicationId,
     sourceSequence,
     publishedAt: "2026-08-06T00:00:00Z",
-    payloadHash: "a".repeat(64),
+    contractVersion: "0.3.0",
+    projectionVersion: "graphiti-0.29.2",
+    lineageId,
     contextRange: {
-      contextLineageId: "identity-x",
+      contextLineageId: lineageId,
       fromContextSeq: 1,
       toContextSeq: 2,
-      rangeHash: "b".repeat(64),
+      rangeHash,
     },
-    semanticSourceVersion: "context-unit-v1",
-    compartmentCount: 1,
-    segmentCount: 1,
-    evidenceCount: 1,
-    evidenceBasis: [
+    compartmentRevisions: [
       {
-        contextUnitId: "u1",
-        contextSeq: 1,
-        runtimeEventId: "evt-1",
-        contentHash: "c".repeat(64),
-        historianDisposition: "include",
+        compartmentId: "comp-x",
+        sequence: 1,
+        headContextSeq: 2,
+        summary: "cross-repo receipt binding fixture",
+        memoryRefs: [],
       },
     ],
-    derivedOnly: false,
-    summary: "cross-repo receipt binding fixture",
+    episodeSources: [{ ...episodeSourceBase, episodeSourceHash }],
+    derivationSummary: {
+      derivedOnly: false,
+      memoryRefs: [],
+    },
+    temporal: {
+      startedAt: "2026-08-06T00:00:00Z",
+      endedAt: "2026-08-06T00:00:01Z",
+    },
   };
+  const payloadHash = createHash("sha256")
+    .update(canonicalJson({ ...envelopeBase, payloadHash: "" }), "utf8")
+    .digest("hex");
+  return { ...envelopeBase, payloadHash };
 }
 
 let memoryProc: ChildProcess | undefined;
@@ -135,7 +177,7 @@ test("iris_agent#64: real iris_memory returns a bound acceptance receipt (public
   if (!outcome.ok) {
     return;
   }
-  assert.equal(outcome.receipt.schemaVersion, "acceptance-receipt-v1");
+  assert.equal(outcome.receipt.schemaVersion, "acceptance-receipt-v3");
   assert.equal(outcome.receipt.status, "accepted");
   assert.equal(outcome.receipt.publicationId, publication["publicationId"]);
   assert.equal(
@@ -143,7 +185,7 @@ test("iris_agent#64: real iris_memory returns a bound acceptance receipt (public
     canonicalPayloadHash(publication),
     "receipt canonical hash == locally recomputed hash",
   );
-  assert.equal(outcome.receipt.contractVersion, "0.2.0");
+  assert.equal(outcome.receipt.contractVersion, "0.3.0");
   assert.ok(outcome.receipt.receiptId.length > 0);
 });
 
@@ -160,15 +202,24 @@ test("iris_agent#64: replay returns the SAME bound receipt (deterministic duplic
     return;
   }
   const replay = await client.deliverPublication(publication);
-  assert.ok(replay.ok, "replay is safe (duplicate_replay)");
+  assert.ok(
+    replay.ok,
+    `replay is safe (duplicate_replay): ${JSON.stringify(replay).slice(0, 400)}`,
+  );
   if (!replay.ok) {
     return;
   }
-  assert.equal(replay.receipt.schemaVersion, "duplicate-replay-receipt-v1");
+  assert.equal(replay.receipt.schemaVersion, "duplicate-replay-receipt-v2");
   assert.equal(replay.receipt.status, "duplicate_replay");
-  assert.equal(replay.receipt.receiptId, first.receipt.receiptId, "deterministic receipt identity");
-  assert.equal(replay.receipt.publicationId, first.receipt.publicationId);
-  assert.equal(replay.receipt.canonicalPayloadHash, first.receipt.canonicalPayloadHash);
+  assert.equal(
+    replay.receipt.originalPublicationId,
+    (first.receipt as { publicationId?: string }).publicationId,
+  );
+  assert.equal(replay.receipt.originalContractVersion, "0.3.0");
+  assert.equal(
+    replay.receipt.originalCanonicalPayloadHash,
+    (first.receipt as { canonicalPayloadHash?: string }).canonicalPayloadHash,
+  );
 });
 
 test("iris_agent#64: a SWAPPED receipt (publication B's identity) cannot authorize delivery of publication A", async (t) => {
@@ -199,17 +250,24 @@ test("iris_agent#64: a SWAPPED receipt (publication B's identity) cannot authori
     // first hop just records A. The binding check still passes because the
     // true receipt IS for A.
     const firstA = await swappedClient.deliverPublication(publicationA);
-    assert.ok(firstA.ok, "unmodified A receipt passes");
+    assert.ok(firstA.ok, `unmodified A receipt passes: ${JSON.stringify(firstA).slice(0, 300)}`);
     if (!firstA.ok) {
       return;
     }
     // Now swap B's receipt (publicationId=B, canonical hash of B) into the
     // response for A's request — this is the dangerous case the contract
     // must reject: a syntactically valid receipt for the WRONG publication.
-    const swappedServer2 = await startSwapProxy(memoryPort, (receipt) => ({
-      ...receipt,
-      publicationId: String(publicationB["publicationId"]),
-    }));
+    // (v3 duplicates bind via original* fields — the swap rewrites those.)
+    const swappedServer2 = await startSwapProxy(memoryPort, (receipt) => {
+      if (receipt["schemaVersion"] === "duplicate-replay-receipt-v2") {
+        return {
+          ...receipt,
+          originalPublicationId: String(publicationB["publicationId"]),
+          originalCanonicalPayloadHash: canonicalPayloadHash(publicationB),
+        };
+      }
+      return { ...receipt, publicationId: String(publicationB["publicationId"]) };
+    });
     try {
       const client2 = new HttpMemoryClient(`http://127.0.0.1:${swappedServer2.port}`);
       const bad = await client2.deliverPublication(publicationA);
@@ -307,13 +365,13 @@ test("iris_agent#64: parseBoundReceipt rejects swapped/tampered/stale receipts d
     receiptId: "abc-123",
     publicationId: publication["publicationId"] as string,
     canonicalPayloadHash: canonicalPayloadHash(publication),
-    contractVersion: "0.2.0",
+    contractVersion: "0.3.0",
     acceptedAt: "2026-08-06T00:00:01Z",
   };
   const expected = {
     expectedPublicationId: publication["publicationId"] as string,
     expectedCanonicalPayloadHash: canonicalPayloadHash(publication),
-    expectedContractVersion: "0.2.0",
+    expectedContractVersion: "0.3.0",
   };
   assert.ok(parseBoundReceipt(good as unknown as Record<string, unknown>, expected) !== null);
   // swapped: receipt for a DIFFERENT publication id

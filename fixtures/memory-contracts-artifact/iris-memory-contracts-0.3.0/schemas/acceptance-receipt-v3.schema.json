@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:acceptance-receipt:v3",
+  "title": "AcceptanceReceiptV3",
+  "description": "Acceptance receipt bound to the exact canonical v3 publication payload and contract version (iris_memory#11). Carries the per-episode-source hashes so replay/idempotency is tied to the complete Graphiti-ready publication.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "receiptId",
+    "publicationId",
+    "contractVersion",
+    "canonicalPayloadHash",
+    "episodeSourceHashes",
+    "acceptedAt"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "acceptance-receipt-v3"
+    },
+    "receiptId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "publicationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "contractVersion": {
+      "const": "0.3.0"
+    },
+    "canonicalPayloadHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "episodeSourceHashes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      },
+      "minItems": 1,
+      "maxItems": 1024
+    },
+    "acceptedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

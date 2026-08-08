@@ -25,7 +25,7 @@ const ARTIFACT_ROOT = join(
   "..",
   "fixtures",
   "memory-contracts-artifact",
-  "iris-memory-contracts-0.2.0",
+  "iris-memory-contracts-0.3.0",
 );
 
 function readJson(relative: string): Record<string, unknown> {
@@ -35,12 +35,12 @@ function readJson(relative: string): Record<string, unknown> {
 test("cross-repo: agent reads the manifest from the REAL artifact", () => {
   const manifest = readJson("manifest.json");
   assert.equal(manifest["package"], "iris-memory-contracts");
-  assert.equal(manifest["version"], "0.2.0");
+  assert.equal(manifest["version"], "0.3.0");
   assert.equal(manifest["majorVersion"], 0);
   assert.ok(Array.isArray(manifest["schemas"]));
   assert.ok(Array.isArray(manifest["fixtures"]));
   const schemas = manifest["schemas"] as string[];
-  assert.equal(schemas.length, 20);
+  assert.equal(schemas.length, 26);
 });
 
 test("cross-repo: pinned manifestSha256 equals the REAL artifact manifest hash", () => {
@@ -167,7 +167,7 @@ test("cross-repo: agent does not depend on the Memory Python implementation", ()
   // no Python import anywhere in the agent repo.
   const pin = readContractPin();
   assert.equal(typeof pin.schemaSet, "object");
-  assert.equal(pin.schemaSet.length, 20);
+  assert.equal(pin.schemaSet.length, 26);
 });
 
 test("cross-repo: committed artifact carries provenance and matches its pin", () => {
@@ -183,7 +183,7 @@ test("cross-repo: committed artifact carries provenance and matches its pin", ()
   const producerCommit = provenance["producerCommit"];
   assert.equal(typeof producerCommit, "string");
   assert.ok((producerCommit as string).length >= 7);
-  assert.equal(provenance["contractVersion"], "0.2.0");
+  assert.equal(provenance["contractVersion"], "0.3.0");
   const pin = readContractPin();
   assert.equal(pin.manifestSha256, provenance["manifestSha256"]);
   const manifest = readJson("manifest.json");

@@ -1,0 +1,884 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "Iris Memory Contract v1",
+  "version": "0.1.0",
+  "description": "Candidate descriptive OpenAPI surface for iris-memory contracts v0.1.0. The authoritative wire contract is the JSON Schema set declared in manifest.json; this document may drift and must not be treated as a second authoritative source."
+ },
+ "paths": {
+  "/health": {
+   "get": {
+    "operationId": "getHealth",
+    "responses": {
+     "200": {
+      "description": "Health response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HealthResponseV1"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/historian/publications": {
+   "post": {
+    "operationId": "acceptPublication",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "oneOf": [
+         {
+          "$ref": "#/components/schemas/PublicationAcceptanceRequestV1"
+         },
+         {
+          "$ref": "#/components/schemas/PublicationAcceptanceRequestV2"
+         },
+         {
+          "$ref": "#/components/schemas/PublicationAcceptanceRequestV3"
+         }
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Accepted or duplicate replay",
+      "content": {
+       "application/json": {
+        "schema": {
+         "oneOf": [
+          {
+           "$ref": "#/components/schemas/AcceptanceReceiptV1"
+          },
+          {
+           "$ref": "#/components/schemas/AcceptanceReceiptV3"
+          },
+          {
+           "$ref": "#/components/schemas/DuplicateReplayReceiptV1"
+          },
+          {
+           "$ref": "#/components/schemas/DuplicateReplayReceiptV2"
+          }
+         ]
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Schema validation failure"
+     },
+     "409": {
+      "description": "Idempotency or source-sequence conflict",
+      "content": {
+       "application/json": {
+        "schema": {
+         "oneOf": [
+          {
+           "$ref": "#/components/schemas/IdempotencyConflictErrorV1"
+          },
+          {
+           "$ref": "#/components/schemas/SequenceConflictErrorV1"
+          }
+         ]
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Unsupported contract version",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/UnsupportedVersionErrorV1"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/memory/recall": {
+   "post": {
+    "operationId": "recallMemory",
+    "responses": {
+     "501": {
+      "description": "Not implemented in this vertical slice"
+     }
+    }
+   }
+  },
+  "/memory/expand": {
+   "post": {
+    "operationId": "expandMemory",
+    "responses": {
+     "501": {
+      "description": "Not implemented in this vertical slice"
+     }
+    }
+   }
+  },
+  "/v1/capabilities": {
+   "get": {
+    "operationId": "getCapabilities",
+    "responses": {
+     "200": {
+      "description": "Capability/version handshake",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CapabilityHandshakeV2"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/v1/memory/recall": {
+   "post": {
+    "operationId": "recallNotImplemented",
+    "responses": {
+     "501": {
+      "description": "recall is not implemented in the R0 baseline",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/NotImplementedErrorV1"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/v1/memory/expand": {
+   "post": {
+    "operationId": "expandNotImplemented",
+    "responses": {
+     "501": {
+      "description": "expand is not implemented in the R0 baseline",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/NotImplementedErrorV1"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ "components": {
+  "schemas": {
+   "HealthResponseV1": {
+    "type": "object",
+    "required": [
+     "schemaVersion",
+     "service",
+     "status",
+     "contractVersion",
+     "databaseExists",
+     "graphitiStatus",
+     "capabilities"
+    ],
+    "properties": {
+     "schemaVersion": {
+      "type": "string"
+     },
+     "service": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "bootstrap",
+       "not_ready",
+       "ready",
+       "degraded"
+      ]
+     },
+     "contractVersion": {
+      "type": "string"
+     },
+     "databaseExists": {
+      "type": "boolean"
+     },
+     "graphitiStatus": {
+      "type": "string",
+      "enum": [
+       "not_configured"
+      ]
+     },
+     "capabilities": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     }
+    }
+   },
+   "PublicationAcceptanceRequestV1": {
+    "type": "object",
+    "required": [
+     "schemaVersion",
+     "contractVersion",
+     "idempotencyKey",
+     "publication"
+    ],
+    "properties": {
+     "schemaVersion": {
+      "type": "string"
+     },
+     "contractVersion": {
+      "type": "string"
+     },
+     "idempotencyKey": {
+      "type": "string"
+     },
+     "publication": {
+      "$ref": "#/components/schemas/HistorianPublicationV1"
+     }
+    }
+   },
+   "HistorianPublicationV1": {
+    "type": "object",
+    "required": [
+     "schemaVersion",
+     "publicationId",
+     "sourceSequence",
+     "publishedAt",
+     "payloadHash",
+     "compartmentCount",
+     "segmentCount",
+     "evidenceCount",
+     "summary"
+    ],
+    "properties": {
+     "schemaVersion": {
+      "type": "string"
+     },
+     "publicationId": {
+      "type": "string",
+      "format": "uuid"
+     },
+     "sourceSequence": {
+      "type": "integer"
+     },
+     "publishedAt": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "payloadHash": {
+      "type": "string"
+     },
+     "compartmentCount": {
+      "type": "integer"
+     },
+     "segmentCount": {
+      "type": "integer"
+     },
+     "evidenceCount": {
+      "type": "integer"
+     },
+     "summary": {
+      "type": "string"
+     }
+    }
+   },
+   "AcceptanceReceiptV1": {
+    "type": "object",
+    "required": [
+     "schemaVersion",
+     "status",
+     "receiptId",
+     "publicationId",
+     "canonicalPayloadHash",
+     "contractVersion",
+     "acceptedAt"
+    ],
+    "properties": {
+     "schemaVersion": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string"
+     },
+     "receiptId": {
+      "type": "string"
+     },
+     "publicationId": {
+      "type": "string"
+     },
+     "canonicalPayloadHash": {
+      "type": "string"
+     },
+     "contractVersion": {
+      "type": "string"
+     },
+     "acceptedAt": {
+      "type": "string"
+     }
+    }
+   },
+   "DuplicateReplayReceiptV1": {
+    "type": "object",
+    "required": [
+     "schemaVersion",
+     "status",
+     "receiptId",
+     "publicationId",
+     "canonicalPayloadHash",
+     "contractVersion",
+     "originalAcceptedAt"
+    ],
+    "properties": {
+     "schemaVersion": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string"
+     },
+     "receiptId": {
+      "type": "string"
+     },
+     "publicationId": {
+      "type": "string"
+     },
+     "canonicalPayloadHash": {
+      "type": "string"
+     },
+     "contractVersion": {
+      "type": "string"
+     },
+     "originalAcceptedAt": {
+      "type": "string"
+     }
+    }
+   },
+   "IdempotencyConflictErrorV1": {
+    "type": "object",
+    "required": [
+     "schemaVersion",
+     "error",
+     "idempotencyKey",
+     "publicationId",
+     "expectedCanonicalPayloadHash",
+     "receivedCanonicalPayloadHash"
+    ],
+    "properties": {
+     "schemaVersion": {
+      "type": "string"
+     },
+     "error": {
+      "type": "string"
+     },
+     "idempotencyKey": {
+      "type": "string"
+     },
+     "publicationId": {
+      "type": "string"
+     },
+     "expectedCanonicalPayloadHash": {
+      "type": "string"
+     },
+     "receivedCanonicalPayloadHash": {
+      "type": "string"
+     }
+    }
+   },
+   "SequenceConflictErrorV1": {
+    "type": "object",
+    "required": [
+     "schemaVersion",
+     "error",
+     "publicationId",
+     "sourceSequence",
+     "expectedCanonicalPayloadHash",
+     "receivedCanonicalPayloadHash"
+    ],
+    "properties": {
+     "schemaVersion": {
+      "type": "string"
+     },
+     "error": {
+      "type": "string"
+     },
+     "publicationId": {
+      "type": "string"
+     },
+     "sourceSequence": {
+      "type": "integer"
+     },
+     "expectedCanonicalPayloadHash": {
+      "type": "string"
+     },
+     "receivedCanonicalPayloadHash": {
+      "type": "string"
+     }
+    }
+   },
+   "UnsupportedVersionErrorV1": {
+    "type": "object",
+    "required": [
+     "schemaVersion",
+     "error",
+     "contractVersion",
+     "supportedMajor",
+     "supportedMinor"
+    ],
+    "properties": {
+     "schemaVersion": {
+      "type": "string"
+     },
+     "error": {
+      "type": "string"
+     },
+     "contractVersion": {
+      "type": "string"
+     },
+     "supportedMajor": {
+      "type": "integer"
+     },
+     "supportedMinor": {
+      "type": "integer"
+     }
+    }
+   },
+   "NotImplementedErrorV1": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "schemaVersion",
+     "error",
+     "code",
+     "capability"
+    ],
+    "properties": {
+     "schemaVersion": {
+      "const": "not-implemented-error-v1"
+     },
+     "error": {
+      "const": "not_implemented"
+     },
+     "code": {
+      "const": "not_implemented"
+     },
+     "capability": {
+      "enum": [
+       "recall",
+       "expand",
+       "graphiti.ingest",
+       "reindex",
+       "stableMemoryRef"
+      ]
+     },
+     "message": {
+      "type": "string"
+     }
+    }
+   },
+   "PublicationAcceptanceRequestV3": {
+    "title": "PublicationAcceptanceRequestV3",
+    "description": "Acceptance request for a Graphiti-ready historian-publication-v3 envelope (iris_memory#11).",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "contractVersion",
+     "schemaVersion",
+     "idempotencyKey",
+     "publication"
+    ],
+    "properties": {
+     "contractVersion": {
+      "const": "0.3.0"
+     },
+     "schemaVersion": {
+      "const": "publication-acceptance-request-v3"
+     },
+     "idempotencyKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "publication": {
+      "$ref": "urn:iris:memory:historian-publication:v3"
+     }
+    }
+   },
+   "HistorianPublicationV3": {
+    "title": "HistorianPublicationV3",
+    "description": "Graphiti-ready Historian publication envelope (iris_memory#11, 2026-08-08 Notion boundary override): the exact episode-source batch + compartment revisions with contract/projection versions. Segment / standalone EvidenceSet / Historian-emitted MemoryAssessmentDelta are NOT part of this version's wire shape.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "schemaVersion",
+     "publicationId",
+     "sourceSequence",
+     "publishedAt",
+     "payloadHash",
+     "contractVersion",
+     "projectionVersion",
+     "lineageId",
+     "contextRange",
+     "compartmentRevisions",
+     "episodeSources",
+     "derivationSummary",
+     "temporal"
+    ],
+    "properties": {
+     "schemaVersion": {
+      "const": "historian-publication-v3"
+     },
+     "publicationId": {
+      "type": "string",
+      "format": "uuid"
+     },
+     "sourceSequence": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "publishedAt": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "payloadHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+     },
+     "contractVersion": {
+      "type": "string",
+      "pattern": "^0\\.3\\.0$"
+     },
+     "projectionVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "The accepted Graphiti projection version this batch targets (e.g. \"graphiti-0.29.2\")."
+     },
+     "lineageId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+     },
+     "contextRange": {
+      "$ref": "urn:iris:memory:context-range:v1"
+     },
+     "compartmentRevisions": {
+      "type": "array",
+      "items": {
+       "$ref": "urn:iris:memory:compartment-revision:v1"
+      },
+      "maxItems": 256
+     },
+     "episodeSources": {
+      "type": "array",
+      "items": {
+       "$ref": "urn:iris:memory:graphiti-episode-source:v1"
+      },
+      "minItems": 1,
+      "maxItems": 1024
+     },
+     "derivationSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "derivedOnly",
+       "memoryRefs"
+      ],
+      "properties": {
+       "derivedOnly": {
+        "type": "boolean"
+       },
+       "memoryRefs": {
+        "type": "array",
+        "items": {
+         "type": "string",
+         "minLength": 1
+        },
+        "maxItems": 256
+       }
+      }
+     },
+     "temporal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "startedAt",
+       "endedAt"
+      ],
+      "properties": {
+       "startedAt": {
+        "type": "string",
+        "format": "date-time"
+       },
+       "endedAt": {
+        "type": "string",
+        "format": "date-time"
+       }
+      }
+     }
+    }
+   },
+   "GraphitiEpisodeSourceV1": {
+    "title": "GraphitiEpisodeSourceV1",
+    "description": "Memory-owned Graphiti episode source (iris_memory#11): the deterministic, Context-owned unit of ordered ingestion into Graphiti.add_episode. Carries source/episode identity inputs, ordered Context semantic provenance, target group, canonical content, temporal metadata and derivation/anti-echo provenance. Never exposes Graphiti SDK objects, Neo4j records, embeddings or internal graph UUIDs.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "episodeSourceHash",
+     "episodeId",
+     "lineageId",
+     "contextRange",
+     "sourceUnitIds",
+     "canonicalContent",
+     "targetGroupId",
+     "temporal",
+     "isDerivedOnly",
+     "derivation"
+    ],
+    "properties": {
+     "episodeSourceHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Deterministic canonical hash of THIS episode source (identity + provenance + content). Re-hashed by the Memory on acceptance; a changed provenance/content is a different payload."
+     },
+     "episodeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Memory-owned deterministic episode identity (stable across replay; NOT a Graphiti/Neo4j internal id)."
+     },
+     "lineageId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "The identity-level Context lineage this episode's semantic units belong to."
+     },
+     "contextRange": {
+      "$ref": "urn:iris:memory:context-range:v1"
+     },
+     "sourceUnitIds": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "minLength": 1
+      },
+      "minItems": 1,
+      "maxItems": 4096,
+      "description": "Ordered Context unit ids (contextSeq order) that constitute this episode's semantic basis."
+     },
+     "canonicalContent": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200000,
+      "description": "Canonical episode body required for Graphiti episode ingestion (ordered message content)."
+     },
+     "targetGroupId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Target group / partition identity for the accepted Graphiti projection."
+     },
+     "temporal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "startedAt",
+       "endedAt"
+      ],
+      "properties": {
+       "startedAt": {
+        "type": "string",
+        "format": "date-time"
+       },
+       "endedAt": {
+        "type": "string",
+        "format": "date-time"
+       }
+      }
+     },
+     "isDerivedOnly": {
+      "type": "boolean",
+      "description": "True when the episode contains NO new observation truth (recalled/derived/anti-echo material) — it must not be treated as new observation evidence."
+     },
+     "derivation": {
+      "$ref": "urn:iris:memory:semantic-derivation-refs:v1"
+     },
+     "rawArchiveRef": {
+      "$ref": "urn:iris:memory:raw-archive-ref:v1"
+     }
+    }
+   },
+   "CompartmentRevisionV1": {
+    "title": "CompartmentRevisionV1",
+    "description": "Memory-owned CompartmentRevision reference (iris_memory#11): the immutable Historian compartment identity + summary + memory refs that accompany a Graphiti-ready publication. Agent constructs the revision; Memory stores it as immutable provenance.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "compartmentId",
+     "sequence",
+     "headContextSeq",
+     "summary",
+     "memoryRefs"
+    ],
+    "properties": {
+     "compartmentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "sequence": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "headContextSeq": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+     },
+     "memoryRefs": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "minLength": 1
+      },
+      "maxItems": 256
+     }
+    }
+   },
+   "AcceptanceReceiptV3": {
+    "title": "AcceptanceReceiptV3",
+    "description": "Acceptance receipt bound to the exact canonical v3 publication payload and contract version (iris_memory#11). Carries the per-episode-source hashes so replay/idempotency is tied to the complete Graphiti-ready publication.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "schemaVersion",
+     "receiptId",
+     "publicationId",
+     "contractVersion",
+     "canonicalPayloadHash",
+     "episodeSourceHashes",
+     "acceptedAt"
+    ],
+    "properties": {
+     "schemaVersion": {
+      "const": "acceptance-receipt-v3"
+     },
+     "receiptId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+     },
+     "publicationId": {
+      "type": "string",
+      "format": "uuid"
+     },
+     "contractVersion": {
+      "const": "0.3.0"
+     },
+     "canonicalPayloadHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+     },
+     "episodeSourceHashes": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "pattern": "^[a-f0-9]{64}$"
+      },
+      "minItems": 1,
+      "maxItems": 1024
+     },
+     "acceptedAt": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   },
+   "DuplicateReplayReceiptV2": {
+    "title": "DuplicateReplayReceiptV2",
+    "description": "Duplicate-replay receipt for v3 publications (iris_memory#11): binds the replayed request to the ORIGINAL accepted publication, its exact canonical payload hash and its contract version — a replayed publication can never be re-ingested or re-mapped.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "schemaVersion",
+     "status",
+     "originalPublicationId",
+     "originalContractVersion",
+     "originalCanonicalPayloadHash",
+     "originalAcceptedAt",
+     "replayedAt"
+    ],
+    "properties": {
+     "schemaVersion": {
+      "const": "duplicate-replay-receipt-v2"
+     },
+     "status": {
+      "const": "duplicate_replay"
+     },
+     "originalPublicationId": {
+      "type": "string",
+      "format": "uuid"
+     },
+     "originalContractVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16
+     },
+     "originalCanonicalPayloadHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+     },
+     "originalAcceptedAt": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "replayedAt": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   },
+   "PublicationAcceptanceRequestV2": {
+    "title": "PublicationAcceptanceRequestV2",
+    "description": "Acceptance request envelope carrying a historian-publication-v2 payload.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "schemaVersion",
+     "contractVersion",
+     "idempotencyKey",
+     "publication"
+    ],
+    "properties": {
+     "schemaVersion": {
+      "const": "publication-acceptance-request-v2"
+     },
+     "contractVersion": {
+      "type": "string",
+      "pattern": "^0\\.2\\.\\d+$"
+     },
+     "idempotencyKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+     },
+     "publication": {
+      "$ref": "urn:iris:memory:historian-publication:v2"
+     }
+    }
+   }
+  }
+ }
+}

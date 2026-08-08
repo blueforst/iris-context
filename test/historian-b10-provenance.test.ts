@@ -20,6 +20,7 @@ import test from "node:test";
 
 import assert from "node:assert/strict";
 
+import { canonicalJson } from "../src/contracts/tool.js";
 import type { SessionTreeEntry } from "@earendil-works/pi-agent-core";
 
 import type { ContextHistoryReadPort } from "../src/context/history-read-port.js";
@@ -96,6 +97,19 @@ function stubPort(units: HistorianUnitView[], lineageId = LINEAGE): ContextHisto
     },
     listUnitsForHistorian() {
       return units;
+    },
+    listUnitsWithPayload() {
+      return units.map((unit) => ({
+        contextUnitId: unit.contextUnitId,
+        contextSeq: unit.contextSeq,
+        runtimeEventId: unit.runtimeEventId,
+        unitType: unit.unitType,
+        disposition: unit.disposition,
+        contentHash: unit.contentHash,
+        derivationRefs: unit.derivationRefs,
+        payload: { role: "user", content: `content-${unit.contextSeq}`, timestamp: 0 },
+        payloadTimestamp: new Date().toISOString(),
+      }));
     },
     claimHistorianBatch({ afterContextSeqExclusive, throughContextSeqInclusive }) {
       const claimed = claim(
@@ -368,9 +382,10 @@ test("B10-AC6: payloadHash is canonical over the complete payload; provenance ch
     assert.ok(env, "envelope exists");
 
     // Self-reference rule: hash of the envelope with payloadHash blanked
-    // equals the recorded payloadHash.
+    // equals the recorded payloadHash (canonical sorted-key serialization —
+    // the same basis iris_memory recomputes).
     const blanked = { ...env, payloadHash: "" };
-    const recomputed = createHash("sha256").update(JSON.stringify(blanked), "utf8").digest("hex");
+    const recomputed = createHash("sha256").update(canonicalJson(blanked), "utf8").digest("hex");
     assert.equal(
       recomputed,
       env["payloadHash"],
@@ -410,7 +425,7 @@ test("B10-AC6: payloadHash is canonical over the complete payload; provenance ch
   }
 });
 
-test("B10-AC7: Session ids appear nowhere in the v2 envelope (raw archive attribution only)", async () => {
+test("B10-AC7: Session ids appear nowhere in the v3 envelope (raw archive attribution only)", async () => {
   const fx = fixture(stubPort([unit(1), unit(2)]));
   try {
     await fx.runCycle([u("u-1", null, "one")]);

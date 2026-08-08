@@ -52,6 +52,39 @@ export function parseBoundReceipt(
 ): MemoryAcceptanceReceipt | null {
   const schemaVersion = body["schemaVersion"];
   const status = body["status"];
+  if (schemaVersion === "duplicate-replay-receipt-v2" && status === "duplicate_replay") {
+    // iris_memory#11: v2 duplicate receipts bind via the ORIGINAL
+    // publication identity — the replay is only valid when the original
+    // publication + payload hash + contract version match what we sent.
+    const originalPublicationId = body["originalPublicationId"];
+    const originalCanonicalPayloadHash = body["originalCanonicalPayloadHash"];
+    const originalContractVersion = body["originalContractVersion"];
+    const originalAcceptedAt = body["originalAcceptedAt"];
+    const replayedAt = body["replayedAt"];
+    if (
+      typeof originalPublicationId !== "string" ||
+      originalPublicationId !== expected.expectedPublicationId ||
+      typeof originalCanonicalPayloadHash !== "string" ||
+      originalCanonicalPayloadHash !== expected.expectedCanonicalPayloadHash ||
+      typeof originalContractVersion !== "string" ||
+      originalContractVersion !== expected.expectedContractVersion ||
+      typeof originalAcceptedAt !== "string" ||
+      originalAcceptedAt.length === 0 ||
+      typeof replayedAt !== "string" ||
+      replayedAt.length === 0
+    ) {
+      return null;
+    }
+    return {
+      schemaVersion: "duplicate-replay-receipt-v2",
+      status: "duplicate_replay",
+      originalPublicationId,
+      originalContractVersion,
+      originalCanonicalPayloadHash,
+      originalAcceptedAt,
+      replayedAt,
+    };
+  }
   const receiptId = body["receiptId"];
   const publicationId = body["publicationId"];
   const canonicalPayloadHash = body["canonicalPayloadHash"];
@@ -81,6 +114,33 @@ export function parseBoundReceipt(
       canonicalPayloadHash,
       contractVersion,
       acceptedAt,
+    };
+  }
+  if (schemaVersion === "acceptance-receipt-v3" && status === "accepted") {
+    // iris_memory#11: v3 receipts carry the per-episode-source hashes; the
+    // binding identity (publicationId / canonical payload hash / contract
+    // version) is verified above exactly like v1.
+    const acceptedAt = body["acceptedAt"];
+    const episodeSourceHashes = body["episodeSourceHashes"];
+    if (typeof acceptedAt !== "string" || acceptedAt.length === 0) {
+      return null;
+    }
+    if (
+      !Array.isArray(episodeSourceHashes) ||
+      episodeSourceHashes.length === 0 ||
+      !episodeSourceHashes.every((h) => typeof h === "string" && /^[a-f0-9]{64}$/.test(h))
+    ) {
+      return null;
+    }
+    return {
+      schemaVersion: "acceptance-receipt-v3",
+      status: "accepted",
+      receiptId,
+      publicationId,
+      canonicalPayloadHash,
+      contractVersion,
+      acceptedAt,
+      episodeSourceHashes: episodeSourceHashes as string[],
     };
   }
   if (schemaVersion === "duplicate-replay-receipt-v1" && status === "duplicate_replay") {
@@ -117,13 +177,13 @@ export class HttpMemoryClient implements MemoryClientPort {
       controller.abort();
     }, this.timeoutMs);
     const publicationId = (publication as { publicationId?: string }).publicationId ?? "unknown";
-    const contractVersion = "0.2.0";
+    const contractVersion = "0.3.0";
     try {
       const response = await fetch(`${this.baseUrl}/historian/publications`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          schemaVersion: "publication-acceptance-request-v2",
+          schemaVersion: "publication-acceptance-request-v3",
           contractVersion,
           idempotencyKey: publicationId,
           publication,

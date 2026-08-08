@@ -100,6 +100,19 @@ export function createFixtureHistoryPort(options: {
         derivationRefs: unit.derivationRefs,
       }));
     },
+    listUnitsWithPayload() {
+      return units().map((unit) => ({
+        contextUnitId: unit.unitId,
+        contextSeq: unit.contextSeq,
+        runtimeEventId: unit.runtimeEventId ?? unit.sourceEventId,
+        unitType: unit.unitType,
+        disposition: unit.disposition,
+        contentHash: unit.contentHash,
+        derivationRefs: unit.derivationRefs,
+        payload: unit.payload,
+        payloadTimestamp: unit.createdAt,
+      }));
+    },
     claimHistorianBatch({
       afterContextSeqExclusive,
       throughContextSeqInclusive,

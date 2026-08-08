@@ -36,8 +36,8 @@
   },
   "memoryContracts": {
     "package": "iris-memory-contracts",
-    "version": "0.2.0",
-    "manifestSha256": "f0f3c0969ad7f0dfc18e551ffbf6c96ff97adc105d00b3e38b7b5496d34e292d",
+    "version": "0.3.0",
+    "manifestSha256": "baab935b69591fe801134ec56f26e105151ec48ff95e36f928178decae24d140",
     "owner": "blueforst/iris_memory"
   },
   "graphitiNeo4j": {

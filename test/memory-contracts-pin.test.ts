@@ -40,7 +40,7 @@ const ARTIFACT_ROOT = join(
   "..",
   "fixtures",
   "memory-contracts-artifact",
-  "iris-memory-contracts-0.2.0",
+  "iris-memory-contracts-0.3.0",
 );
 const PRODUCTION_LOCK = join(
   import.meta.dirname,
@@ -169,6 +169,19 @@ async function producePublication(): Promise<{
           derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
         },
       ],
+      listUnitsWithPayload: () => [
+        {
+          contextUnitId: "unit-1",
+          contextSeq: 1,
+          runtimeEventId: "evt-1",
+          unitType: "input",
+          disposition: "include",
+          contentHash: "f".repeat(64),
+          derivationRefs: { memoryRefs: [], compartmentIds: [], sourceContextUnitIds: [] },
+          payload: { role: "user", content: "hello", timestamp: 0 },
+          payloadTimestamp: "2026-08-01T00:00:00.000Z",
+        },
+      ],
       claimHistorianBatch: ({ afterContextSeqExclusive, throughContextSeqInclusive }) => ({
         schemaVersion: "historian-batch-v1",
         lineageId: "identity-pin",
@@ -273,7 +286,7 @@ test("R3-P2: production-lock memoryContracts pin matches the artifact manifest h
   );
   assert.equal(lock.memoryContracts.package, "iris-memory-contracts");
   assert.equal(lock.memoryContracts.version, manifest["version"]);
-  assert.equal(lock.memoryContracts.version, "0.2.0");
+  assert.equal(lock.memoryContracts.version, "0.3.0");
 });
 
 test("R3-P2: historian-publication-v1 schema is pinned in the schema set", () => {

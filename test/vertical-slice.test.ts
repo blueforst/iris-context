@@ -63,6 +63,9 @@ function emptyHistoryPort(): ContextHistoryReadPort {
     listUnitsForHistorian() {
       return [];
     },
+    listUnitsWithPayload() {
+      return [];
+    },
     claimHistorianBatch: ({ afterContextSeqExclusive }) => {
       const batch: import("../src/contracts/historian.js").HistorianBatchV1 = {
         schemaVersion: "historian-batch-v1",

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "acceptance-receipt-v3",
+  "receiptId": "r-1",
+  "publicationId": "11111111-2222-4333-8444-555555555555",
+  "contractVersion": "0.2.0",
+  "canonicalPayloadHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "episodeSourceHashes": [
+    "9b15991d8b9a5f10c3054830102fb3f8075208edf761c28f0e3dca73eb554a3d",
+    "8529eb7810f4bb4f8732daaf55667efbabe260e018015273906c6e5899d3f627"
+  ],
+  "acceptedAt": "2026-08-05T00:00:00.000Z"
+}

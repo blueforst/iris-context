@@ -1,0 +1,92 @@
+{
+  "schemaVersion": "historian-publication-v3",
+  "publicationId": "11111111-2222-4333-8444-555555555555",
+  "sourceSequence": 1,
+  "publishedAt": "2026-08-05T00:00:00.000Z",
+  "payloadHash": "7523149282cf41e7252062688910dce4de7463a2dc733636bc36807d9bcea462",
+  "contractVersion": "0.3.0",
+  "projectionVersion": "graphiti-0.29.2",
+  "lineageId": "identity-0123456789abcdef",
+  "contextRange": {
+    "contextLineageId": "identity-0123456789abcdef",
+    "fromContextSeq": 1,
+    "toContextSeq": 3,
+    "rangeHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "compartmentRevisions": [
+    {
+      "compartmentId": "comp-1",
+      "sequence": 1,
+      "headContextSeq": 2,
+      "summary": "fixture compartment",
+      "memoryRefs": []
+    }
+  ],
+  "episodeSources": [
+    {
+      "episodeId": "episode-1",
+      "lineageId": "identity-0123456789abcdef",
+      "contextRange": {
+        "contextLineageId": "identity-0123456789abcdef",
+        "fromContextSeq": 1,
+        "toContextSeq": 2,
+        "rangeHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "sourceUnitIds": [
+        "u-1",
+        "u-2"
+      ],
+      "canonicalContent": "user: please remember this\nassistant: noted",
+      "targetGroupId": "group:identity-0123456789abcdef",
+      "temporal": {
+        "startedAt": "2026-08-05T00:00:00.000Z",
+        "endedAt": "2026-08-05T00:01:00.000Z"
+      },
+      "isDerivedOnly": false,
+      "derivation": {
+        "memoryRefs": [],
+        "compartmentIds": [
+          "comp-1"
+        ],
+        "sourceContextUnitIds": []
+      },
+      "episodeSourceHash": "9b15991d8b9a5f10c3054830102fb3f8075208edf761c28f0e3dca73eb554a3d"
+    },
+    {
+      "episodeId": "episode-2",
+      "lineageId": "identity-0123456789abcdef",
+      "contextRange": {
+        "contextLineageId": "identity-0123456789abcdef",
+        "fromContextSeq": 3,
+        "toContextSeq": 3,
+        "rangeHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "sourceUnitIds": [
+        "u-3"
+      ],
+      "canonicalContent": "user: and this too",
+      "targetGroupId": "group:identity-0123456789abcdef",
+      "temporal": {
+        "startedAt": "2026-08-05T00:00:00.000Z",
+        "endedAt": "2026-08-05T00:01:00.000Z"
+      },
+      "isDerivedOnly": false,
+      "derivation": {
+        "memoryRefs": [],
+        "compartmentIds": [
+          "comp-1"
+        ],
+        "sourceContextUnitIds": []
+      },
+      "episodeSourceHash": "8529eb7810f4bb4f8732daaf55667efbabe260e018015273906c6e5899d3f627"
+    }
+  ],
+  "derivationSummary": {
+    "derivedOnly": false,
+    "memoryRefs": []
+  },
+  "temporal": {
+    "startedAt": "2026-08-05T00:00:00.000Z",
+    "endedAt": "2026-08-05T00:01:00.000Z"
+  }
+}

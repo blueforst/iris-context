@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:publication-acceptance-request:v3",
+  "title": "PublicationAcceptanceRequestV3",
+  "description": "Acceptance request for a Graphiti-ready historian-publication-v3 envelope (iris_memory#11).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "schemaVersion", "idempotencyKey", "publication"],
+  "properties": {
+    "contractVersion": {
+      "const": "0.3.0"
+    },
+    "schemaVersion": {
+      "const": "publication-acceptance-request-v3"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "publication": {
+      "$ref": "urn:iris:memory:historian-publication:v3"
+    }
+  }
+}

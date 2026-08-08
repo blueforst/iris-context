@@ -76,6 +76,18 @@ export type MemoryAcceptanceReceipt =
       acceptedAt: string;
     }
   | {
+      // iris_memory#11: v3 acceptance receipts additionally bind the exact
+      // episode-source batch.
+      schemaVersion: "acceptance-receipt-v3";
+      status: "accepted";
+      receiptId: string;
+      publicationId: string;
+      canonicalPayloadHash: string;
+      contractVersion: string;
+      acceptedAt: string;
+      episodeSourceHashes: string[];
+    }
+  | {
       schemaVersion: "duplicate-replay-receipt-v1";
       status: "duplicate_replay";
       receiptId: string;
@@ -83,6 +95,15 @@ export type MemoryAcceptanceReceipt =
       canonicalPayloadHash: string;
       contractVersion: string;
       originalAcceptedAt: string;
+    }
+  | {
+      schemaVersion: "duplicate-replay-receipt-v2";
+      status: "duplicate_replay";
+      originalPublicationId: string;
+      originalContractVersion: string;
+      originalCanonicalPayloadHash: string;
+      originalAcceptedAt: string;
+      replayedAt: string;
     };
 
 export type PublicationDeliveryOutcome =

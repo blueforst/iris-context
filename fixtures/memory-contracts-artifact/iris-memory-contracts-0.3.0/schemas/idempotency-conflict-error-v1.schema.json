@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:idempotency-conflict-error:v1",
+  "title": "IdempotencyConflictErrorV1",
+  "description": "The idempotency identity was reused with different content.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "error",
+    "idempotencyKey",
+    "publicationId",
+    "expectedCanonicalPayloadHash",
+    "receivedCanonicalPayloadHash"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "idempotency-conflict-error-v1"
+    },
+    "error": {
+      "const": "idempotency_conflict"
+    },
+    "idempotencyKey": {
+      "type": "string"
+    },
+    "publicationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "expectedCanonicalPayloadHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "receivedCanonicalPayloadHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "historian-publication-v2",
+  "publicationId": "11111111-2222-4333-8444-555555555555",
+  "sourceSequence": 1,
+  "publishedAt": "2026-08-05T00:00:00.000Z",
+  "payloadHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "contextRange": {
+    "contextLineageId": "identity-0123456789abcdef",
+    "fromContextSeq": 4,
+    "toContextSeq": 1,
+    "rangeHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "semanticSourceVersion": "context-unit-v1",
+  "compartmentCount": 1,
+  "segmentCount": 1,
+  "evidenceCount": 2,
+  "evidenceBasis": [
+    {
+      "contextUnitId": "input-e-1",
+      "contextSeq": 1,
+      "runtimeEventId": "evt-1",
+      "contentHash": "not-a-valid-hash",
+      "historianDisposition": "include"
+    }
+  ],
+  "derivedOnly": false,
+  "summary": "Invalid: inverted range, bad content hash, missing required fields."
+}

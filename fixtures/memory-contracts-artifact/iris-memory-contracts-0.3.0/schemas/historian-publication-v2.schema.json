@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:historian-publication:v2",
+  "title": "HistorianPublicationV2",
+  "description": "Versioned Historian publication envelope with Context-unit provenance, evidence basis refs and anti-echo semantics (iris_memory#6).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "publicationId",
+    "sourceSequence",
+    "publishedAt",
+    "payloadHash",
+    "contextRange",
+    "semanticSourceVersion",
+    "compartmentCount",
+    "segmentCount",
+    "evidenceCount",
+    "evidenceBasis",
+    "derivedOnly",
+    "summary"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "historian-publication-v2"
+    },
+    "publicationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sourceSequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "publishedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payloadHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "contextRange": {
+      "$ref": "urn:iris:memory:context-range:v1"
+    },
+    "semanticSourceVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "compartmentCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "segmentCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "evidenceCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "evidenceBasis": {
+      "type": "array",
+      "items": {
+        "$ref": "urn:iris:memory:evidence-basis-ref:v1"
+      },
+      "maxItems": 4096
+    },
+    "derivedOnly": {
+      "type": "boolean"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    }
+  }
+}

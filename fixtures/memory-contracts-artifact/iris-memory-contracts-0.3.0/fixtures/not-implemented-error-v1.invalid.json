@@ -1,0 +1,6 @@
+{
+  "schemaVersion": "not-implemented-error-v1",
+  "error": "not_implemented",
+  "code": "not_implemented",
+  "capability": "recall_query_typo"
+}

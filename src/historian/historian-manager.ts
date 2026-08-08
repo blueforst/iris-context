@@ -460,9 +460,13 @@ export class HistorianManager {
       // publicationId — the idempotency key sent to Memory), not the
       // internal row key.
       const envelopePublicationId = (publication as { publicationId?: unknown }).publicationId;
+      const receiptPublicationId =
+        outcome.receipt.schemaVersion === "duplicate-replay-receipt-v2"
+          ? outcome.receipt.originalPublicationId
+          : outcome.receipt.publicationId;
       if (
         typeof envelopePublicationId !== "string" ||
-        outcome.receipt.publicationId !== envelopePublicationId
+        receiptPublicationId !== envelopePublicationId
       ) {
         // Receipt bound to a DIFFERENT publication (or to no envelope
         // identity) cannot ACK this row — fail closed into quarantine
