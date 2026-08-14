@@ -1,34 +1,38 @@
 /**
- * P4RecollectionProjector —— Context-owned P4 projection（Phase E，BUST-only）。
+ * P4RecollectionProjector —— Context-owned P4 projection（Phase E，BUST-only；
+ * iris-context#2 单 ContextUnit 迁移）。
  *
  * 权威来源：Notion v29 P4 Recollection / BUST-only Override：
  *   - Memory Service 只返回 provider-neutral RecollectionSnapshot，不能创建
- *     ContextUnitV2；Context 独占 P4 的 validation/sanitization/dedupe/
- *     budget/ordering 与 ContextUnitV2 构造权；
+ *     ContextUnit；Context 独占 P4 的 validation/sanitization/dedupe/
+ *     budget/ordering 与 ContextUnit 构造权；
  *   - P4 是 generation-scoped、non-authoritative、provenance-bearing 的
  *     回忆快照；不推进 Context retirement，不覆盖当前 committed evidence；
- *   - 本 projector 只由 canonical BUST full rebuild 调用（唯一 P4 更新路径）。
+ *   - 本 projector 只由 canonical BUST full rebuild 调用（唯一 P4 更新路径）；
+ *   - 投影结果现在只产出中性 AdmissionCandidate；Context admission（唯一
+ *     materializer）materialize 为新的 ContextUnit（同一 projector 不再返回
+ *     generation-only preprojection DTO）。
  *
  * 投影规则：
  *   - status='disabled'（zero-backend）→ P4 空数组（合法组合）；
- *   - status='unavailable' → 显式 unavailable marker unit（绝不伪装为"无记忆"）；
+ *   - status='unavailable' → 显式 unavailable marker candidate（绝不伪装为"无记忆"）；
  *   - status='ready' → 对 candidates 做 validation/sanitization（丢弃畸形
  *     candidate）、dedupe（recollectionId / statement hash）、budget（上限）、
  *     ordering（relevanceScore 降序，ties 按 recollectionId 升序 —— 确定性）。
  *
- * contextUnitId 确定性：sha256(snapshotId|recollectionId) 前缀；source 绑定
- * snapshot identity/revision/hash（generation-scoped 内固定）。
+ * sourceRef 绑定 snapshot identity/revision/hash（generation-scoped 内固定）；
+ * derivation.memoryRefs 绑定候选的 provenance/recollection identity
+ * （immutable memory basis）。
  */
 
 import { createHash } from "node:crypto";
 
 import type { JsonValue } from "../contracts/context-v27.js";
-import { CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID } from "../contracts/context-v27.js";
 import type {
   RecollectionCandidate,
   RecollectionSnapshot,
 } from "../memory/memory-integration-coordinator.js";
-import type { P0P1P2P3P4Unit } from "./generation-builder.js";
+import type { AdmissionCandidate } from "./context-admission.js";
 
 /** P4 语义 schema id（generated registry 权威）。 */
 export const RECOLLECTION_SEMANTIC_SCHEMA_ID = "iris.semantic.recollection.v1" as const;
@@ -83,10 +87,12 @@ function sha256(text: string): string {
 
 /**
  * P4RecollectionProjector —— Context-owned、exactly one、reconstructable。
- * 只消费规范化后的 RecollectionSnapshot，产出 P0P1P2P3P4Unit[]。
+ * 只消费规范化后的 RecollectionSnapshot，产出中性 AdmissionCandidate[]
+ * （Context admission materialize 为 ContextUnit；同一 projector 不再返回
+ * generation-only preprojection DTO）。
  */
 export class P4RecollectionProjector {
-  project(snapshot: RecollectionSnapshot, options: P4ProjectOptions): P0P1P2P3P4Unit[] {
+  project(snapshot: RecollectionSnapshot, options: P4ProjectOptions): AdmissionCandidate[] {
     if (options.maxCandidates < 0) {
       throw new Error("P4RecollectionProjector: maxCandidates must be >= 0 (fail closed)");
     }
@@ -96,7 +102,7 @@ export class P4RecollectionProjector {
     }
     if (snapshot.status === "unavailable") {
       // 显式 unavailable marker —— 绝不伪装为"无记忆"。
-      return [this.unavailableUnit(snapshot)];
+      return [this.unavailableCandidate(snapshot)];
     }
     if (snapshot.status !== "ready") {
       throw new Error(
@@ -141,15 +147,15 @@ export class P4RecollectionProjector {
       return a.recollectionId < b.recollectionId ? -1 : a.recollectionId > b.recollectionId ? 1 : 0;
     });
     const selected = ordered.slice(0, options.maxCandidates);
-    return selected.map((candidate) => this.availableUnit(snapshot, candidate));
+    return selected.map((candidate) => this.availableCandidate(snapshot, candidate));
   }
 
-  /** ready 候选 → P0P1P2P3P4Unit（contextUnitId 确定性）。 */
-  private availableUnit(
+  /** ready 候选 → AdmissionCandidate（source 绑定 snapshot identity/revision/hash）。 */
+  private availableCandidate(
     snapshot: RecollectionSnapshot,
     candidate: RecollectionCandidate,
-  ): P0P1P2P3P4Unit {
-    const semanticContent: JsonValue = {
+  ): AdmissionCandidate {
+    const content: JsonValue = {
       schemaId: RECOLLECTION_SEMANTIC_SCHEMA_ID,
       status: "available",
       recollectionId: candidate.recollectionId,
@@ -162,40 +168,41 @@ export class P4RecollectionProjector {
         : {}),
     };
     return {
-      contextUnitId: `p4-recollection-${sha256(
-        `${snapshot.snapshotId}|${candidate.recollectionId}`,
-      ).slice(0, 16)}`,
-      source: {
-        schemaId: CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID,
+      sourceRef: {
+        schemaId: "iris.context_unit_source_ref.v1",
         sourceSchemaId: RECOLLECTION_SOURCE_SCHEMA_ID,
         sourceId: snapshot.snapshotId,
         sourceRevision: snapshot.revision,
         sourceHash: snapshot.snapshotHash,
       },
-      semanticSchemaId: RECOLLECTION_SEMANTIC_SCHEMA_ID,
-      semanticContent,
+      contentSchemaId: RECOLLECTION_SEMANTIC_SCHEMA_ID,
+      content,
+      // immutable memory basis：回忆候选绑定其 memory/provenance identity。
+      derivation: {
+        schemaId: "iris.semantic_derivation_refs.v1",
+        memoryRefs: [candidate.provenanceRef ?? candidate.recollectionId],
+      },
     };
   }
 
-  /** unavailable → 显式 marker unit（不伪装空）。 */
-  private unavailableUnit(snapshot: RecollectionSnapshot): P0P1P2P3P4Unit {
+  /** unavailable → 显式 marker candidate（不伪装空）。 */
+  private unavailableCandidate(snapshot: RecollectionSnapshot): AdmissionCandidate {
     const reason = snapshot.unavailableReason ?? "memory service unavailable";
-    const semanticContent: JsonValue = {
+    const content: JsonValue = {
       schemaId: RECOLLECTION_SEMANTIC_SCHEMA_ID,
       status: "unavailable",
       unavailableReason: reason,
     };
     return {
-      contextUnitId: `p4-recollection-unavailable-${sha256(snapshot.snapshotId).slice(0, 16)}`,
-      source: {
-        schemaId: CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID,
+      sourceRef: {
+        schemaId: "iris.context_unit_source_ref.v1",
         sourceSchemaId: RECOLLECTION_SOURCE_SCHEMA_ID,
         sourceId: snapshot.snapshotId,
         sourceRevision: snapshot.revision,
         sourceHash: snapshot.snapshotHash,
       },
-      semanticSchemaId: RECOLLECTION_SEMANTIC_SCHEMA_ID,
-      semanticContent,
+      contentSchemaId: RECOLLECTION_SEMANTIC_SCHEMA_ID,
+      content,
     };
   }
 }

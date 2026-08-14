@@ -10,7 +10,8 @@
  *   → 冻结权威 P0–P5 sources（P0–P2 来自 contributor seam；P3 读 committed
  *     Compartments；P4 经 Memory Integration Coordinator；P5 读 durable live
  *     units）
- *   → 用 buildContextGenerationV2 完整重建（唯一 materializer）
+ *   → 用 buildContextGenerationV3 完整重建（唯一 materializer；current Context
+ *     直接包含 ContextUnit[]）
  *   → validate（build 已内建 fail-closed）
  *   → 原子发布（内存中替换 current generation；发布对象带 generationId+hash）
  *   → 发布成功后调用 retirementPort.markRepresentedAndRetired（唯一推进
@@ -26,7 +27,6 @@
 
 import { createHash } from "node:crypto";
 
-import type { ContextGenerationV2 } from "../contracts/context-v27.js";
 import { CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID } from "../contracts/context-v27.js";
 import type { ContextRetirementPortV1 } from "../contracts/context-retirement.js";
 import type {
@@ -35,10 +35,13 @@ import type {
 } from "../memory/memory-integration-coordinator.js";
 import type { CommittedCompartmentReadPort } from "./committed-compartment-read-port.js";
 import type { ContextStore } from "./context-store.js";
-import { projectCommittedCompartment } from "./p3-compartment.js";
+import { projectCommittedCompartmentCandidate } from "./p3-compartment.js";
 import { P4RecollectionProjector } from "./p4-recollection.js";
-import type { FrozenContextSources, P0P1P2P3P4Unit } from "./generation-builder.js";
-import { buildContextGenerationV2 } from "./generation-builder.js";
+import { materializeContextUnit } from "./context-admission.js";
+import type { ContextUnit } from "../contracts/context-unit.js";
+import type { P0P1P2P3P4Unit } from "./generation-builder.js";
+import { buildContextGenerationV3 } from "./generation-builder.js";
+import type { ContextGenerationV3 } from "../../contracts/generated/types.js";
 
 // ---------------------------------------------------------------------------
 // BUST request / evidence（audit）
@@ -119,7 +122,7 @@ export interface BustRunResult {
   /** 失败原因（audit）。 */
   error?: string;
   /** 发布成功后的 generation（失败时 null）。 */
-  generation: ContextGenerationV2 | null;
+  generation: ContextGenerationV3 | null;
   /** 本次 BUST 的 audit id。 */
   bustId?: string;
 }
@@ -190,7 +193,7 @@ export class BustCoordinator {
   /** coalesced pending 请求（有界）。 */
   private pendingRequests: BustRequest[] = [];
   /** 当前已发布 generation（fail-closed：BUST 失败后为 undefined）。 */
-  private currentGeneration: ContextGenerationV2 | undefined;
+  private currentGeneration: ContextGenerationV3 | undefined;
   private runInProgress = false;
   private bustSequence = 0;
   private lastRun:
@@ -333,7 +336,7 @@ export class BustCoordinator {
    * generation 不被新请求使用（返回 null），不存在 LKG/previous-generation
    * fallback。
    */
-  getCurrentGeneration(): ContextGenerationV2 | null {
+  getCurrentGeneration(): ContextGenerationV3 | null {
     return this.currentGeneration ?? null;
   }
 
@@ -381,9 +384,10 @@ export class BustCoordinator {
       }
 
       // 4. 用唯一 materializer 完整重建（含内建 fail-closed validation）。
+      //    v3：current Context 直接包含 ContextUnit[]（无投影/重包装）。
       const generationId = `gen-${this.contextLineageId}-${this.bustSequence}-${bustId}`;
       const createdAt = this.now();
-      const generation = buildContextGenerationV2(frozen.sources, generationId, createdAt);
+      const generation = buildContextGenerationV3(frozen.sources, generationId, createdAt);
 
       // 5. 原子发布（内存中替换 current generation；对象带 generationId+hash）。
       this.currentGeneration = generation;
@@ -442,17 +446,19 @@ export class BustCoordinator {
   ): Promise<
     | {
         ok: true;
-        sources: FrozenContextSources;
+        sources: import("./generation-builder.js").FrozenContextSourcesV3;
         representedThrough: number;
         retiredThrough: number;
       }
     | { ok: false; error: string }
   > {
     void coalesced;
-    // P0–P2：contributor seam（允许零 contributor → 空层）。
-    const p0Units: P0P1P2P3P4Unit[] = [];
-    const p1Units: P0P1P2P3P4Unit[] = [];
-    const p2Units: P0P1P2P3P4Unit[] = [];
+    // P0–P2：contributor seam（允许零 contributor → 空层）。contributor 只提供
+    // 冻结 source 投影；Context admission（materializeContextUnit）负责物化
+    // ContextUnit（不重新包装、不复制为第二 DTO）。
+    const p0Units: ContextUnit[] = [];
+    const p1Units: ContextUnit[] = [];
+    const p2Units: ContextUnit[] = [];
     for (const contributor of this.contributors) {
       const projected = contributor.project();
       const target =
@@ -462,28 +468,53 @@ export class BustCoordinator {
         if (error !== null) {
           return { ok: false, error: `contributor ${contributor.sourceId}: ${error}` };
         }
-        target.push(unit);
+        target.push(convertProjectedUnitToContextUnit(this.contextLineageId, unit));
       }
     }
 
     // P3：committed Compartments（lineage-scoped，compartment_sequence 升序）。
+    // Compartment source → Context admission → 新的 ContextUnit（basis =
+    // 被表示的旧 P5 单元 ids；不是把旧 Unit 改造成 CompartmentUnit）。
     const compartments = this.committedCompartments.listCommitted(this.contextLineageId);
-    const p3Units = compartments.map((compartment) => projectCommittedCompartment(compartment));
     const compartmentHead = compartments.reduce(
       (max, compartment) => Math.max(max, compartment.endContextSeq),
       0,
     );
 
-    // P5：先确定 P3-covered 边界（prospective represented-through），再读 live
-    // units（未覆盖的 committed units 仍在 P5）。
+    // P5：先确定 P3-covered 边界（prospective represented-through）。读取自
+    // currentRepresented 以来的 live ContextUnit 池（含即将被本 compartment
+    // 覆盖的单元），再按 representedThrough 切分：
+    //   - contextSeq > representedThrough → 仍在 P5（未覆盖）；
+    //   - contextSeq ∈ compartment range → 作为 P3 的 immutable basis（被表示的
+    //     旧 P5 单元）。
     const lineage = this.contextStore.getLineageByLineageId(this.contextLineageId);
     const currentRepresented = lineage?.representedThroughContextSeq ?? 0;
     const representedThrough = Math.max(currentRepresented, compartmentHead);
     const retiredThrough = representedThrough;
-    const p5Units = this.contextStore.listLiveUnitsForP5(this.contextLineageId, representedThrough);
+    const p5Pool = this.contextStore.listLiveContextUnitsForP5WithSeq(
+      this.contextLineageId,
+      currentRepresented,
+    );
+    const p5Units = p5Pool
+      .filter((entry) => entry.contextSeq > representedThrough)
+      .map((entry) => entry.unit);
+
+    const p3Units = compartments.map((compartment) => {
+      const covered = p5Pool
+        .filter(
+          (entry) =>
+            entry.contextSeq >= compartment.startContextSeq &&
+            entry.contextSeq <= compartment.endContextSeq,
+        )
+        .map((entry) => entry.unit.unitId);
+      return materializeContextUnit(
+        this.contextLineageId,
+        projectCommittedCompartmentCandidate(compartment, covered),
+      );
+    });
 
     // P4：Context-owned Recall Intent（由冻结认知状态构建）→ coordinator →
-    // provider-neutral snapshot → Context-owned projection。
+    // provider-neutral snapshot → Context-owned projection → Context admission。
     // sourceSnapshotHash 依赖 P4 内容 → 自指：先以不含 P4 的确定性摘要构建
     // intent（recall 上下文身份），recall 后再重算完整 sourceSnapshotHash。
     const intentWithoutP4Hash = this.computeSourceSnapshotHash({
@@ -505,10 +536,13 @@ export class BustCoordinator {
       sourceSnapshotHash: intentWithoutP4Hash,
     };
     const snapshot = await this.memoryCoordinator.recall(intent);
-    const p4Units = this.p4Projector.project(snapshot, {
+    const p4Candidates = this.p4Projector.project(snapshot, {
       contextLineageId: this.contextLineageId,
       maxCandidates: this.p4MaxCandidates,
     });
+    const p4Units = p4Candidates.map((candidate) =>
+      materializeContextUnit(this.contextLineageId, candidate),
+    );
 
     const sourceSnapshotHash = this.computeSourceSnapshotHash({
       lineageId: this.contextLineageId,
@@ -537,27 +571,31 @@ export class BustCoordinator {
     };
   }
 
-  /** 确定性 source snapshot hash（覆盖全部冻结 P0–P5 source）。 */
+  /** 确定性 source snapshot hash（覆盖全部冻结 P0–P5 source 的 ContextUnit）。 */
   private computeSourceSnapshotHash(input: {
     lineageId: string;
-    p0Units: readonly P0P1P2P3P4Unit[];
-    p1Units: readonly P0P1P2P3P4Unit[];
-    p2Units: readonly P0P1P2P3P4Unit[];
-    p3Units: readonly P0P1P2P3P4Unit[];
-    p4Units: readonly P0P1P2P3P4Unit[];
-    p5Units: readonly import("../contracts/context-v27.js").ContextMessageUnitV1[];
+    p0Units: readonly ContextUnit[];
+    p1Units: readonly ContextUnit[];
+    p2Units: readonly ContextUnit[];
+    p3Units: readonly ContextUnit[];
+    p4Units: readonly ContextUnit[];
+    p5Units: readonly ContextUnit[];
   }): string {
+    const sourceBasis = (unit: ContextUnit): string => {
+      const ref = unit.sourceRef as unknown as Record<string, string>;
+      const identity = ref["sourceId"] ?? `${ref["sessionId"] ?? ""}|${ref["messageId"] ?? ""}`;
+      return `${ref["schemaId"] ?? ""}|${identity}|${ref["sourceHash"] ?? ""}`;
+    };
     const layers = [input.p0Units, input.p1Units, input.p2Units, input.p3Units, input.p4Units].map(
       (units) =>
         units.map((unit) => [
-          unit.contextUnitId,
-          unit.semanticSchemaId,
-          unit.source.sourceId,
-          unit.source.sourceHash,
-          unit.source.sourceRevision ?? "",
+          unit.unitId,
+          unit.contentSchemaId,
+          sourceBasis(unit),
+          unit.contentHash,
         ]),
     );
-    const p5 = input.p5Units.map((unit) => [unit.contextUnitId, unit.contentHash]);
+    const p5 = input.p5Units.map((unit) => [unit.unitId, unit.contentHash]);
     const payload = canonicalJson({
       lineageId: input.lineageId,
       layers,
@@ -596,4 +634,18 @@ function validateProjectedUnit(unit: P0P1P2P3P4Unit): string | null {
 /** 装配工厂（Phase F 接线 Cordis 时再扩展）。 */
 export function createBustCoordinator(options: BustCoordinatorOptions): BustCoordinator {
   return new BustCoordinator(options);
+}
+
+/**
+ * Feature 3：把 contributor seam 的 pre-projected unit（P0P1P2P3P4Unit，
+ * legacy 兼容形状，iris_agent consumer 仍提供）转换为中性 AdmissionCandidate，
+ * 再经 Context admission materialize 为 ContextUnit（同一 materializer；
+ * 不重新包装为 generation-only DTO）。
+ */
+function convertProjectedUnitToContextUnit(lineageId: string, unit: P0P1P2P3P4Unit): ContextUnit {
+  return materializeContextUnit(lineageId, {
+    sourceRef: unit.source,
+    contentSchemaId: unit.semanticSchemaId,
+    content: unit.semanticContent,
+  });
 }

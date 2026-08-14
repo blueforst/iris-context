@@ -1,12 +1,12 @@
 /**
- * Phase E：P4 Recollection（BUST-only）单元测试。
+ * Phase E + iris-context#2：P4 Recollection（BUST-only）单元测试。
  *
  * 证明：
  *  - zero-backend（MemoryIntegrationCoordinator 无 adapter）→ P4 空数组（合法）；
  *  - backend 返回 RecollectionSnapshot → P4 投影（净化/去重/budget/排序）；
  *  - provider 不可用 → 显式 unavailable marker（不伪装为"无记忆"）；
- *  - backend 只能返回 snapshot（接口层面无法创建 ContextUnitV2）；
- *  - 同一 snapshot → 确定性 contextUnitId / source hash；
+ *  - backend 只能返回 snapshot（接口层面无法创建 ContextUnit）；
+ *  - 同一 snapshot → 确定性 sourceRef / materialize 后同一 ContextUnit；
  *  - P4 不推进 retirement（由 BUST coordinator 保证；本套件验证 projector
  *    不触碰任何 watermark）。
  */
@@ -20,6 +20,9 @@ import {
   type RecallIntent,
 } from "../src/memory/memory-integration-coordinator.js";
 import { P4RecollectionProjector } from "../src/context/p4-recollection.js";
+import { materializeContextUnit } from "../src/context/context-admission.js";
+import { isGenericSourceRef } from "../src/contracts/context-unit.js";
+import type { AdmissionCandidate } from "../src/context/context-admission.js";
 
 const LINEAGE = "lineage-p4-test";
 
@@ -60,6 +63,12 @@ function projector(): P4RecollectionProjector {
   return new P4RecollectionProjector();
 }
 
+function projectAll(
+  snapshot: Parameters<P4RecollectionProjector["project"]>[0],
+): AdmissionCandidate[] {
+  return projector().project(snapshot, { contextLineageId: LINEAGE, maxCandidates: 64 });
+}
+
 test("P4: zero-backend → coordinator status disabled and P4 is empty", async () => {
   const coordinator = new MemoryIntegrationCoordinator();
   assert.equal(coordinator.isConfigured(), false);
@@ -67,11 +76,8 @@ test("P4: zero-backend → coordinator status disabled and P4 is empty", async (
   const snapshot = await coordinator.recall(intent());
   assert.equal(snapshot.status, "disabled");
   assert.equal(snapshot.candidates.length, 0);
-  const units = projector().project(snapshot, {
-    contextLineageId: LINEAGE,
-    maxCandidates: 64,
-  });
-  assert.deepEqual(units, [], "zero-backend → P4 空数组");
+  const candidates = projectAll(snapshot);
+  assert.deepEqual(candidates, [], "zero-backend → P4 空数组");
 });
 
 test("P4: ready backend → candidates projected with validation/sanitize/dedupe/order", async () => {
@@ -122,28 +128,33 @@ test("P4: ready backend → candidates projected with validation/sanitize/dedupe
   assert.equal(snapshot.status, "ready");
   assert.equal(snapshot.snapshotId, "snapshot-1");
   assert.equal(snapshot.revision, "rev-9");
-  const units = projector().project(snapshot, { contextLineageId: LINEAGE, maxCandidates: 64 });
+  const candidates = projectAll(snapshot);
   // 去重：r-b 只保留首个（score 0.2）；duplicate statement 只保留首个（r-c）；
   // r-e（空语句）丢弃；r-f（畸形）丢弃。剩余 r-a / r-b / r-c。
-  assert.equal(units.length, 3);
+  assert.equal(candidates.length, 3);
   // 排序：relevanceScore 降序 → r-a(0.9), r-c(0.5), r-b(0.2)
   assert.deepEqual(
-    units.map((u) => (u.semanticContent as Record<string, unknown>)["recollectionId"]),
+    candidates.map((u) => (u.content as Record<string, unknown>)["recollectionId"]),
     ["r-a", "r-c", "r-b"],
   );
-  // source 绑定 snapshot identity/revision/hash
-  for (const unit of units) {
-    assert.equal(unit.source.sourceSchemaId, "iris.recollection_snapshot.v1");
-    assert.equal(unit.source.sourceId, "snapshot-1");
-    assert.equal(unit.source.sourceRevision, "rev-9");
-    assert.equal(unit.source.sourceHash, snapshot.snapshotHash);
-    assert.equal(unit.semanticSchemaId, "iris.semantic.recollection.v1");
+  // sourceRef 绑定 snapshot identity/revision/hash
+  for (const candidate of candidates) {
+    assert.ok(isGenericSourceRef(candidate.sourceRef), "P4 sourceRef is a generic source ref");
+    const ref = candidate.sourceRef as Extract<
+      import("../src/contracts/context-unit.js").ContextUnitSourceRef,
+      { schemaId: "iris.context_unit_source_ref.v1" }
+    >;
+    assert.equal(ref.sourceSchemaId, "iris.recollection_snapshot.v1");
+    assert.equal(ref.sourceId, "snapshot-1");
+    assert.equal(ref.sourceRevision, "rev-9");
+    assert.equal(ref.sourceHash, snapshot.snapshotHash);
+    assert.equal(candidate.contentSchemaId, "iris.semantic.recollection.v1");
   }
-  // contextUnitId 确定性
-  const again = projector().project(snapshot, { contextLineageId: LINEAGE, maxCandidates: 64 });
+  // materialize 后 ContextUnit identity 确定性（同一 snapshot → 同一 unitId）
+  const again = projectAll(snapshot);
   assert.deepEqual(
-    units.map((u) => u.contextUnitId),
-    again.map((u) => u.contextUnitId),
+    candidates.map((u) => materializeContextUnit(LINEAGE, u).unitId),
+    again.map((u) => materializeContextUnit(LINEAGE, u).unitId),
   );
   // snapshot hash 确定性
   const snapshot2 = await coordinator.recall(intent());
@@ -164,28 +175,28 @@ test("P4: budget caps candidates after ordering (keeps most relevant)", async ()
   };
   const coordinator = new MemoryIntegrationCoordinator({ adapter });
   const snapshot = await coordinator.recall(intent());
-  const units = projector().project(snapshot, { contextLineageId: LINEAGE, maxCandidates: 2 });
-  assert.equal(units.length, 2);
+  const candidates = projector().project(snapshot, { contextLineageId: LINEAGE, maxCandidates: 2 });
+  assert.equal(candidates.length, 2);
   assert.deepEqual(
-    units.map((u) => (u.semanticContent as Record<string, unknown>)["recollectionId"]),
+    candidates.map((u) => (u.content as Record<string, unknown>)["recollectionId"]),
     ["r2", "r3"],
     "budget keeps highest relevance",
   );
 });
 
-test("P4: unavailable backend → explicit marker unit, never disguised as empty", async () => {
+test("P4: unavailable backend → explicit marker candidate, never disguised as empty", async () => {
   const adapter = new FakeMemoryAdapter();
   adapter.statusValue = "unavailable";
   const coordinator = new MemoryIntegrationCoordinator({ adapter });
   const snapshot = await coordinator.recall(intent());
   assert.equal(snapshot.status, "unavailable");
   assert.ok(snapshot.unavailableReason !== undefined, "explicit unavailableReason");
-  const units = projector().project(snapshot, { contextLineageId: LINEAGE, maxCandidates: 64 });
-  assert.equal(units.length, 1, "unavailable → one explicit marker unit (not empty)");
-  const content = units[0]?.semanticContent as Record<string, unknown>;
+  const candidates = projectAll(snapshot);
+  assert.equal(candidates.length, 1, "unavailable → one explicit marker candidate (not empty)");
+  const content = candidates[0]?.content as Record<string, unknown>;
   assert.equal(content["status"], "unavailable");
   assert.equal(typeof content["unavailableReason"], "string");
-  assert.equal(units[0]?.semanticSchemaId, "iris.semantic.recollection.v1");
+  assert.equal(candidates[0]?.contentSchemaId, "iris.semantic.recollection.v1");
 });
 
 test("P4: adapter recall throwing → unavailable snapshot (not a silent empty)", async () => {
@@ -194,20 +205,20 @@ test("P4: adapter recall throwing → unavailable snapshot (not a silent empty)"
   const coordinator = new MemoryIntegrationCoordinator({ adapter });
   const snapshot = await coordinator.recall(intent());
   assert.equal(snapshot.status, "unavailable");
-  const units = projector().project(snapshot, { contextLineageId: LINEAGE, maxCandidates: 64 });
-  assert.equal(units.length, 1);
-  assert.equal((units[0]?.semanticContent as Record<string, unknown>)["status"], "unavailable");
+  const candidates = projectAll(snapshot);
+  assert.equal(candidates.length, 1);
+  assert.equal((candidates[0]?.content as Record<string, unknown>)["status"], "unavailable");
 });
 
-test("P4: backend cannot create ContextUnitV2 — the adapter returns a data snapshot only", async () => {
+test("P4: backend cannot create ContextUnit — the adapter returns a data snapshot only", async () => {
   // 接口层面 MemoryServiceAdapter.recall 的返回类型是 MemoryRecallResult
-  // （snapshot 数据），没有任何字段能承载 ContextUnitV2；这里用一个
-  // mock 编译期断言：adapter 的返回值不满足 ContextUnitV2 形状。
+  // （snapshot 数据），没有任何字段能承载 ContextUnit；这里用一个
+  // mock 编译期断言：adapter 的返回值不满足 ContextUnit 形状。
   const adapter = new FakeMemoryAdapter();
   const coordinator = new MemoryIntegrationCoordinator({ adapter });
   const snapshot = await coordinator.recall(intent());
   const unit = (snapshot as unknown as { header?: unknown }).header;
-  assert.equal(unit, undefined, "snapshot carries no ContextUnitV2 header");
+  assert.equal(unit, undefined, "snapshot carries no ContextUnit header");
   assert.equal(
     (snapshot as unknown as { schemaId?: string }).schemaId,
     "iris.recollection_snapshot.v1",

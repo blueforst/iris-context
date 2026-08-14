@@ -15,6 +15,8 @@
  * ContextGenerationV2 is in-memory only, rebuildable from durable sources.
  */
 
+import { createHash } from "node:crypto";
+
 import {
   type ContextGenerationV2,
   type ContextGenerationHeaderV1,
@@ -34,6 +36,13 @@ import {
   computeSemanticContentHash,
   computeContextMessageUnitContentHashV1,
 } from "../contracts/context-v27.js";
+import { type ContextGenerationV3, type ContextUnitV3 } from "../../contracts/generated/types.js";
+import {
+  CONTEXT_GENERATION_V3_SCHEMA_ID,
+  CONTEXT_UNIT_V3_SCHEMA_ID,
+  validateContextUnitStrict,
+  type ContextUnit,
+} from "../contracts/context-unit.js";
 
 /**
  * Semantic schema IDs for P5 unit projection.
@@ -288,4 +297,217 @@ export function unitsInLayer(
   const start = layer === 0 ? 0 : (ends[layer - 1] ?? 0);
   const end = ends[layer] ?? ends[5];
   return generation.units.slice(start, end);
+}
+
+// ---------------------------------------------------------------------------
+// Feature 3（iris-context#2）：ContextGenerationV3 —— current Context 直接
+// 包含 ContextUnit[]（同一 ContextUnit 贯穿；无 ContextMessageUnit → ContextUnit
+// 投影）。
+// ---------------------------------------------------------------------------
+
+/**
+ * v3 冻结源：P0–P5 六层直接为 ContextUnit[]（assembly 只选择/排序/引用既有
+ * ContextUnit；不重新包装、不复制为第二 DTO）。
+ */
+export interface FrozenContextSourcesV3 {
+  /** lineage identity。 */
+  contextLineageId: string;
+  /** 冻结 source snapshot hash（确定性，覆盖全部 P0–P5 source）。 */
+  sourceSnapshotHash: string;
+  p0Units: readonly ContextUnit[];
+  p1Units: readonly ContextUnit[];
+  p2Units: readonly ContextUnit[];
+  p3Units: readonly ContextUnit[];
+  p4Units: readonly ContextUnit[];
+  p5Units: readonly ContextUnit[];
+}
+
+/**
+ * ContextGenerationV3 的 canonical generation hash（v3 basis）：
+ * 覆盖 schemaId + contextLineageId + sourceSnapshotHash + 有序 Unit
+ * （unitId/contentSchemaId/contentHash）+ layerEnds；排除 hash 自身与 createdAt。
+ * 相同 frozen source snapshot 的等价 rebuild 产生相同 hash。
+ */
+export function computeContextGenerationHashV3(input: {
+  schemaId: string;
+  contextLineageId: string;
+  sourceSnapshotHash: string;
+  units: readonly ContextUnit[];
+  layerEnds: readonly [number, number, number, number, number, number];
+}): string {
+  const hash = createHash("sha256");
+  hash.update(input.schemaId, "utf8");
+  hash.update("\0");
+  hash.update(input.contextLineageId, "utf8");
+  hash.update("\0");
+  hash.update(input.sourceSnapshotHash, "utf8");
+  hash.update("\0");
+  for (const unit of input.units) {
+    hash.update(unit.unitId, "utf8");
+    hash.update("\0");
+    hash.update(unit.contentSchemaId, "utf8");
+    hash.update("\0");
+    hash.update(unit.contentHash, "utf8");
+    hash.update("\0");
+  }
+  hash.update(input.layerEnds.join(","), "utf8");
+  return hash.digest("hex");
+}
+
+/**
+ * 严格校验一个 ContextGenerationV3：
+ *  - schemaId/header 正确；layerEnds 单调非递减且 e5 === units.length；
+ *  - 每个 Unit 经 validateContextUnitStrict（含 canonical hash 重算）；
+ *  - contextGenerationHash 重算一致。
+ */
+export function validateContextGenerationV3(generation: unknown): {
+  valid: boolean;
+  reason?: string;
+} {
+  if (typeof generation !== "object" || generation === null) {
+    return { valid: false, reason: "generation is not an object" };
+  }
+  const gen = generation as Record<string, unknown>;
+  if (gen["schemaId"] !== CONTEXT_GENERATION_V3_SCHEMA_ID) {
+    return { valid: false, reason: `unknown generation schemaId: ${String(gen["schemaId"])}` };
+  }
+  const header = gen["header"] as Record<string, unknown> | null;
+  if (header === null || typeof header !== "object") {
+    return { valid: false, reason: "missing or invalid generation header" };
+  }
+  if (header["schemaId"] !== CONTEXT_GENERATION_HEADER_V1_SCHEMA_ID) {
+    return { valid: false, reason: "unknown generation header schemaId" };
+  }
+  const layerEnds = header["layerEnds"];
+  if (!Array.isArray(layerEnds) || layerEnds.length !== 6) {
+    return { valid: false, reason: "layerEnds must be an array of 6 numbers" };
+  }
+  const ends = layerEnds as number[];
+  for (let i = 0; i < 6; i += 1) {
+    const value = ends[i];
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+      return { valid: false, reason: "layerEnds must contain non-negative integers" };
+    }
+    if (i > 0 && (ends[i - 1] ?? 0) > value) {
+      return { valid: false, reason: "layerEnds must be non-decreasing" };
+    }
+  }
+  const units = gen["units"];
+  if (!Array.isArray(units)) {
+    return { valid: false, reason: "units must be an array" };
+  }
+  const unitList = units as unknown[];
+  if (ends[5] !== unitList.length) {
+    return {
+      valid: false,
+      reason: `layerEnds[5] (${ends[5]}) must equal units.length (${unitList.length})`,
+    };
+  }
+  for (let i = 0; i < unitList.length; i += 1) {
+    const unit = unitList[i];
+    if (
+      unit === null ||
+      typeof unit !== "object" ||
+      (unit as { schemaId?: unknown }).schemaId !== CONTEXT_UNIT_V3_SCHEMA_ID
+    ) {
+      return { valid: false, reason: `unit[${i}] must be a ContextUnit v3` };
+    }
+    const unitCheck = validateContextUnitStrict(unit);
+    if (!unitCheck.valid) {
+      return { valid: false, reason: `unit[${i}]: ${unitCheck.reason ?? ""}` };
+    }
+  }
+  const typed = generation as ContextGenerationV3;
+  const expectedGenHash = computeContextGenerationHashV3({
+    schemaId: CONTEXT_GENERATION_V3_SCHEMA_ID,
+    contextLineageId: header["contextLineageId"] as string,
+    sourceSnapshotHash: header["sourceSnapshotHash"] as string,
+    units: typed.units as unknown as readonly ContextUnit[],
+    layerEnds: ends as [number, number, number, number, number, number],
+  });
+  if (header["contextGenerationHash"] !== expectedGenHash) {
+    return {
+      valid: false,
+      reason: `contextGenerationHash mismatch (expected ${expectedGenHash}, got ${header["contextGenerationHash"]})`,
+    };
+  }
+  return { valid: true };
+}
+
+/**
+ * 从冻结的 P0–P5 ContextUnit[] 构建验证过的 ContextGenerationV3。
+ * 层边界 = 固定 P0→P5 顺序的有序数组 index；Unit 不保存 layer。
+ * 任一校验失败 → 抛错（fail-closed）。
+ */
+export function buildContextGenerationV3(
+  sources: FrozenContextSourcesV3,
+  contextGenerationId: string,
+  createdAt: string,
+): ContextGenerationV3 {
+  const units: ContextUnit[] = [
+    ...sources.p0Units,
+    ...sources.p1Units,
+    ...sources.p2Units,
+    ...sources.p3Units,
+    ...sources.p4Units,
+    ...sources.p5Units,
+  ];
+  const e0 = sources.p0Units.length;
+  const e1 = e0 + sources.p1Units.length;
+  const e2 = e1 + sources.p2Units.length;
+  const e3 = e2 + sources.p3Units.length;
+  const e4 = e3 + sources.p4Units.length;
+  const e5 = units.length;
+  const layerEnds: readonly [number, number, number, number, number, number] = [
+    e0,
+    e1,
+    e2,
+    e3,
+    e4,
+    e5,
+  ];
+
+  const contextGenerationHash = computeContextGenerationHashV3({
+    schemaId: CONTEXT_GENERATION_V3_SCHEMA_ID,
+    contextLineageId: sources.contextLineageId,
+    sourceSnapshotHash: sources.sourceSnapshotHash,
+    units,
+    layerEnds,
+  });
+
+  const header: ContextGenerationHeaderV1 = {
+    schemaId: CONTEXT_GENERATION_HEADER_V1_SCHEMA_ID,
+    contextGenerationId,
+    contextLineageId: sources.contextLineageId,
+    sourceSnapshotHash: sources.sourceSnapshotHash,
+    layerEnds,
+    contextGenerationHash,
+    createdAt,
+  };
+
+  const generation: ContextGenerationV3 = {
+    schemaId: CONTEXT_GENERATION_V3_SCHEMA_ID,
+    header,
+    // 领域 ContextUnit（sourceRef 窄化为判别联合）→ 生成式 wire 视图
+    // （ContextUnitV3.sourceRef 为宽松对象；运行期是同一 JSON 对象）。
+    units: units as unknown as readonly ContextUnitV3[],
+  };
+  const check = validateContextGenerationV3(generation);
+  if (!check.valid) {
+    throw new Error(
+      `buildContextGenerationV3: validation failed: ${check.reason ?? ""} (fail-closed)`,
+    );
+  }
+  return generation;
+}
+
+/** 从 generation 提取指定 P-level 的 ContextUnit[]（index 只是当前 frame 位置）。 */
+export function unitsInLayerV3(
+  generation: ContextGenerationV3,
+  layer: 0 | 1 | 2 | 3 | 4 | 5,
+): readonly ContextUnit[] {
+  const ends = generation.header.layerEnds;
+  const start = layer === 0 ? 0 : (ends[layer - 1] ?? 0);
+  const end = ends[layer] ?? ends[5];
+  return generation.units.slice(start, end) as unknown as readonly ContextUnit[];
 }

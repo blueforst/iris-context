@@ -1630,6 +1630,20 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
    * lifecycle/disposition 过滤，但返回 v3 ContextUnit —— 同一 Unit 贯穿）。
    */
   listLiveContextUnitsForP5(contextId: string, afterContextSeqExclusive: number): ContextUnit[] {
+    return this.listLiveContextUnitsForP5WithSeq(contextId, afterContextSeqExclusive).map(
+      (entry) => entry.unit,
+    );
+  }
+
+  /**
+   * Feature 3：P5 live 统一 ContextUnit + accepted ordering（sidecar contextSeq）。
+   * BUST 用 contextSeq 计算 Compartment 覆盖的 basis 单元（start/endContextSeq
+   * 是 Context 坐标轴）。
+   */
+  listLiveContextUnitsForP5WithSeq(
+    contextId: string,
+    afterContextSeqExclusive: number,
+  ): Array<{ unit: ContextUnit; contextSeq: number }> {
     const rows = this.db
       .prepare(
         `SELECT * FROM context_units
@@ -1643,7 +1657,10 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
          ORDER BY context_seq`,
       )
       .all(contextId, "iris.context_unit.v3", afterContextSeqExclusive) as unknown as UnitRow[];
-    return rows.map((row) => this.rowToContextUnit(row).unit);
+    return rows.map((row) => {
+      const parsed = this.rowToContextUnit(row);
+      return { unit: parsed.unit, contextSeq: parsed.state.contextSeq };
+    });
   }
 
   /**

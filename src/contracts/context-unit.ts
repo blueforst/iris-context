@@ -37,6 +37,7 @@ import {
   IRIS_DSH_MESSAGE_REF_V1_SCHEMA_ID,
   IRIS_CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID,
   IRIS_SEMANTIC_DERIVATION_REFS_V1_SCHEMA_ID,
+  IRIS_CONTEXT_GENERATION_V3_SCHEMA_ID,
 } from "../../contracts/generated/types.js";
 import {
   validate_iris_dsh_message_ref_v1,
@@ -51,6 +52,7 @@ import {
 
 export { IRIS_CONTEXT_UNIT_V3_SCHEMA_ID as CONTEXT_UNIT_V3_SCHEMA_ID };
 export { IRIS_DSH_MESSAGE_REF_V1_SCHEMA_ID as DSH_MESSAGE_REF_V1_SCHEMA_ID };
+export { IRIS_CONTEXT_GENERATION_V3_SCHEMA_ID as CONTEXT_GENERATION_V3_SCHEMA_ID };
 
 /** `ContextUnit` —— Context 唯一内容领域类型（= 生成式 `ContextUnitV3` + sourceRef 窄化）。 */
 export type ContextUnit = Omit<ContextUnitV3, "sourceRef"> & {

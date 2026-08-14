@@ -20,7 +20,9 @@ import {
   createBustCoordinator,
   type ContextSourceContributor,
 } from "../src/context/bust-coordinator.js";
-import { unitsInLayer } from "../src/context/generation-builder.js";
+import { unitsInLayerV3 } from "../src/context/generation-builder.js";
+import { materializeContextUnit } from "../src/context/context-admission.js";
+import { projectCommittedCompartmentCandidate } from "../src/context/p3-compartment.js";
 import {
   type MemoryRecallResult,
   type MemoryServiceAdapter,
@@ -30,8 +32,9 @@ import {
   newReceiptId,
   type HistorianCommitReceiptV1,
 } from "../src/contracts/historian.js";
-import { assistantInput, cleanupDir, tempDir, userInput } from "./helpers/context-fixtures.js";
+import { cleanupDir, tempDir } from "./helpers/context-fixtures.js";
 import {
+  admitRuntimeMessage,
   commitCompartment,
   openBustEnvironment,
   type BustEnvironment,
@@ -112,9 +115,7 @@ test("BUST: requestBust coalesces repeated requests into one rebuild", async () 
   try {
     const env = openBustEnvironment(dir, LINEAGE);
     try {
-      env.ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e1", content: "a", sessionId: "session-1" }),
-      );
+      admitRuntimeMessage(env, "m1", "a");
       const coordinator = makeCoordinator(env);
       coordinator.requestBust("historian_compartment_committed", {
         schemaId: "iris.bust_evidence.v1",
@@ -157,12 +158,8 @@ test("BUST: first rebuild publishes a full P0–P5 generation with live units as
   try {
     const env = openBustEnvironment(dir, LINEAGE);
     try {
-      env.ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e1", content: "a", sessionId: "session-1" }),
-      );
-      env.ingest.ingestRuntimeEvent(
-        assistantInput({ eventId: "e2", content: "b", sessionId: "session-1" }),
-      );
+      const id1 = admitRuntimeMessage(env, "m1", "a");
+      const id2 = admitRuntimeMessage(env, "m2", "b", "session-1", "assistant");
       const coordinator = makeCoordinator(env, {
         contributors: [
           makeContributor("p0", "sys", bustEnvContributorUnits("You are Iris")),
@@ -186,9 +183,9 @@ test("BUST: first rebuild publishes a full P0–P5 generation with live units as
       assert.equal(e4, 2, "P4 empty (zero-backend)");
       assert.equal(e5, 4, "P5 = 2 live units");
       assert.deepEqual(
-        unitsInLayer(gen, 5).map((u) => u.header.contextUnitId),
-        ["input-e1", "assistant-e2"],
-        "P5 live units in contextSeq order",
+        unitsInLayerV3(gen, 5).map((u) => u.unitId),
+        [id1, id2],
+        "P5 live units in contextSeq order (same ContextUnit ids)",
       );
       assert.equal(
         coordinator.getCurrentGeneration()?.header.contextGenerationHash,
@@ -215,19 +212,18 @@ test("BUST: committed compartment moves covered units from P5 into P3 and advanc
   try {
     const env = openBustEnvironment(dir, LINEAGE);
     try {
-      env.ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e1", content: "a", sessionId: "session-1" }),
-      );
-      env.ingest.ingestRuntimeEvent(
-        assistantInput({ eventId: "e2", content: "b", sessionId: "session-1" }),
-      );
-      env.ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e3", content: "c", sessionId: "session-1" }),
-      );
+      const id1 = admitRuntimeMessage(env, "m1", "a");
+      const id2 = admitRuntimeMessage(env, "m2", "b", "session-1", "assistant");
+      const id3 = admitRuntimeMessage(env, "m3", "c");
       // 模拟 Historian commit：ACK 覆盖 [1..3] → pending_bust；提交 compartment。
       const units = env.contextStore.listUnitsByLineageRange(LINEAGE, 1, 3);
       env.retirementPort.acknowledgeHistorianCommit(receiptFor(1, 3, `compartment-${LINEAGE}-1`));
-      commitCompartment(env, 1, units);
+      const compartment = commitCompartment(env, 1, units);
+      // Compartment source → Context admission → 新的 ContextUnit（确定性 identity）。
+      const expectedP3Id = materializeContextUnit(
+        LINEAGE,
+        projectCommittedCompartmentCandidate(compartment, [id1, id2, id3]),
+      ).unitId;
 
       const coordinator = makeCoordinator(env);
       coordinator.requestBust("historian_compartment_committed", {
@@ -243,8 +239,8 @@ test("BUST: committed compartment moves covered units from P5 into P3 and advanc
       assert.equal(e3, 1, "P3 = 1 compartment unit");
       assert.equal(e5, 1, "P5 empty — covered live units left P5");
       assert.deepEqual(
-        unitsInLayer(gen, 3).map((u) => u.header.contextUnitId),
-        [`compartment-${LINEAGE}-1`],
+        unitsInLayerV3(gen, 3).map((u) => u.unitId),
+        [expectedP3Id],
       );
       // watermark 推进到 compartment 覆盖的边界（=3）
       const lineage = env.contextStore.getLineageByLineageId(LINEAGE);
@@ -269,12 +265,8 @@ test("BUST: units committed after representation stay live (P5) on the next rebu
   try {
     const env = openBustEnvironment(dir, LINEAGE);
     try {
-      env.ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e1", content: "a", sessionId: "session-1" }),
-      );
-      env.ingest.ingestRuntimeEvent(
-        assistantInput({ eventId: "e2", content: "b", sessionId: "session-1" }),
-      );
+      admitRuntimeMessage(env, "m1", "a");
+      admitRuntimeMessage(env, "m2", "b", "session-1", "assistant");
       const units12 = env.contextStore.listUnitsByLineageRange(LINEAGE, 1, 2);
       env.retirementPort.acknowledgeHistorianCommit(receiptFor(1, 2, `compartment-${LINEAGE}-1`));
       commitCompartment(env, 1, units12);
@@ -285,20 +277,16 @@ test("BUST: units committed after representation stay live (P5) on the next rebu
       });
       await coordinator.runBustIfPending();
       // 新 committed units 4-5（在 compartment 之外）→ 下一次 rebuild 仍在 P5。
-      env.ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e4", content: "d", sessionId: "session-1" }),
-      );
-      env.ingest.ingestRuntimeEvent(
-        assistantInput({ eventId: "e5", content: "e", sessionId: "session-1" }),
-      );
+      const id4 = admitRuntimeMessage(env, "m4", "d");
+      const id5 = admitRuntimeMessage(env, "m5", "e", "session-1", "assistant");
       coordinator.requestBust("operator_requested", { schemaId: "iris.bust_evidence.v1" });
       const run = await coordinator.runBustIfPending();
       assert.equal(run.failed, false);
       assert.ok(run.generation, "generation published");
       const gen = run.generation;
       assert.deepEqual(
-        unitsInLayer(gen, 5).map((u) => u.header.contextUnitId),
-        ["input-e4", "assistant-e5"],
+        unitsInLayerV3(gen, 5).map((u) => u.unitId),
+        [id4, id5],
         "units after the represented boundary stay live",
       );
     } finally {
@@ -315,9 +303,7 @@ test("BUST: failure is fail-closed — no partial generation, no watermark advan
   try {
     const env = openBustEnvironment(dir, LINEAGE);
     try {
-      env.ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e1", content: "a", sessionId: "session-1" }),
-      );
+      admitRuntimeMessage(env, "m1", "a");
       let throwNow = false;
       const flaky: ContextSourceContributor = {
         layer: "p0",
@@ -379,9 +365,7 @@ test("BUST: P4 zero-backend → empty P4; ready backend → projected P4; P4 nev
   try {
     const env = openBustEnvironment(dir, LINEAGE);
     try {
-      env.ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e1", content: "a", sessionId: "session-1" }),
-      );
+      admitRuntimeMessage(env, "m1", "a");
       const coordinator = makeCoordinator(env);
       // zero-backend
       coordinator.requestBust("operator_requested", { schemaId: "iris.bust_evidence.v1" });
@@ -426,9 +410,9 @@ test("BUST: P4 zero-backend → empty P4; ready backend → projected P4; P4 nev
         1,
         "P4 = 1 recollection unit",
       );
-      const p4 = unitsInLayer(gen, 4)[0];
-      assert.equal(p4?.header.semanticSchemaId, "iris.semantic.recollection.v1");
-      assert.equal((p4?.semanticContent as Record<string, unknown>)["status"], "available");
+      const p4 = unitsInLayerV3(gen, 4)[0];
+      assert.equal(p4?.contentSchemaId, "iris.semantic.recollection.v1");
+      assert.equal((p4?.content as Record<string, unknown>)["status"], "available");
       // P4 不推进 retirement（无 compartment；watermark 保持 0）
       const lineage = env.contextStore.getLineageByLineageId(LINEAGE);
       assert.equal(lineage?.representedThroughContextSeq, 0);
@@ -447,9 +431,7 @@ test("BUST: memory unavailable → P4 explicit marker in the published generatio
   try {
     const env = openBustEnvironment(dir, LINEAGE);
     try {
-      env.ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e1", content: "a", sessionId: "session-1" }),
-      );
+      admitRuntimeMessage(env, "m1", "a");
       const adapter: MemoryServiceAdapter = {
         serviceId: "fake-down",
         epoch: "epoch-1",
@@ -472,8 +454,8 @@ test("BUST: memory unavailable → P4 explicit marker in the published generatio
         1,
         "P4 = 1 explicit marker",
       );
-      const marker = unitsInLayer(gen, 4)[0];
-      assert.equal((marker?.semanticContent as Record<string, unknown>)["status"], "unavailable");
+      const marker = unitsInLayerV3(gen, 4)[0];
+      assert.equal((marker?.content as Record<string, unknown>)["status"], "unavailable");
     } finally {
       env.contextStore.close();
       env.historianStore.close();
@@ -488,9 +470,7 @@ test("BUST: contributor invalidation seam submits a canonical BUST request", asy
   try {
     const env = openBustEnvironment(dir, LINEAGE);
     try {
-      env.ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e1", content: "a", sessionId: "session-1" }),
-      );
+      admitRuntimeMessage(env, "m1", "a");
       const coordinator = makeCoordinator(env, {
         contributors: [makeContributor("p2", "catalog", bustEnvContributorUnits("catalog"))],
       });
@@ -515,9 +495,7 @@ test("BUST: failed rebuild keeps previous generation unusable even without a new
   try {
     const env = openBustEnvironment(dir, LINEAGE);
     try {
-      env.ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e1", content: "a", sessionId: "session-1" }),
-      );
+      admitRuntimeMessage(env, "m1", "a");
       const coordinator = makeCoordinator(env);
       coordinator.requestBust("operator_requested", { schemaId: "iris.bust_evidence.v1" });
       await coordinator.runBustIfPending();

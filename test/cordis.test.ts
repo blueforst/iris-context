@@ -38,7 +38,9 @@ import {
   IRIS_IDENTITY_SCOPE,
   type IrisContextPluginConfig,
 } from "../src/cordis/index.js";
-import { unitsInLayer } from "../src/context/generation-builder.js";
+import { unitsInLayerV3 } from "../src/context/generation-builder.js";
+import { deriveContextUnitId } from "../src/contracts/context-unit.js";
+import type { ContextGenerationV3 } from "../contracts/generated/types.js";
 import {
   SemanticAdapterConflictError,
   type SemanticAdapter,
@@ -48,7 +50,6 @@ import type {
   MemoryServiceAdapter,
   RecallIntent,
 } from "../src/memory/memory-integration-coordinator.js";
-import type { ContextGenerationV2 } from "../src/contracts/context-v27.js";
 import {
   assistantInput,
   cleanupDir,
@@ -282,9 +283,16 @@ test("cordis: reversible effects —— contributor unregister 后不再投影",
     assert.ok(calls() >= 1, "contributor projected during BUST");
     const gen1 = ctx.irisContext.getCurrentGeneration();
     assert.ok(gen1 !== null);
-    const p0 = unitsInLayer(gen1, 0);
-    assert.ok(p0.some((unit) => unit.header.contextUnitId === "static-p0-unit"));
-    assert.equal(p0[0]?.header.source.sourceId, "persona");
+    const p0 = unitsInLayerV3(gen1, 0);
+    // P0 contributor 只提供 source；Context admission 派生确定性 unitId。
+    const expectedP0Id = deriveContextUnitId(lineageId, {
+      schemaId: "iris.context_unit_source_ref.v1",
+      sourceSchemaId: "test.static.v1",
+      sourceId: "persona",
+      sourceHash: "hash-persona",
+    });
+    assert.ok(p0.some((unit) => unit.unitId === expectedP0Id));
+    assert.equal((p0[0]?.sourceRef as { sourceId: string }).sourceId, "persona");
 
     // 可逆注销：disposer 后 contributor 不再投影。
     disposeContributor();
@@ -295,7 +303,7 @@ test("cordis: reversible effects —— contributor unregister 后不再投影",
     assert.equal(calls(), callsBefore, "unregistered contributor not projected");
     const gen2 = ctx.irisContext.getCurrentGeneration();
     assert.ok(gen2 !== null);
-    assert.equal(unitsInLayer(gen2, 0).length, 0, "P0 empty after contributor removal");
+    assert.equal(unitsInLayerV3(gen2, 0).length, 0, "P0 empty after contributor removal");
     await fiber.dispose();
   } finally {
     cleanupDir(dir);
@@ -491,7 +499,7 @@ test("cordis: typed events 经 ctx.emit 发出（bust-requested / generation-pub
     const offBust = ctx.on("iris/bust-requested", (reason) => {
       bustReasons.push(reason);
     });
-    const publishedBox = { generation: null as ContextGenerationV2 | null };
+    const publishedBox = { generation: null as ContextGenerationV3 | null };
     const offPublished = ctx.on("iris/context-generation-published", (generation) => {
       publishedBox.generation = generation;
     });

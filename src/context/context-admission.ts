@@ -54,6 +54,22 @@ export interface AdmitSourceInput {
   sourceAnchor?: string;
 }
 
+/**
+ * AdmissionCandidate —— source owner / projector 提供给 Context admission 的
+ * 中性候选（P0–P2 contributor、P3 Compartment、P4 Recollection 都返回这个
+ * 形状；Context 是唯一 materialize 方）。
+ */
+export interface AdmissionCandidate {
+  /** immutable source identity。 */
+  sourceRef: ContextUnitSourceRef;
+  /** 语义类型判别器。 */
+  contentSchemaId: string;
+  /** canonical content。 */
+  content: JsonValue;
+  /** immutable basis refs（仅派生候选）。 */
+  derivation?: SemanticDerivationRefsV1;
+}
+
 /** DshMessageRef 的默认 exactly-once 锚。 */
 export function dshSourceAnchor(ref: DshMessageRef): string {
   return `dsh:${ref.sessionId}:${ref.messageId}`;

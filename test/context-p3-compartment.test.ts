@@ -1,20 +1,24 @@
 /**
- * Phase E：P3 Compartment projection 单元测试。
- * 证明 committed Compartment 被确定性投影为 P0P1P2P3P4Unit：
- * contextUnitId=compartmentId、source 绑定 compartment/lineage/hash、
- * semanticSchemaId='iris.semantic.compartment.v1'、semanticContent 为结构化
- * 摘要；且投影结果能通过 buildContextGenerationV2 的严格校验（唯一
- * materializer）。
+ * Phase E + iris-context#2：P3 Compartment projection 单元测试。
+ * 证明 committed Compartment 被确定性投影为中性 AdmissionCandidate，经 Context
+ * admission materialize 为新的 ContextUnit C1（不是把旧 Unit 改造成
+ * CompartmentUnit）：
+ * - sourceRef 绑定 compartment/lineage/hash；contentSchemaId=
+ *   'iris.semantic.compartment.v1'；content 为结构化摘要；
+ * - coveredUnitIds → derivation.sourceContextMessageUnitIds（immutable basis）；
+ * - materialize 后的 ContextUnit 能通过 buildContextGenerationV3 严格校验。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  projectCommittedCompartment,
+  projectCommittedCompartmentCandidate,
   compartmentSemanticContent,
 } from "../src/context/p3-compartment.js";
-import { buildContextGenerationV2, unitsInLayer } from "../src/context/generation-builder.js";
-import { validateGenerationV2Strict } from "../src/contracts/context-v27.js";
+import { materializeContextUnit } from "../src/context/context-admission.js";
+import { buildContextGenerationV3, unitsInLayerV3 } from "../src/context/generation-builder.js";
+import { validateContextGenerationV3 } from "../src/context/generation-builder.js";
+import { validateContextUnitStrict } from "../src/contracts/context-unit.js";
 import type { HistoricalCompartment } from "../src/historian/historian-compartment.js";
 
 const LINEAGE = "lineage-p3-test";
@@ -39,15 +43,16 @@ function compartment(seq = 1): HistoricalCompartment {
   };
 }
 
-test("P3: committed compartment projects to a deterministic P0P1P2P3P4Unit", () => {
-  const unit = projectCommittedCompartment(compartment(1));
-  assert.equal(unit.contextUnitId, `compartment-${LINEAGE}-1`);
-  assert.equal(unit.semanticSchemaId, "iris.semantic.compartment.v1");
-  assert.equal(unit.source.sourceSchemaId, "iris.committed_compartment.v1");
-  assert.equal(unit.source.sourceId, `compartment-${LINEAGE}-1`);
-  assert.equal(unit.source.sourceRevision, "1");
-  assert.equal(unit.source.sourceHash, "range-hash-1");
-  const content = unit.semanticContent as Record<string, unknown>;
+test("F3: committed compartment projects to a deterministic AdmissionCandidate", () => {
+  const candidate = projectCommittedCompartmentCandidate(compartment(1));
+  assert.equal(candidate.sourceRef.schemaId, "iris.context_unit_source_ref.v1");
+  assert.equal(candidate.sourceRef.sourceSchemaId, "iris.committed_compartment.v1");
+  assert.equal(candidate.sourceRef.sourceId, `compartment-${LINEAGE}-1`);
+  assert.equal(candidate.sourceRef.sourceRevision, "1");
+  assert.equal(candidate.sourceRef.sourceHash, "range-hash-1");
+  assert.equal(candidate.contentSchemaId, "iris.semantic.compartment.v1");
+  assert.equal(candidate.derivation, undefined, "no basis without coveredUnitIds");
+  const content = candidate.content as Record<string, unknown>;
   assert.equal(content["schemaId"], "iris.semantic.compartment.v1");
   assert.equal(content["compartmentSequence"], 1);
   assert.equal(content["startContextSeq"], 1);
@@ -61,11 +66,33 @@ test("P3: committed compartment projects to a deterministic P0P1P2P3P4Unit", () 
   assert.equal(content["openThreads"], "open thread: migration");
 });
 
-test("P3: two compartments project in deterministic sequence order and pass strict validation", () => {
-  const c1 = projectCommittedCompartment(compartment(1));
-  const c2 = projectCommittedCompartment(compartment(2));
-  assert.equal(c1.contextUnitId < c2.contextUnitId, true, "sequence order preserved");
-  const generation = buildContextGenerationV2(
+test("F3: covered unit ids become immutable basis refs (new ContextUnit, not retype)", () => {
+  const candidate = projectCommittedCompartmentCandidate(compartment(1), [
+    "input-e1",
+    "assistant-e2",
+  ]);
+  assert.deepEqual(
+    candidate.derivation?.sourceContextMessageUnitIds,
+    ["input-e1", "assistant-e2"],
+    "basis refs reference the covered OLD units (U1,U2,U3) — the Compartment is a NEW source",
+  );
+  // Context admission materialize 为一个新的 ContextUnit C1。
+  const unit = materializeContextUnit(LINEAGE, candidate);
+  assert.equal(unit.schemaId, "iris.context_unit.v3");
+  assert.equal(validateContextUnitStrict(unit).valid, true);
+  assert.deepEqual(unit.derivation?.sourceContextMessageUnitIds, ["input-e1", "assistant-e2"]);
+  // 同一 compartment → 同一逻辑 Unit（确定性 identity）。
+  const again = materializeContextUnit(
+    LINEAGE,
+    projectCommittedCompartmentCandidate(compartment(1), ["input-e1", "assistant-e2"]),
+  );
+  assert.equal(again.unitId, unit.unitId);
+});
+
+test("F3: two compartments materialize in deterministic order and pass v3 generation validation", () => {
+  const c1 = materializeContextUnit(LINEAGE, projectCommittedCompartmentCandidate(compartment(1)));
+  const c2 = materializeContextUnit(LINEAGE, projectCommittedCompartmentCandidate(compartment(2)));
+  const generation = buildContextGenerationV3(
     {
       contextLineageId: LINEAGE,
       sourceSnapshotHash: "snap-p3",
@@ -79,12 +106,11 @@ test("P3: two compartments project in deterministic sequence order and pass stri
     "gen-p3-1",
     "2026-08-01T00:00:00.000Z",
   );
-  // P3 layer = [layerEnds[2], layerEnds[3])
-  const p3 = unitsInLayer(generation, 3);
+  const p3 = unitsInLayerV3(generation, 3);
   assert.equal(p3.length, 2);
-  assert.equal(p3[0]?.header.contextUnitId, `compartment-${LINEAGE}-1`);
-  assert.equal(p3[1]?.header.contextUnitId, `compartment-${LINEAGE}-2`);
-  const check = validateGenerationV2Strict(generation);
+  assert.equal(p3[0]?.unitId, c1.unitId);
+  assert.equal(p3[1]?.unitId, c2.unitId);
+  const check = validateContextGenerationV3(generation);
   assert.equal(check.valid, true, check.reason ?? "compartment projection must validate");
 });
 
