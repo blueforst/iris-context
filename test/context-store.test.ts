@@ -220,8 +220,8 @@ test("store: newer-schema fence — an applied version absent from the migration
   }
 });
 
-test("store: LATEST_MIGRATION_VERSION is 0012_bust_retirement", () => {
-  assert.equal(LATEST_MIGRATION_VERSION, "0012_bust_retirement");
+test("store: LATEST_MIGRATION_VERSION is 0013_context_unit_v3", () => {
+  assert.equal(LATEST_MIGRATION_VERSION, "0013_context_unit_v3");
 });
 
 test("store: unknown session fails closed (ContextLineageResolutionError), reconciliation API returns null", () => {

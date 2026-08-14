@@ -29,7 +29,7 @@ function tablesOf(db: { prepare(sql: string): { all(): unknown[] } }): Set<strin
   return new Set(rows.map((row) => row.name));
 }
 
-test("migrations: empty DB applies 0001-0012 fully and idempotently", () => {
+test("migrations: empty DB applies 0001-0013 fully and idempotently", () => {
   const dir = tempDir();
   try {
     const dbPath = join(dir, "context.db");
@@ -48,9 +48,65 @@ test("migrations: empty DB applies 0001-0012 fully and idempotently", () => {
       "0010_legacy_cleanup",
       "0011_runtime_events",
       "0012_bust_retirement",
+      "0013_context_unit_v3",
     ]);
     const reopened = migrateDatabase(dbPath, MIGRATIONS_DIR);
     assert.equal(reopened.appliedVersions.length, 0, "re-open applies nothing (idempotent)");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("migrations: 0013 adds unified ContextUnit v3 columns and keeps legacy columns", () => {
+  const dir = tempDir();
+  try {
+    const dbPath = join(dir, "context.db");
+    migrateDatabase(dbPath, MIGRATIONS_DIR);
+    const db = new DatabaseSync(dbPath);
+    const columns = db
+      .prepare("PRAGMA table_info(context_units)")
+      .all()
+      .map((row) => (row as { name: string }).name);
+    for (const col of [
+      // Feature 2 新列
+      "unit_schema_id",
+      "source_ref",
+      "content_schema_id",
+      // 既有列必须保留（legacy 行仍可读）
+      "runtime_event_id",
+      "source_event_id",
+      "unit_type",
+      "disposition",
+      "content_hash",
+      "payload",
+      "companion_entry_id",
+      "pair_key",
+      "paired",
+      "derivation_refs",
+      "raw_archive_ref",
+      "semantic_schema_id",
+      "lifecycle_state",
+      "content_hash_basis",
+      "legacy_status",
+      "payload_reclaimed_at",
+    ]) {
+      assert.ok(columns.includes(col), `context_units.${col} exists`);
+    }
+    // content_hash_basis CHECK 扩展 v3；unit_type 松弛为可空。
+    const sql = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='context_units'")
+      .get() as {
+      sql: string;
+    };
+    assert.match(sql.sql, /content_hash_basis IN \('v1', 'v2', 'v3'\)/);
+    assert.ok(!sql.sql.includes("unit_type TEXT NOT NULL"), "unit_type CHECK relaxed");
+    // 新 exactly-once 索引。
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='context_units'")
+      .all()
+      .map((row) => (row as { name: string }).name);
+    assert.ok(indexes.includes("idx_context_units_lineage_unit_id"));
+    db.close();
   } finally {
     cleanupDir(dir);
   }
@@ -191,14 +247,19 @@ test("migrations: 0012 adds retired watermark + generation binding + payload rec
   }
 });
 
-test("migrations: existing-data-root compat — a 0001-0009-era DB opens and applies 0010/0011/0012", () => {
+test("migrations: existing-data-root compat — a 0001-0009-era DB opens and applies 0010/0011/0012/0013", () => {
   const dir = tempDir();
   try {
     const dbPath = join(dir, "context.db");
     // 模拟老库：只应用 0001-0009 的迁移文件（截断目录到 0009）。
     const legacyDir = mkdtempSync(join(dir, "legacy-migrations-"));
     for (const file of readdirSync(MIGRATIONS_DIR)) {
-      if (file.startsWith("0010") || file.startsWith("0011") || file.startsWith("0012")) {
+      if (
+        file.startsWith("0010") ||
+        file.startsWith("0011") ||
+        file.startsWith("0012") ||
+        file.startsWith("0013")
+      ) {
         continue;
       }
       copyFileSync(join(MIGRATIONS_DIR, file), join(legacyDir, file));
@@ -209,12 +270,13 @@ test("migrations: existing-data-root compat — a 0001-0009-era DB opens and app
     assert.ok(tablesOf(db).has("context_lkg_slots"));
     assert.ok(tablesOf(db).has("context_deferred_operations"));
     db.close();
-    // 用完整迁移目录重开：0010/0011/0012 追加应用。
+    // 用完整迁移目录重开：0010/0011/0012/0013 追加应用。
     const result = migrateDatabase(dbPath, MIGRATIONS_DIR);
     assert.deepEqual(result.appliedVersions, [
       "0010_legacy_cleanup",
       "0011_runtime_events",
       "0012_bust_retirement",
+      "0013_context_unit_v3",
     ]);
     db = new DatabaseSync(dbPath);
     assert.ok(!tablesOf(db).has("context_lkg_slots"));
@@ -223,7 +285,7 @@ test("migrations: existing-data-root compat — a 0001-0009-era DB opens and app
     // ContextStore 能以新 schema 打开（full path）。
     const store = ContextStore.open(dbPath);
     store.close();
-    assert.equal(LATEST_MIGRATION_VERSION, "0012_bust_retirement");
+    assert.equal(LATEST_MIGRATION_VERSION, "0013_context_unit_v3");
   } finally {
     cleanupDir(dir);
   }

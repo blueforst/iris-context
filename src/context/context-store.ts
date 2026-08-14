@@ -20,6 +20,13 @@ import {
   type UnitDispositionFilter,
 } from "../contracts/context-v27.js";
 import {
+  computeContextUnitContentHash,
+  parseContextUnitSourceRef,
+  validateContextUnitStrict,
+  type ContextUnit,
+  type ContextUnitSourceRef,
+} from "../contracts/context-unit.js";
+import {
   UNTRUSTED_DATA_ONLY_ORIGIN,
   canonicalJsonStringify,
   computePayloadHash,
@@ -59,7 +66,7 @@ interface UnitRow {
   unit_id: string;
   runtime_event_id: string | null;
   source_event_id: string;
-  unit_type: string;
+  unit_type: string | null;
   disposition: string;
   entry_id: string | null;
   entry_seq: number | null;
@@ -77,6 +84,10 @@ interface UnitRow {
   legacy_status: string;
   payload_reclaimed_at: string | null;
   created_at: string;
+  // Feature 2（iris-context#2）：统一 ContextUnit v3 列。
+  unit_schema_id: string | null;
+  source_ref: string | null;
+  content_schema_id: string | null;
 }
 
 /**
@@ -99,11 +110,63 @@ export interface UnitStoreRecord {
 }
 
 /**
+ * Feature 2（iris-context#2）：统一 ContextUnit v3 行的 sidecar 状态。
+ * contextSeq/kind/disposition/lifecycle 等会变化的处境位于 Unit 本体之外，
+ * 只通过 unitId 引用同一个 ContextUnit（不复制 canonical content）。
+ */
+export interface ContextUnitSidecarState {
+  /** accepted ordering（Historian 轴心坐标；Unit 本体无此字段）。 */
+  readonly contextSeq: number;
+  /** runtime-origin kind（contentSchemaId 派生；P0–P4/派生单元无 kind）。 */
+  readonly kind?: "user" | "assistant" | "tool_result";
+  readonly historianDisposition: ContextMessageUnitV1["historianDisposition"];
+  readonly lifecycleState: ContextMessageUnitLifecycleState;
+  readonly createdAt: string;
+  /** exactly-once 锚（source_event_id）。 */
+  readonly sourceAnchor: string;
+}
+
+/** 统一 ContextUnit v3 行的持久化输入。 */
+export interface AdmitContextUnitInput {
+  /** 已物化的 ContextUnit（校验由 admission 边界完成）。 */
+  unit: ContextUnit;
+  /** accepted ordering（Context 分配；同一 Unit 幂等复用既有 contextSeq）。 */
+  contextSeq: number;
+  /**
+   * exactly-once 锚（source_event_id）。runtime-origin 建议
+   * `dsh:<sessionId>:<messageId>`；派生单元建议 `compartment:<id>` 等。
+   */
+  sourceAnchor: string;
+  /** runtime Session binding 校验（P5 runtime-origin 路径）。 */
+  runtimeSessionId?: string;
+}
+
+/** derivation refs 是否携带任何 basis（决定是否写入 Unit.derivation）。 */
+function hasAnyDerivationRef(refs: SemanticDerivationRefsV1): boolean {
+  return (
+    (refs.memoryRefs !== undefined && refs.memoryRefs.length > 0) ||
+    (refs.compartmentIds !== undefined && refs.compartmentIds.length > 0) ||
+    refs.workSnapshotVersion !== undefined ||
+    (refs.sourceContextMessageUnitIds !== undefined && refs.sourceContextMessageUnitIds.length > 0)
+  );
+}
+
+/**
  * Feature A (#110): physical unit_type → canonical V1 kind mapping
  * (input→user, assistant→assistant, tool_result→tool_result). Unknown
  * physical values (schema drift) fail closed — never guessed.
+ *
+ * Feature 2：unit_type 已松弛为可空（P0–P4/派生单元无 kind 映射）；null 表示
+ * 非 runtime kind 单元。旧路径（rowToUnit）对 null 仍 fail-closed —— legacy
+ * runtime 单元必须有 kind。
  */
-function physicalUnitTypeToKind(unitType: string): ContextMessageUnitV1["kind"] {
+function physicalUnitTypeToKind(unitType: string | null): ContextMessageUnitV1["kind"] {
+  if (unitType === null) {
+    throw new Error(
+      `context rowToUnit: unit has null unit_type but is being read via the legacy ` +
+        "runtime-unit path (fail closed)",
+    );
+  }
   switch (unitType) {
     case "input":
       return "user";
@@ -415,7 +478,7 @@ function parseLifecycleState(raw: string): ContextMessageUnitLifecycleState {
 // iris_agent#113: legacy fence — this key name is prohibited in new contracts
 // but must be read for backward-compatible SQLite deserialization
 const LEGACY_SOURCE_CONTEXT_MESSAGE_UNIT_IDS_KEY = "sourceContextUnitIds";
-export const LATEST_MIGRATION_VERSION = "0012_bust_retirement";
+export const LATEST_MIGRATION_VERSION = "0013_context_unit_v3";
 
 /**
  * R2-P3：每 session 的 context_units 软 cap（语义 ledger 有界化的第一级）。
@@ -970,10 +1033,15 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
           );
         }
       }
-      return new ContextStore(db, {
+      const store = new ContextStore(db, {
         ...options,
         archiveDbPath: options.archiveDbPath ?? join(dirname(contextDbPath), "context-archive.db"),
       });
+      // Feature 2（iris-context#2）：打开时确定性迁移旧 v2 行为统一
+      // ContextUnit v3（幂等、crash-safe；失败 fail-closed）。迁移后新旧
+      // 读路径都能读取同一行（旧路径经 v3 branch 兼容视图）。
+      store.migrateLegacyRowsToV3();
+      return store;
     } catch (error) {
       try {
         db.close();
@@ -1398,6 +1466,342 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
     return rows.map((row) => this.rowToUnit(row));
   }
 
+  // ---------------------------------------------------------------------------
+  // Feature 2（iris-context#2）：统一 ContextUnit v3 持久化
+  // ---------------------------------------------------------------------------
+
+  /** 该行是否已是统一 ContextUnit v3（unit_schema_id='iris.context_unit.v3'）。 */
+  private isV3UnitRow(row: UnitRow): boolean {
+    return row.unit_schema_id === "iris.context_unit.v3";
+  }
+
+  /**
+   * contentSchemaId → runtime-origin kind（user/assistant/tool_result）。
+   * 只返回可持久化的三种 runtime kind；P0–P4 / 派生单元返回 undefined
+   * （无 kind 映射 → unit_type 为 NULL）。
+   */
+  private contentSchemaIdToRuntimeKind(
+    contentSchemaId: string,
+  ): "user" | "assistant" | "tool_result" | undefined {
+    for (const kind of ["user", "assistant", "tool_result"] as const) {
+      if (KIND_TO_SEMANTIC_SCHEMA_ID[kind] === contentSchemaId) {
+        return kind;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * 接纳一个统一 ContextUnit v3（exactly-once）：
+   *  - unit.contextId 必须等于本 store 的 lineage（fail-closed）；
+   *  - UNIQUE(context_lineage_id, unit_id)：同 unitId 已存在 →
+   *    内容一致则幂等返回既有行；内容不一致 → fail-closed（unitId 碰撞）；
+   *  - 软/硬 cap 与旧路径一致（bounded storage 不回退）；
+   *  - kind（runtime-origin）由 contentSchemaId 派生 → unit_type；
+   *  - 新行 content_hash_basis='v3'、unit_schema_id='iris.context_unit.v3'、
+   *    schema_version='context-unit-v3'。
+   */
+  admitContextUnit(input: AdmitContextUnitInput): ContextUnit {
+    const unit = input.unit;
+    // 领域严格校验（fail-closed）：schemaId/content/sourceRef/hash 全部经
+    // 生成式机器权威 + 领域 canonical basis 校验，畸形 Unit 绝不落库。
+    const check = validateContextUnitStrict(unit);
+    if (!check.valid) {
+      throw new Error(
+        `context admitContextUnit: invalid unit ${unit.unitId}: ${check.reason ?? ""} (fail closed)`,
+      );
+    }
+    if (unit.contextId !== this.lineageId) {
+      throw new Error(
+        `context admitContextUnit: unit.contextId ${unit.contextId} does not match ` +
+          `this store's lineage ${this.lineageId} (fail closed)`,
+      );
+    }
+    const runtimeSessionId = input.runtimeSessionId;
+    const count =
+      runtimeSessionId === undefined
+        ? this.countUnitsByLineage(unit.contextId)
+        : this.countUnits(runtimeSessionId);
+    if (count >= this.hardUnitsCap) {
+      throw new ContextBoundsExceededError(runtimeSessionId ?? unit.contextId, this.hardUnitsCap);
+    }
+    const boundLineageId =
+      runtimeSessionId === undefined ? unit.contextId : this.resolveLineageId(runtimeSessionId);
+    if (runtimeSessionId !== undefined && unit.contextId !== boundLineageId) {
+      throw new ContextLineageResolutionError(runtimeSessionId);
+    }
+    // exactly-once：同 unitId 已存在。
+    const existing = this.getContextUnitByUnitId(unit.contextId, unit.unitId);
+    if (existing !== undefined) {
+      if (existing.contentHash !== unit.contentHash) {
+        throw new Error(
+          `context admitContextUnit: unitId ${unit.unitId} already exists with a different ` +
+            `contentHash (${existing.contentHash} vs ${unit.contentHash}) — unitId collision ` +
+            "(fail closed; same source must resolve to the same content)",
+        );
+      }
+      return existing;
+    }
+    const disposition = count >= this.maxUnitsPerSession ? "exclude" : "include";
+    const kind = this.contentSchemaIdToRuntimeKind(unit.contentSchemaId);
+    this.db
+      .prepare(
+        `INSERT INTO context_units (
+          context_lineage_id, context_seq, unit_id, source_event_id, unit_type,
+          disposition, content_hash, payload, derivation_refs, schema_version,
+          lifecycle_state, content_hash_basis, legacy_status, created_at,
+          semantic_schema_id, unit_schema_id, source_ref, content_schema_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        unit.contextId,
+        input.contextSeq,
+        unit.unitId,
+        input.sourceAnchor,
+        kind === undefined ? null : kind === "user" ? "input" : kind,
+        disposition,
+        unit.contentHash,
+        JSON.stringify(unit.content),
+        JSON.stringify(unit.derivation ?? { schemaId: SEMANTIC_DERIVATION_REFS_V1_SCHEMA_ID }),
+        "context-unit-v3",
+        "committed",
+        "v3",
+        "none",
+        new Date().toISOString(),
+        unit.contentSchemaId,
+        "iris.context_unit.v3",
+        JSON.stringify(unit.sourceRef),
+        unit.contentSchemaId,
+      );
+    const stored = this.getContextUnitByUnitId(unit.contextId, unit.unitId);
+    if (stored === undefined) {
+      throw new Error(
+        `context admitContextUnit: insert succeeded but read-back failed for ${unit.unitId} (fail closed)`,
+      );
+    }
+    return stored;
+  }
+
+  /** 按 contextId + unitId 读取统一 ContextUnit v3（不存在 → undefined）。 */
+  getContextUnitByUnitId(contextId: string, unitId: string): ContextUnit | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM context_units WHERE context_lineage_id = ? AND unit_id = ? LIMIT 1")
+      .get(contextId, unitId) as UnitRow | undefined;
+    if (row === undefined) {
+      return undefined;
+    }
+    return this.rowToContextUnit(row).unit;
+  }
+
+  /** 是否已接纳某 unitId（exactly-once 探测）。 */
+  hasContextUnitForUnitId(contextId: string, unitId: string): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT 1 AS hit FROM context_units WHERE context_lineage_id = ? AND unit_id = ? LIMIT 1",
+      )
+      .get(contextId, unitId) as { hit: number } | undefined;
+    return row !== undefined;
+  }
+
+  /** 按 contextId 读取统一 ContextUnit v3（provider 视图默认过滤 disposition）。 */
+  listContextUnits(
+    contextId: string,
+    options: { afterContextSeq?: number; limit?: number; disposition?: UnitDispositionFilter } = {},
+  ): ContextUnit[] {
+    const disposition = options.disposition ?? "include";
+    let sql = "SELECT * FROM context_units WHERE context_lineage_id = ? AND unit_schema_id = ?";
+    const params: Array<string | number> = [contextId, "iris.context_unit.v3"];
+    if (disposition !== "all") {
+      sql += " AND disposition = ?";
+      params.push(disposition);
+    }
+    if (options.afterContextSeq !== undefined) {
+      sql += " AND context_seq > ?";
+      params.push(options.afterContextSeq);
+    }
+    sql += " ORDER BY context_seq";
+    const rows = this.db.prepare(sql).all(...params) as unknown as UnitRow[];
+    const limit = options.limit ?? rows.length;
+    return rows.slice(0, limit).map((row) => this.rowToContextUnit(row).unit);
+  }
+
+  /**
+   * Feature 2：P5 live 统一 ContextUnit 集（同旧 listLiveUnitsForP5 的
+   * lifecycle/disposition 过滤，但返回 v3 ContextUnit —— 同一 Unit 贯穿）。
+   */
+  listLiveContextUnitsForP5(contextId: string, afterContextSeqExclusive: number): ContextUnit[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM context_units
+         WHERE context_lineage_id = ? AND unit_schema_id = ?
+           AND disposition = 'include'
+           AND lifecycle_state IN (
+             'committed', 'historian_eligible', 'historian_claimed',
+             'compartmentalized_pending_bust'
+           )
+           AND context_seq > ?
+         ORDER BY context_seq`,
+      )
+      .all(contextId, "iris.context_unit.v3", afterContextSeqExclusive) as unknown as UnitRow[];
+    return rows.map((row) => this.rowToContextUnit(row).unit);
+  }
+
+  /**
+   * v3 行 → 统一 ContextUnit（fail-closed 反序列化 + hash 校验）。
+   * 非 v3 行（legacy/quarantined）→ 抛错（本方法是新模型的唯一合法读入口；
+   * 旧模型用 rowToUnit）。
+   */
+  private rowToContextUnit(row: UnitRow): { unit: ContextUnit; state: ContextUnitSidecarState } {
+    if (row.unit_schema_id !== "iris.context_unit.v3") {
+      throw new Error(
+        `context rowToContextUnit: row ${row.unit_id} (context_seq ${row.context_seq}) ` +
+          `is not a unified ContextUnit v3 row (unit_schema_id=${JSON.stringify(row.unit_schema_id)}); ` +
+          "legacy rows must be read via the legacy path or migrated to v3 (fail closed)",
+      );
+    }
+    if (row.legacy_status !== "none") {
+      throw new Error(
+        `context rowToContextUnit: row ${row.unit_id} is quarantined legacy data and cannot be ` +
+          "read as a current ContextUnit (fail closed)",
+      );
+    }
+    if (row.payload_reclaimed_at !== null) {
+      const lifecycleState = parseLifecycleState(row.lifecycle_state);
+      if (lifecycleState !== "retired") {
+        throw new Error(
+          `context rowToContextUnit: unit ${row.unit_id} has payload_reclaimed_at set but ` +
+            `lifecycle_state=${lifecycleState} (only retired units may reclaim) (fail closed)`,
+        );
+      }
+      throw new Error(
+        `context rowToContextUnit: unit ${row.unit_id} is retired and its canonical content ` +
+          "has been reclaimed (GC); no ContextUnit can be materialized without content (fail closed)",
+      );
+    }
+    const sourceRef = parseContextUnitSourceRef(JSON.parse(row.source_ref ?? "null") as unknown);
+    const content = JSON.parse(row.payload) as JsonValue;
+    const derivation = parseStoredDerivationRefs(row.derivation_refs);
+    const unit: ContextUnit = {
+      schemaId: "iris.context_unit.v3",
+      unitId: row.unit_id,
+      contextId: row.context_lineage_id,
+      contentSchemaId: row.content_schema_id ?? row.semantic_schema_id ?? "",
+      content,
+      contentHash: row.content_hash,
+      sourceRef,
+      ...(hasAnyDerivationRef(derivation) ? { derivation } : {}),
+    };
+    // contentHash 重算校验（v3 basis）—— tamper 检测。
+    const expectedHash = computeContextUnitContentHash({
+      schemaId: unit.schemaId,
+      unitId: unit.unitId,
+      contextId: unit.contextId,
+      contentSchemaId: unit.contentSchemaId,
+      content: unit.content,
+      sourceRef: unit.sourceRef,
+      ...(unit.derivation !== undefined ? { derivation: unit.derivation } : {}),
+    });
+    if (unit.contentHash !== expectedHash) {
+      throw new Error(
+        `context rowToContextUnit: contentHash mismatch for unit ${unit.unitId} ` +
+          `(stored ${unit.contentHash}, canonical ${expectedHash}); an immutable field was ` +
+          "tampered or corrupted (fail closed)",
+      );
+    }
+    const physicalKind = row.unit_type === null ? undefined : physicalUnitTypeToKind(row.unit_type);
+    const kind: "user" | "assistant" | "tool_result" | undefined =
+      physicalKind === "user" || physicalKind === "assistant" || physicalKind === "tool_result"
+        ? physicalKind
+        : undefined;
+    return {
+      unit,
+      state: {
+        contextSeq: row.context_seq,
+        ...(kind !== undefined ? { kind } : {}),
+        historianDisposition: physicalDispositionToHistorian(row.disposition),
+        lifecycleState: parseLifecycleState(row.lifecycle_state),
+        createdAt: row.created_at,
+        sourceAnchor: row.source_event_id,
+      },
+    };
+  }
+
+  /**
+   * 旧 v2 行 → 统一 ContextUnit v3 的确定性迁移（Feature 2）。
+   * 在 ContextStore.open 时调用；幂等、crash-safe：
+   *  - 只处理 legacy_status='none' 且 content_hash_basis='v2' 且
+   *    unit_schema_id IS NULL 的行；
+   *  - 先经旧 rowToUnit 校验（v2 hash basis 完整性），再按 v3 basis 重算
+   *    contentHash；identity（unitId=contextUnitId）、content、contextSeq
+   *    原值保留 —— 迁移后是同一个逻辑 Unit（single ContextUnit 不变量）；
+   *  - sourceRef = 通用 source ref（sourceSchemaId='iris.context_message_unit.v1'，
+   *    sourceId=旧 contextUnitId，sourceHash=旧 contentHash）—— 诚实记录
+   *    legacy 来源；rawArchiveRef 保留在旧 raw_archive_ref 列；
+   *  - v1 行（quarantined_legacy）绝不迁移（保持物理隔离）；
+   *  - 任一损坏行 → 抛错（fail-closed，不静默改写）。
+   */
+  migrateLegacyRowsToV3(): number {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM context_units
+         WHERE legacy_status = 'none' AND content_hash_basis = 'v2'
+           AND unit_schema_id IS NULL AND payload_reclaimed_at IS NULL`,
+      )
+      .all() as unknown as UnitRow[];
+    let migrated = 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of rows) {
+        const legacy = this.rowToUnit(row); // 校验旧 hash；损坏 → 抛错 fail-closed
+        const sourceRef: ContextUnitSourceRef = {
+          schemaId: "iris.context_unit_source_ref.v1",
+          sourceSchemaId: "iris.context_message_unit.v1",
+          sourceId: legacy.contextUnitId,
+          sourceHash: legacy.contentHash,
+        };
+        const contentHash = computeContextUnitContentHash({
+          schemaId: "iris.context_unit.v3",
+          unitId: legacy.contextUnitId,
+          contextId: legacy.contextLineageId,
+          contentSchemaId: legacy.semanticSchemaId,
+          content: legacy.semanticContent,
+          sourceRef,
+          // 与读路径（rowToContextUnit）完全一致：derivation 只在确实携带
+          // basis 时进入 hash（空 refs 不进入）。
+          ...(legacy.derivationRefs !== undefined && hasAnyDerivationRef(legacy.derivationRefs)
+            ? { derivation: legacy.derivationRefs }
+            : {}),
+        });
+        const result = this.db
+          .prepare(
+            `UPDATE context_units SET
+               unit_schema_id = ?, source_ref = ?, content_schema_id = ?,
+               content_hash = ?, content_hash_basis = 'v3', schema_version = 'context-unit-v3'
+             WHERE context_lineage_id = ? AND context_seq = ?`,
+          )
+          .run(
+            "iris.context_unit.v3",
+            JSON.stringify(sourceRef),
+            legacy.semanticSchemaId,
+            contentHash,
+            legacy.contextLineageId,
+            legacy.contextSeq,
+          );
+        if (result.changes !== 1) {
+          throw new Error(
+            `context migrateLegacyRowsToV3: no row updated for ${legacy.contextUnitId} (fail closed)`,
+          );
+        }
+        migrated += 1;
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return migrated;
+  }
+
   /** R2-P3：该 session 的 context_units 行数（软/硬 cap 判定基准，含 excluded）。 */
   private countUnits(runtimeSessionId: string): number {
     const row = this.db
@@ -1501,6 +1905,57 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
           "is quarantined legacy data (content_hash_basis v1, pre-#113) and cannot be " +
           "read as current ContextMessageUnitV1 until an explicit verified migration/rebuild (fail closed)",
       );
+    }
+    // Feature 2（iris-context#2）：已迁移/新建的统一 ContextUnit v3 行。
+    // 旧路径经 v3 解析 + hash 校验（rowToContextUnit）后映射为
+    // ContextMessageUnitV1 兼容视图（迁移期间旧 consumer 仍可读；contentHash
+    // 为 v3 canonical basis）。无 runtime kind 的派生单元不能映射为 legacy
+    // runtime unit（fail-closed）。
+    if (this.isV3UnitRow(row)) {
+      if (row.payload_reclaimed_at !== null) {
+        throw new Error(
+          `context rowToUnit: v3 unit ${row.unit_id} has its canonical content reclaimed ` +
+            "(retired + GC) and cannot be read via the legacy ContextMessageUnitV1 view (fail closed)",
+        );
+      }
+      const parsed = this.rowToContextUnit(row);
+      const unit = parsed.unit;
+      const kind = parsed.state.kind;
+      if (kind === undefined) {
+        throw new Error(
+          `context rowToUnit: v3 unit ${row.unit_id} has no runtime kind and cannot be ` +
+            "mapped to the legacy ContextMessageUnitV1 view (fail closed)",
+        );
+      }
+      const legacy: ContextMessageUnitV1 = {
+        schemaId: "iris.context_message_unit.v1",
+        contextUnitId: unit.unitId,
+        contextLineageId: unit.contextId,
+        contextSeq: parsed.state.contextSeq,
+        runtimeEventId: row.runtime_event_id ?? row.source_event_id,
+        kind,
+        semanticSchemaId: unit.contentSchemaId,
+        semanticContent: unit.content,
+        historianDisposition: parsed.state.historianDisposition,
+        ...(unit.derivation !== undefined ? { derivationRefs: unit.derivation } : {}),
+        ...(row.raw_archive_ref !== null
+          ? { rawArchiveRef: parseStoredRawArchiveRef(row.raw_archive_ref) }
+          : {}),
+        contentHash: unit.contentHash,
+        lifecycleState: parsed.state.lifecycleState,
+        createdAt: parsed.state.createdAt,
+      };
+      return {
+        unit: legacy,
+        persistenceMeta: {
+          sourceEventId: row.source_event_id,
+          entryId: row.entry_id,
+          entrySeq: row.entry_seq,
+          companionEntryId: row.companion_entry_id,
+          pairKey: row.pair_key,
+          paired: row.paired === 1,
+        },
+      };
     }
     // Phase E（bust-driven retirement GC）：payload 已被冷迁移回收的行。语义
     // payload 已被清除（reclaimRetiredPayloads 只回收 lifecycle_state='retired'
@@ -1643,6 +2098,14 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
     } else if (input.basis === "v1") {
       // Legacy pre-#113 basis: content_hash covered the payload plane only.
       expectedHash = computeSemanticContentHash(input.semanticContent);
+    } else if (input.basis === "v3") {
+      // Feature 2：v3 行的 hash 校验只能经统一 ContextUnit 读路径
+      // （rowToContextUnit）—— 该路径包含 sourceRef/derivation 等 v3 basis
+      // 字段。经旧 verify 路径到达 v3 basis 是程序错误，fail-closed。
+      throw new Error(
+        `context rowToUnit: v3 unit ${input.unitId} must be verified via the unified ` +
+          "ContextUnit read path, not the legacy verify path (fail closed)",
+      );
     } else {
       throw new Error(
         `context rowToUnit: unknown content_hash_basis ${JSON.stringify(input.basis)} for unit ${input.unitId} (fail closed)`,
