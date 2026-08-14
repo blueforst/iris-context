@@ -13,8 +13,8 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "codegen": "node scripts/codegen.mjs",
-    "build": "tsc -p tsconfig.build.json && node scripts/copy-generated-assets.mjs",
-    "test": "tsx --test test/context-v2-contract.test.ts test/context-v2-fail-closed-boundary.test.ts test/context-durable-contract-authority.test.ts test/semantic-schema-validation.test.ts test/context-p5-projection.test.ts",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.mjs && node scripts/copy-generated-assets.mjs",
+    "test": "tsx --test test/context-v2-contract.test.ts test/context-v2-fail-closed-boundary.test.ts test/context-durable-contract-authority.test.ts test/semantic-schema-validation.test.ts test/context-p5-projection.test.ts test/context-input-port.test.ts test/context-ingest.test.ts test/context-store.test.ts test/context-bounded.test.ts test/context-fail-closed.test.ts test/context-bounded-archive.test.ts test/historical-lineage-recovery.test.ts test/context-migrations.test.ts",
     "test:contracts": "tsx --test test/context-v2-contract.test.ts test/context-v2-fail-closed-boundary.test.ts test/context-durable-contract-authority.test.ts test/semantic-schema-validation.test.ts test/context-p5-projection.test.ts",
     "check:codegen-freshness": "node scripts/check-codegen-freshness.mjs",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run codegen && npm run check:codegen-freshness && npm test && npm run build"

@@ -128,6 +128,15 @@ export function validateSemanticContentForSchema(
 export type UnitDispositionFilter = "include" | "all";
 
 export interface ContextIngestPort {
+  /**
+   * 中性 committed input 的原子 ingest：RuntimeEventInput →
+   * CanonicalRuntimeEventV1 + ContextMessageUnitV1（同一 SQLite 事务、同一
+   * contextSeq；exactly-once 按 idempotencyKey/eventId）。
+   */
+  ingestRuntimeEvent(input: import("./runtime-events.js").RuntimeEventInput): {
+    event: import("./runtime-events.js").CanonicalRuntimeEventV1;
+    unit: ContextMessageUnitV1 | null;
+  };
   ensureUnitsUpTo(runtimeSessionId: string, options?: { limit?: number }): ContextMessageUnitV1[];
   listUnits(
     runtimeSessionId: string,
