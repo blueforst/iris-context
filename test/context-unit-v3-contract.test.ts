@@ -294,6 +294,67 @@ test("F1: validateContextUnitStrict rejects malformed sourceRef", () => {
   assert.match(check.reason ?? "", /sourceRef/);
 });
 
+test("F1: validateContextUnitStrict rejects optional-field type violations in sourceRef (regression)", () => {
+  // DshMessageRefV1.eventSeq 必须是 integer >= 0（review finding 回归测试）。
+  const badEventSeq = makeUnit({
+    sourceRef: {
+      schemaId: DSH_MESSAGE_REF_V1_SCHEMA_ID,
+      sessionId: "s",
+      messageId: "m",
+      eventSeq: "not-a-number",
+    },
+  });
+  const r1 = validateContextUnitStrict(badEventSeq);
+  assert.ok(!r1.valid, "eventSeq as string must fail closed");
+  assert.match(r1.reason ?? "", /DshMessageRef/);
+
+  // 通用 sourceRef 携带未知键 → 生成式 schema（additionalProperties=false）拒绝。
+  const badKey = makeUnit({
+    sourceRef: {
+      schemaId: "iris.context_unit_source_ref.v1",
+      sourceSchemaId: "iris.system_prompt.v1",
+      sourceId: "sp-1",
+      sourceHash: "abc",
+      bogus: 42,
+    },
+  });
+  const r2 = validateContextUnitStrict(badKey);
+  assert.ok(!r2.valid, "sourceRef unknown key must fail closed");
+  assert.match(r2.reason ?? "", /ContextUnitSourceRefV1/);
+});
+
+test("F1: validateContextUnitStrict rejects derivation unknown keys (regression)", () => {
+  const badDerivation = makeUnit({
+    derivation: {
+      schemaId: "iris.semantic_derivation_refs.v1",
+      sourceContextMessageUnitIds: ["u-1"],
+      bogus: "x",
+    },
+  });
+  const check = validateContextUnitStrict(badDerivation);
+  assert.ok(!check.valid, "derivation unknown key must fail closed");
+  assert.match(check.reason ?? "", /derivation/);
+
+  // 合法 immutable basis 应通过（derivation 参与 contentHash，需重算）。
+  const goodUnit = makeUnit({
+    derivation: {
+      schemaId: "iris.semantic_derivation_refs.v1",
+      sourceContextMessageUnitIds: ["u-1"],
+    },
+  }) as ContextUnit;
+  const recomputedHash = computeContextUnitContentHash({
+    schemaId: CONTEXT_UNIT_V3_SCHEMA_ID,
+    unitId: goodUnit.unitId,
+    contextId: goodUnit.contextId,
+    contentSchemaId: goodUnit.contentSchemaId,
+    content: goodUnit.content,
+    sourceRef: goodUnit.sourceRef,
+    ...(goodUnit.derivation !== undefined ? { derivation: goodUnit.derivation } : {}),
+  });
+  const check2 = validateContextUnitStrict({ ...goodUnit, contentHash: recomputedHash });
+  assert.equal(check2.valid, true, check2.reason);
+});
+
 test("F1: validateContextUnitStrict enforces header/payload separation (no lifecycle/ordering fields)", () => {
   // Unit 本体禁止携带 lifecycle/ordering/表示状态（sidecar 之外）。
   const withSeq = makeUnit({ contextSeq: 7 } as unknown as Record<string, unknown>);

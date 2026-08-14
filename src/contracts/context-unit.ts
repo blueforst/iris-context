@@ -38,7 +38,12 @@ import {
   IRIS_CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID,
   IRIS_SEMANTIC_DERIVATION_REFS_V1_SCHEMA_ID,
 } from "../../contracts/generated/types.js";
-import { validateSemanticContent } from "../../contracts/generated/validators.js";
+import {
+  validate_iris_dsh_message_ref_v1,
+  validate_iris_context_unit_source_ref_v1,
+  validate_iris_semantic_derivation_refs_v1,
+  validateSemanticContent,
+} from "../../contracts/generated/validators.js";
 
 // ---------------------------------------------------------------------------
 // 领域类型名（无版本后缀）；wire 版本只由 schemaId 表达
@@ -118,13 +123,28 @@ export function isGenericSourceRef(value: unknown): value is ContextUnitSourceRe
 
 /**
  * 严格解析 `ContextUnitSourceRef`（fail-closed）：既不是 DshMessageRef 也不是
- * 通用 source ref → 抛错。这是 Unit 反序列化/校验的唯一合法入口。
+ * 通用 source ref → 抛错；形状合法但未通过生成式机器权威 schema 校验（未知键、
+ * 可选字段类型错误）→ 同样抛错。这是 Unit 反序列化/校验的唯一合法入口。
  */
 export function parseContextUnitSourceRef(value: unknown): ContextUnitSourceRef {
   if (isDshMessageRef(value)) {
+    const check = validate_iris_dsh_message_ref_v1(value);
+    if (!check.valid) {
+      throw new Error(
+        `context unit: DshMessageRef failed generated schema validation: ` +
+          `${check.errors?.join("; ") ?? "invalid"} (fail closed)`,
+      );
+    }
     return value;
   }
   if (isGenericSourceRef(value)) {
+    const check = validate_iris_context_unit_source_ref_v1(value);
+    if (!check.valid) {
+      throw new Error(
+        `context unit: ContextUnitSourceRefV1 failed generated schema validation: ` +
+          `${check.errors?.join("; ") ?? "invalid"} (fail closed)`,
+      );
+    }
     return value;
   }
   throw new Error(
@@ -314,33 +334,17 @@ export function validateContextUnitStrict(unit: unknown): {
   return { valid: true };
 }
 
-/** 派生 refs 的最小形状校验（immutable basis 才有资格进 Unit）。 */
+/** 派生 refs 的形状校验（immutable basis 才有资格进 Unit；fail-closed）。 */
 function validateDerivationRefs(value: unknown): { valid: boolean; reason?: string } {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return { valid: false, reason: "derivation must be an object" };
   }
-  const record = value as Record<string, unknown>;
-  if (record["schemaId"] !== IRIS_SEMANTIC_DERIVATION_REFS_V1_SCHEMA_ID) {
+  const check = validate_iris_semantic_derivation_refs_v1(value);
+  if (!check.valid) {
     return {
       valid: false,
-      reason: "derivation must carry iris.semantic_derivation_refs.v1 schemaId",
+      reason: check.errors?.join("; ") ?? "derivation failed generated schema validation",
     };
-  }
-  const stringList = (field: string): boolean => {
-    const val = record[field];
-    if (val === undefined) {
-      return true;
-    }
-    return Array.isArray(val) && val.every((member) => typeof member === "string");
-  };
-  for (const field of ["memoryRefs", "compartmentIds", "sourceContextMessageUnitIds"]) {
-    if (!stringList(field)) {
-      return { valid: false, reason: `derivation.${field} must be an array of strings` };
-    }
-  }
-  const work = record["workSnapshotVersion"];
-  if (work !== undefined && typeof work !== "number") {
-    return { valid: false, reason: "derivation.workSnapshotVersion must be a number" };
   }
   return { valid: true };
 }
