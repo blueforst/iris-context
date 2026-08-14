@@ -7,6 +7,19 @@
   "engines": {
     "node": "22.19.0"
   },
+  "main": "./dist/src/cordis/index.js",
+  "exports": {
+    ".": "./dist/src/cordis/index.js",
+    "./contracts": "./dist/src/contracts/context-v27.js",
+    "./contracts/historian": "./dist/src/contracts/historian.js",
+    "./contracts/runtime-events": "./dist/src/contracts/runtime-events.js",
+    "./contracts/memory-publication": "./dist/src/contracts/memory-publication.js",
+    "./contracts/context-retirement": "./dist/src/contracts/context-retirement.js",
+    "./generated": "./dist/contracts/generated/types.js",
+    "./generated/validators": "./dist/contracts/generated/validators.js",
+    "./cordis": "./dist/src/cordis/index.js",
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "format": "prettier --write .",
     "format:check": "prettier --check .",
