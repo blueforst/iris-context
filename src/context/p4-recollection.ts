@@ -171,7 +171,9 @@ export class P4RecollectionProjector {
       sourceRef: {
         schemaId: "iris.context_unit_source_ref.v1",
         sourceSchemaId: RECOLLECTION_SOURCE_SCHEMA_ID,
-        sourceId: snapshot.snapshotId,
+        // per-candidate immutable source identity：同一 snapshot 内的不同候选
+        // 必须解析为不同的 ContextUnit（unitId 由 contextId+sourceRef 派生）。
+        sourceId: `${snapshot.snapshotId}:${candidate.recollectionId}`,
         sourceRevision: snapshot.revision,
         sourceHash: snapshot.snapshotHash,
       },
@@ -197,7 +199,7 @@ export class P4RecollectionProjector {
       sourceRef: {
         schemaId: "iris.context_unit_source_ref.v1",
         sourceSchemaId: RECOLLECTION_SOURCE_SCHEMA_ID,
-        sourceId: snapshot.snapshotId,
+        sourceId: `${snapshot.snapshotId}:unavailable`,
         sourceRevision: snapshot.revision,
         sourceHash: snapshot.snapshotHash,
       },

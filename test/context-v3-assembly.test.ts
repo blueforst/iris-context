@@ -23,7 +23,10 @@ import {
   unitsInLayerV3,
   validateContextGenerationV3,
 } from "../src/context/generation-builder.js";
-import { DSH_MESSAGE_REF_V1_SCHEMA_ID } from "../src/contracts/context-unit.js";
+import {
+  computeContextUnitContentHash,
+  DSH_MESSAGE_REF_V1_SCHEMA_ID,
+} from "../src/contracts/context-unit.js";
 import { cleanupDir, makeLineageInput, tempDir } from "./helpers/context-fixtures.js";
 
 const LINEAGE = "lineage-v3-assembly";
@@ -183,4 +186,52 @@ test("F3: validation fails closed on tampered generation hash and unknown unit s
   } finally {
     cleanupDir(dir);
   }
+});
+
+test("F3: validation fails closed on duplicate unitIds (identity collapse)", () => {
+  const makeUnit = (content: string): import("../src/contracts/context-unit.js").ContextUnit => {
+    const sourceRef: import("../src/contracts/context-unit.js").ContextUnitSourceRef = {
+      schemaId: "iris.context_unit_source_ref.v1",
+      sourceSchemaId: "test",
+      sourceId: "s1",
+      sourceHash: "sh",
+    };
+    const payload = { role: "user", content };
+    return {
+      schemaId: "iris.context_unit.v3",
+      unitId: "dup-unit",
+      contextId: LINEAGE,
+      contentSchemaId: "iris.semantic.context_message.user.v1",
+      content: payload,
+      contentHash: computeContextUnitContentHash({
+        schemaId: "iris.context_unit.v3",
+        unitId: "dup-unit",
+        contextId: LINEAGE,
+        contentSchemaId: "iris.semantic.context_message.user.v1",
+        content: payload,
+        sourceRef,
+      }),
+      sourceRef,
+    };
+  };
+  // 同一 unitId（identity 塌缩）：每个单元单元级校验都通过（hash 正确），
+  // 但 build 边界（与 validateContextGenerationV3 一致）必须拒绝重复 unitId。
+  assert.throws(
+    () =>
+      buildContextGenerationV3(
+        {
+          contextLineageId: LINEAGE,
+          sourceSnapshotHash: "snap",
+          p0Units: [],
+          p1Units: [],
+          p2Units: [],
+          p3Units: [],
+          p4Units: [],
+          p5Units: [makeUnit("x"), makeUnit("y")],
+        },
+        "gen-dup",
+        "2026-08-01T00:00:00.000Z",
+      ),
+    /duplicate unitId/,
+  );
 });

@@ -137,7 +137,8 @@ test("P4: ready backend → candidates projected with validation/sanitize/dedupe
     candidates.map((u) => (u.content as Record<string, unknown>)["recollectionId"]),
     ["r-a", "r-c", "r-b"],
   );
-  // sourceRef 绑定 snapshot identity/revision/hash
+  // sourceRef 绑定 snapshot identity/revision/hash（sourceId 含 per-candidate
+  // 身份：同一 snapshot 的不同候选必须解析为不同 ContextUnit）。
   for (const candidate of candidates) {
     assert.ok(isGenericSourceRef(candidate.sourceRef), "P4 sourceRef is a generic source ref");
     const ref = candidate.sourceRef as Extract<
@@ -145,7 +146,10 @@ test("P4: ready backend → candidates projected with validation/sanitize/dedupe
       { schemaId: "iris.context_unit_source_ref.v1" }
     >;
     assert.equal(ref.sourceSchemaId, "iris.recollection_snapshot.v1");
-    assert.equal(ref.sourceId, "snapshot-1");
+    const recollectionId = (candidate.content as Record<string, unknown>)[
+      "recollectionId"
+    ] as string;
+    assert.equal(ref.sourceId, `snapshot-1:${recollectionId}`, "per-candidate source identity");
     assert.equal(ref.sourceRevision, "rev-9");
     assert.equal(ref.sourceHash, snapshot.snapshotHash);
     assert.equal(candidate.contentSchemaId, "iris.semantic.recollection.v1");
@@ -155,6 +159,13 @@ test("P4: ready backend → candidates projected with validation/sanitize/dedupe
   assert.deepEqual(
     candidates.map((u) => materializeContextUnit(LINEAGE, u).unitId),
     again.map((u) => materializeContextUnit(LINEAGE, u).unitId),
+  );
+  // 回归（review finding）：同一 snapshot 的多个候选必须互不相同 unitId。
+  const unitIds = candidates.map((u) => materializeContextUnit(LINEAGE, u).unitId);
+  assert.equal(
+    new Set(unitIds).size,
+    unitIds.length,
+    "each recollection candidate resolves to a DISTINCT ContextUnit",
   );
   // snapshot hash 确定性
   const snapshot2 = await coordinator.recall(intent());

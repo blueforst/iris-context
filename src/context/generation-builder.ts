@@ -417,6 +417,19 @@ export function validateContextGenerationV3(generation: unknown): {
       return { valid: false, reason: `unit[${i}]: ${unitCheck.reason ?? ""}` };
     }
   }
+  // single ContextUnit 不变量：generation 内 unitId 必须唯一（同一 source 只
+  // 能解析为一个 ContextUnit；重复 unitId = identity 塌缩 → fail-closed）。
+  const seenUnitIds = new Set<string>();
+  for (const unit of unitList as Array<{ unitId?: unknown }>) {
+    const unitId = unit.unitId;
+    if (typeof unitId !== "string" || unitId.length === 0) {
+      return { valid: false, reason: "unit carries a missing unitId" };
+    }
+    if (seenUnitIds.has(unitId)) {
+      return { valid: false, reason: `duplicate unitId in generation: ${unitId}` };
+    }
+    seenUnitIds.add(unitId);
+  }
   const typed = generation as ContextGenerationV3;
   const expectedGenHash = computeContextGenerationHashV3({
     schemaId: CONTEXT_GENERATION_V3_SCHEMA_ID,
