@@ -17,6 +17,9 @@ import {
   toEvidenceBasisRef,
   unitViewOf,
 } from "../src/historian/anti-echo.js";
+import { buildCompartment } from "../src/historian/historian-compartment.js";
+import { authorMemoryObservations } from "../src/historian/historian-publication.js";
+import type { HistorianBatchV1 } from "../src/contracts/historian.js";
 import {
   STUB_LINEAGE_ID,
   emptyDerivationRefs,
@@ -176,4 +179,65 @@ test("anti-echo: reference_only/exclude never enter the basis even with refs", (
   const classified = classifyEvidenceBasis(STUB_LINEAGE_ID, views);
   assert.equal(classified.evidenceBasis.length, 0, "no include unit → no basis");
   assert.equal(classified.derivedOnly, true);
+});
+
+test("v29: exclude units never enter Compartment content or observation statement (body-level filter)", () => {
+  // 批：user(include) + exclude 单元（如 telemetry）+ assistant(include)。
+  const excludedText = "TOP SECRET TELEMETRY PAYLOAD";
+  const units = [
+    userUnit(1, { semanticContent: { role: "user", content: "hello" } }),
+    fixtureUnit({
+      contextSeq: 2,
+      kind: "operational",
+      semanticSchemaId: "iris.semantic.context_message.operational.v1",
+      semanticContent: { role: "operational", content: excludedText },
+      historianDisposition: "exclude",
+    }),
+    assistantUnit(3, { semanticContent: { role: "assistant", content: "done" } }),
+  ];
+
+  // Compartment content must not contain the excluded unit's text.
+  const compartment = buildCompartment({
+    lineageId: STUB_LINEAGE_ID,
+    runtimeSessionId: "session-1",
+    compartmentSequence: 1,
+    units,
+  });
+  assert.ok(compartment !== null);
+  assert.ok(
+    !compartment.compartment.content.includes(excludedText),
+    "exclude text not in Compartment",
+  );
+  assert.ok(compartment.compartment.content.includes("hello"));
+  assert.ok(compartment.compartment.content.includes("done"));
+
+  // Observation statement must not contain the excluded unit's text.
+  const batch: HistorianBatchV1 = {
+    schemaId: "iris.historian_batch.v1",
+    batchId: "batch-exclude-test",
+    claimId: "claim-exclude-test",
+    contextLineageId: STUB_LINEAGE_ID,
+    fromContextSeq: 1,
+    throughContextSeq: 3,
+    rangeHash: "test-range-hash",
+    semanticSchemaIds: ["iris.semantic.context_message.user.v1"],
+    units,
+    estimatedTokens: 10,
+    frozenAt: "2026-08-05T00:00:00.000Z",
+    leaseExpiresAt: "2026-08-05T00:01:00.000Z",
+  };
+  const auth = authorMemoryObservations({
+    lineageId: STUB_LINEAGE_ID,
+    batch,
+    evidenceBasis: [],
+    derivedOnly: false,
+    now: "2026-08-05T00:00:00.000Z",
+  });
+  const allStatements = auth.observations
+    .map((obs) =>
+      typeof obs.statement === "string" ? obs.statement : JSON.stringify(obs.statement),
+    )
+    .join("\n");
+  assert.ok(!allStatements.includes(excludedText), "exclude text not in observation statements");
+  assert.ok(allStatements.includes("hello"));
 });

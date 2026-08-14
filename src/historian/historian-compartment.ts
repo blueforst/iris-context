@@ -174,11 +174,15 @@ function attributionRoleFor(unit: ContextMessageUnitV1): Attribution["role"] {
 /** 构建一个不可变 CompartmentRevision（纯；调用方在事务内 commit）。 */
 export function buildCompartment(input: BuildCompartmentInput): BuiltCompartment | null {
   const { lineageId, runtimeSessionId, compartmentSequence, units } = input;
-  if (units.length === 0) {
+  // v29：`exclude` 单元不进入模型分析正文（telemetry / RuntimeRecoveryNotice /
+  // 软 cap 超限单元等）。正文渲染与 attribution 只基于 include/reference_only；
+  // cursor 仍按全窗口推进（Historian runner 独立处理）。
+  const analysisUnits = units.filter((unit) => unit.historianDisposition !== "exclude");
+  if (analysisUnits.length === 0) {
     return null;
   }
-  const first = units[0];
-  const last = units[units.length - 1];
+  const first = analysisUnits[0];
+  const last = analysisUnits[analysisUnits.length - 1];
   if (first === undefined || last === undefined) {
     return null;
   }
@@ -187,7 +191,7 @@ export function buildCompartment(input: BuildCompartmentInput): BuiltCompartment
 
   const contentParts: string[] = [];
   const attributions = new Map<Attribution["role"], string[]>();
-  for (const unit of units) {
+  for (const unit of analysisUnits) {
     const text = renderUnitProviderText(unit);
     if (text.length > 0) {
       contentParts.push(text);
@@ -202,7 +206,7 @@ export function buildCompartment(input: BuildCompartmentInput): BuiltCompartment
     lineageId,
     fromContextSeq: startContextSeq,
     throughContextSeq: endContextSeq,
-    units,
+    units: analysisUnits,
   });
 
   // OpenCode p1..p4 taxonomy（确定性提取，无 LLM）。
@@ -210,8 +214,8 @@ export function buildCompartment(input: BuildCompartmentInput): BuiltCompartment
   const p2 = summarizeSecondary(content);
   const p3 = extractDecisions(content);
   const p4 = extractOpenThreads(content);
-  const importance = deriveImportance(content, units);
-  const episodeType = deriveEpisodeType(units);
+  const importance = deriveImportance(content, analysisUnits);
+  const episodeType = deriveEpisodeType(analysisUnits);
 
   const compartmentId = `compartment-${lineageId}-${compartmentSequence}`;
   const attributionManifestId = `am-${lineageId}-${compartmentSequence}`;

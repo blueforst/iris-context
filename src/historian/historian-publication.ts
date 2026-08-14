@@ -212,6 +212,11 @@ export function authorMemoryObservations(input: AuthorObservationsInput): Author
     meta: ReturnType<typeof unitSemanticMetadata>;
   }> = [];
   for (const unit of batch.units) {
+    // v29：`exclude` 单元不进入模型分析正文，observation statement 只基于
+    // include/reference_only 单元（cursor 仍按全窗口推进）。
+    if (unit.historianDisposition === "exclude") {
+      continue;
+    }
     const meta = unitSemanticMetadata(unit);
     const lastPartition = partitions[partitions.length - 1];
     if (lastPartition?.meta.semanticKind === meta.semanticKind) {

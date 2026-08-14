@@ -32,6 +32,13 @@ import { createCompactionAuthorizer, type CompactionAuthorization } from "./comp
 
 const MAX_FREEZE_HEAD_CONTEXT_SEQ = Number.MAX_SAFE_INTEGER;
 
+/**
+ * 已知可接受的 Memory Service contract 版本（绑定 receipt 校验）。
+ * 当前消费 `iris-memory-contracts@0.3.0`（pin b55b5e1c…，producer
+ * blueforst/iris_memory）。新增可接受版本必须显式加入（fail-closed）。
+ */
+const KNOWN_MEMORY_CONTRACT_VERSIONS: readonly string[] = ["0.3.0"];
+
 /** Memory Service 投递端口（provider-neutral；由 Memory Service Adapter 实现）。 */
 export interface MemoryDeliveryClientPort {
   deliverPublication(
@@ -269,15 +276,23 @@ export class HistorianManager {
       return "deferred";
     }
     if (outcome.ok) {
-      // 只有绑定到 EXACT Publication 的 receipt 才授权 delivered。
+      // delivered 只能由"验证过绑定身份"的 Memory receipt 授权（Notion v29：
+      // 跨边界一致性以 publicationId + outputHash + Router durable receipt 验证；
+      // 本实现绑定 publicationId + canonicalPayloadHash + contractVersion）。
       const envelopePublicationId = (publication as { publicationId?: unknown }).publicationId;
       const receiptPublicationId =
         outcome.receipt.duplicateReplay === true
           ? (outcome.receipt.originalPublicationId ?? outcome.receipt.publicationId)
           : outcome.receipt.publicationId;
+      const payloadHashMatches = outcome.receipt.canonicalPayloadHash === row.payloadHash;
+      const contractVersionKnown =
+        outcome.receipt.contractVersion !== undefined &&
+        KNOWN_MEMORY_CONTRACT_VERSIONS.includes(outcome.receipt.contractVersion);
       if (
         typeof envelopePublicationId !== "string" ||
-        receiptPublicationId !== envelopePublicationId
+        receiptPublicationId !== envelopePublicationId ||
+        !payloadHashMatches ||
+        !contractVersionKnown
       ) {
         this.service.markFailed({
           publicationId: row.publicationId,

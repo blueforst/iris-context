@@ -211,7 +211,7 @@ test("B5: outbox claim lease + delivered only with a bound receipt", () => {
         receiptId: "r-1",
         publicationId,
         canonicalPayloadHash: (claimed[0]?.payloadHash ?? "") as string,
-        contractVersion: "0.1.0",
+        contractVersion: "0.3.0",
       },
     });
     const outboxRow = store

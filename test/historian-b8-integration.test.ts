@@ -76,7 +76,7 @@ test("B8: full pipeline — trigger → commit → receipt → ACK → outbox de
             receiptId: "mem-r1",
             publicationId: envelope.publicationId ?? "",
             canonicalPayloadHash: envelope.outputHash ?? "",
-            contractVersion: "0.1.0",
+            contractVersion: "0.3.0",
           };
           return { ok: true, receipt };
         },
@@ -204,6 +204,139 @@ test("B8: recover() replays un-acked committed receipts (no duplicate publicatio
       );
       assert.equal(manager2.health().publicationCount, 1, "no duplicate publication on replay");
       manager2.close();
+      manager.close();
+    } finally {
+      historianStore.close();
+      contextStore.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("B8: outbox delivery rejects a receipt with WRONG canonicalPayloadHash (binding fail-closed)", async () => {
+  const dir = tempDir();
+  try {
+    const { store: contextStore, ingest } = openContext(dir);
+    const historianStore = HistorianStore.open({
+      databasePath: join(dir, "historian.db"),
+      nowMs: () => 1_000,
+    });
+    try {
+      ingest.ingestRuntimeEvent(
+        userInput({ eventId: "e1", content: "hello", sessionId: "session-1" }),
+      );
+      ingest.ingestRuntimeEvent(
+        assistantInput({ eventId: "e2", content: "hi", sessionId: "session-1" }),
+      );
+      const historyPort = createContextHistoryReadPort(contextStore);
+      const retirementPort = createContextRetirementPort(contextStore);
+
+      // Fake Memory client returns a receipt with the CORRECT publicationId but
+      // a WRONG canonicalPayloadHash — must NOT authorize delivered.
+      const memoryClient: MemoryDeliveryClientPort = {
+        async deliverPublication(payload: unknown) {
+          const envelope = payload as { publicationId?: string; outputHash?: string };
+          return {
+            ok: true,
+            receipt: {
+              receiptId: "mem-wrong-hash",
+              publicationId: envelope.publicationId ?? "",
+              canonicalPayloadHash:
+                "0000000000000000000000000000000000000000000000000000000000000000",
+              contractVersion: "0.3.0",
+            } satisfies MemoryDeliveryReceipt,
+          };
+        },
+      };
+
+      const manager = new HistorianManager({
+        store: historianStore,
+        historyPort,
+        retirementPort,
+        memoryClient,
+        maxQueuedJobs: 8,
+        nowMs: () => 1_000,
+      });
+      assert.equal(await manager.triggerIncremental("session-1"), true);
+      await manager.pumpOnce();
+
+      const metrics = await manager.drainOutbox(10);
+      assert.equal(metrics.rejected, 1, "wrong-hash receipt must be rejected");
+      assert.equal(metrics.accepted, 0, "nothing accepted");
+
+      // The publication must NOT be marked delivered (binding not authorized).
+      const outboxRow = historianStore
+        .raw()
+        .prepare("SELECT payload_json FROM publication_outbox LIMIT 1")
+        .get() as unknown as { payload_json: string } | undefined;
+      assert.ok(outboxRow !== undefined);
+      const envelope = JSON.parse(outboxRow.payload_json) as { publicationId?: string };
+      const pub = historianStore
+        .raw()
+        .prepare("SELECT state, delivered_at FROM publications WHERE publication_id = ?")
+        .get(envelope.publicationId ?? "") as
+        { state: string; delivered_at: string | null } | undefined;
+      assert.ok(pub !== undefined);
+      assert.notEqual(pub.state, "delivered");
+      assert.equal(pub.delivered_at, null);
+      manager.close();
+    } finally {
+      historianStore.close();
+      contextStore.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("B8: outbox delivery rejects a receipt with UNKNOWN contractVersion (binding fail-closed)", async () => {
+  const dir = tempDir();
+  try {
+    const { store: contextStore, ingest } = openContext(dir);
+    const historianStore = HistorianStore.open({
+      databasePath: join(dir, "historian.db"),
+      nowMs: () => 1_000,
+    });
+    try {
+      ingest.ingestRuntimeEvent(
+        userInput({ eventId: "e1", content: "hello", sessionId: "session-1" }),
+      );
+      ingest.ingestRuntimeEvent(
+        assistantInput({ eventId: "e2", content: "hi", sessionId: "session-1" }),
+      );
+      const historyPort = createContextHistoryReadPort(contextStore);
+      const retirementPort = createContextRetirementPort(contextStore);
+
+      const memoryClient: MemoryDeliveryClientPort = {
+        async deliverPublication(payload: unknown) {
+          const envelope = payload as { publicationId?: string; outputHash?: string };
+          return {
+            ok: true,
+            receipt: {
+              receiptId: "mem-bad-version",
+              publicationId: envelope.publicationId ?? "",
+              canonicalPayloadHash: envelope.outputHash ?? "",
+              contractVersion: "9.9.9",
+            } satisfies MemoryDeliveryReceipt,
+          };
+        },
+      };
+
+      const manager = new HistorianManager({
+        store: historianStore,
+        historyPort,
+        retirementPort,
+        memoryClient,
+        maxQueuedJobs: 8,
+        nowMs: () => 1_000,
+      });
+      assert.equal(await manager.triggerIncremental("session-1"), true);
+      await manager.pumpOnce();
+
+      const metrics = await manager.drainOutbox(10);
+      assert.equal(metrics.rejected, 1, "unknown contractVersion receipt must be rejected");
+      assert.equal(metrics.accepted, 0);
       manager.close();
     } finally {
       historianStore.close();
