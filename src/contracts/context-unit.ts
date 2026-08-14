@@ -184,6 +184,11 @@ export const CONTEXT_UNIT_CONTENT_HASH_BASIS_VERSION = "iris.context_unit.conten
  * contextId/contentSchemaId/content/sourceRef/derivation?）的 canonical hash。
  * 同一 Unit 内容必须产生同一 hash（跨 crash/restart 可重放）；任何 hash-basis
  * 字段变化都会产生不同 hash（tamper 检测 basis）。
+ *
+ * DshMessageRef 的 `eventSeq` 是 Session-local archive locator（不是语义
+ * identity/content），因此**不进入** contentHash basis —— 同一条消息无论
+ * eventSeq 定位值如何都解析为同一 canonical content（且与 unitId 派生一致：
+ * unitId 也不含 eventSeq）。
  */
 export function computeContextUnitContentHash(input: {
   schemaId: string;
@@ -194,6 +199,15 @@ export function computeContextUnitContentHash(input: {
   sourceRef: ContextUnitSourceRef;
   derivation?: SemanticDerivationRefsV1;
 }): string {
+  const normalizedSourceRef: ContextUnitSourceRef = isDshMessageRef(input.sourceRef)
+    ? (({ sessionId, messageId, sourceHash, schemaId }) =>
+        ({
+          schemaId,
+          sessionId,
+          messageId,
+          ...(sourceHash !== undefined ? { sourceHash } : {}),
+        }) as DshMessageRefV1)(input.sourceRef)
+    : input.sourceRef;
   return sha256(
     canonicalJson({
       basis: CONTEXT_UNIT_CONTENT_HASH_BASIS_VERSION,
@@ -202,7 +216,7 @@ export function computeContextUnitContentHash(input: {
       contextId: input.contextId,
       contentSchemaId: input.contentSchemaId,
       content: input.content,
-      sourceRef: input.sourceRef as unknown as JsonValue,
+      sourceRef: normalizedSourceRef as unknown as JsonValue,
       ...(input.derivation !== undefined
         ? { derivation: input.derivation as unknown as JsonValue }
         : {}),

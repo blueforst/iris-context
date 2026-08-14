@@ -562,7 +562,13 @@ const addFormats = require("ajv-formats") as typeof import("ajv-formats").defaul
       contextId: v3Unit.contextId,
       contentSchemaId: v3Unit.contentSchemaId,
       content: v3Unit.content,
-      sourceRef: v3Unit.sourceRef,
+      // eventSeq 是 archive-local locator，不进入 contentHash basis（与领域
+      // computeContextUnitContentHash 一致）。
+      sourceRef: {
+        schemaId: "iris.dsh_message_ref.v1",
+        sessionId: "fixture-session-v3",
+        messageId: "fixture-message-v3-0001",
+      },
     }),
   );
 

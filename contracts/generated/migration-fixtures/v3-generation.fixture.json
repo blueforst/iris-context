@@ -6,7 +6,7 @@
     "contextLineageId": "fixture-lineage-v3",
     "sourceSnapshotHash": "fixture-source-snapshot-v3",
     "layerEnds": [0, 0, 0, 0, 0, 1],
-    "contextGenerationHash": "4824b92180d68f839dcd3dc3d2773471de7de6b6a6dc09b8bb6d2f28ba62d94d",
+    "contextGenerationHash": "f8888393399dbf95fa98404f4c5c9b7b814bc5033458a118c2a23c267e4ad77c",
     "createdAt": "2026-08-01T00:00:00Z"
   },
   "units": [
@@ -25,7 +25,7 @@
         "messageId": "fixture-message-v3-0001",
         "eventSeq": 3
       },
-      "contentHash": "341d0994b9da1bee761385c7032edaba6adf12d9725ba177d5a7b5f0b8aa0464"
+      "contentHash": "36b329dd27b391bea4277e3522679293fa1161d1fbd0d2205a13f9b5053772f6"
     }
   ]
 }

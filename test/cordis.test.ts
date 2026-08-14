@@ -148,6 +148,58 @@ function trackingContributor(sourceId: string, text: string) {
 // 1) 服务注册与类型化
 // ---------------------------------------------------------------------------
 
+test("cordis: irisContext.admitRuntimeMessage 是 DSH 正常 ingress（DshMessageRef → ContextUnit）", async () => {
+  const dir = tempDir();
+  try {
+    const ctx = new Context();
+    const fiber = await mountFull(ctx, { dataRoot: dir });
+    try {
+      const lineageId = ctx.irisContext.lineageId;
+      ctx.irisContext.createLineage(makeLineageInput(SESSION, lineageId));
+      const unit = ctx.irisContext.admitRuntimeMessage({
+        sessionId: SESSION,
+        messageId: "dsh-msg-1",
+        eventSeq: 7,
+        contentSchemaId: "iris.semantic.context_message.user.v1",
+        content: { role: "user", content: "hello via DSH" },
+      });
+      assert.equal(unit.schemaId, "iris.context_unit.v3");
+      const ref = unit.sourceRef as import("../src/contracts/context-unit.js").DshMessageRef;
+      assert.equal(ref.schemaId, "iris.dsh_message_ref.v1");
+      assert.equal(ref.sessionId, SESSION);
+      assert.equal(ref.messageId, "dsh-msg-1");
+      assert.equal(ref.eventSeq, 7);
+      // 读回（统一 ContextUnit 路径）。
+      const read = ctx.irisContext.getStore().getContextUnitByUnitId(lineageId, unit.unitId);
+      assert.deepEqual(read?.content, { role: "user", content: "hello via DSH" });
+      // 幂等。
+      const again = ctx.irisContext.admitRuntimeMessage({
+        sessionId: SESSION,
+        messageId: "dsh-msg-1",
+        contentSchemaId: "iris.semantic.context_message.user.v1",
+        content: { role: "user", content: "hello via DSH" },
+      });
+      assert.equal(again.unitId, unit.unitId);
+      // anti-echo：plugin 来源 → fail-closed。
+      assert.throws(
+        () =>
+          ctx.irisContext.admitRuntimeMessage({
+            sessionId: SESSION,
+            messageId: "injected-1",
+            contentSchemaId: "iris.semantic.context_message.user.v1",
+            content: { role: "user", content: "AGENTS.md" },
+            runtimeSourceKind: "plugin",
+          }),
+        /cannot be admitted as a real experience/,
+      );
+    } finally {
+      await fiber.dispose();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 test("cordis: 三个 typed services 注册到 ctx（typecheck 证明 declare module 生效）", async () => {
   const dir = tempDir();
   try {

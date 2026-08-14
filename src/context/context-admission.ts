@@ -28,6 +28,10 @@ import {
   type ContextUnitSourceRef,
   type DshMessageRef,
 } from "../contracts/context-unit.js";
+import { KIND_TO_SEMANTIC_SCHEMA_ID } from "../contracts/context-v27.js";
+
+/** runtime-origin user 消息的语义 schema（anti-echo 判别目标）。 */
+const USER_MESSAGE_SEMANTIC_SCHEMA_ID = KIND_TO_SEMANTIC_SCHEMA_ID.user;
 import { validateSemanticContent } from "../../contracts/generated/validators.js";
 import type { JsonValue, SemanticDerivationRefsV1 } from "../contracts/context-v27.js";
 import type { ContextStore } from "./context-store.js";
@@ -52,6 +56,19 @@ export interface AdmitSourceInput {
    * （dsh:<sessionId>:<messageId> 或 <sourceSchemaId>:<sourceId>）。
    */
   sourceAnchor?: string;
+  /**
+   * runtime-origin user 消息的 source 判别（DSH MessageSource.kind 的中性投影；
+   * anti-echo 纵深防御，iris-context#2 §4）。
+   *
+   * DSH `user/message` 的 `source.kind` 只有 `user`（真人直接输入）才是真实
+   * experience；plugin 注入的 context（instructions/catalog/snapshot/notice/
+   * relay/recall）、goal continuation、synthetic recall 等**不得**成为真实
+   * experience Unit。runtime adapter 应先过滤；本 admission 对显式声明为非
+   * user 来源的 user-role 内容 fail-closed 拒绝（防 adapter 漏判/误传）。
+   *
+   * 缺省 = 未声明（允许；adapter 负责过滤 —— 兼容既有调用方）。
+   */
+  runtimeSourceKind?: "user" | "plugin" | "model" | "tool" | "other";
 }
 
 /**
@@ -104,6 +121,22 @@ export function materializeContextUnit(contextId: string, input: AdmitSourceInpu
     throw new Error(
       `context admission: content for schema ${input.contentSchemaId} failed validation: ` +
         `${semanticCheck.errors?.join("; ") ?? "invalid"} (fail closed)`,
+    );
+  }
+  // anti-echo 纵深防御（iris-context#2 §4）：runtime-origin user 消息若被显式
+  // 声明为非 "user" 来源（plugin 注入 context / recall / notice / relay /
+  // instructions / goal continuation 等合成内容）→ fail-closed 拒绝，绝不把
+  // 合成上下文当成真人 experience。assistant/tool_result 的来源天然是
+  // model/tool，不受此限制；未声明来源由 adapter 负责过滤。
+  if (
+    input.contentSchemaId === USER_MESSAGE_SEMANTIC_SCHEMA_ID &&
+    input.runtimeSourceKind !== undefined &&
+    input.runtimeSourceKind !== "user"
+  ) {
+    throw new Error(
+      `context admission: runtime user-role message with source kind ` +
+        `${JSON.stringify(input.runtimeSourceKind)} cannot be admitted as a real experience ` +
+        "(plugin-injected context / recall / notice must not become a ContextUnit; fail closed)",
     );
   }
   const unitId = deriveContextUnitId(contextId, input.sourceRef);
