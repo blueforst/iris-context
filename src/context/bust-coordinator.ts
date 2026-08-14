@@ -175,7 +175,8 @@ function sha256(text: string): string {
 
 export class BustCoordinator {
   private readonly contextLineageId: string;
-  private readonly contributors: readonly ContextSourceContributor[];
+  /** P0–P2 contributors（Phase F：可逆注册，registerContributor 增删）。 */
+  private contributors: readonly ContextSourceContributor[];
   private readonly committedCompartments: CommittedCompartmentReadPort;
   private readonly memoryCoordinator: MemoryIntegrationCoordinator;
   private readonly contextStore: ContextStore;
@@ -304,6 +305,27 @@ export class BustCoordinator {
       });
     }
     return invalidated;
+  }
+
+  /**
+   * Phase F（Cordis）：可逆的 contributor 注册 seam。contributor 只提供
+   * frozen snapshot / identity / hash 与 invalidation；不允许直接
+   * push/splice generation。返回 disposer —— 调用后从本 coordinator 移除
+   * 该 contributor（进程内注册，绝不触碰 durable 状态）。
+   *
+   * Fail-closed：同一 sourceId 二次注册抛错（authority 冲突不得
+   * "最后注册者获胜"）。
+   */
+  registerContributor(contributor: ContextSourceContributor): () => void {
+    if (this.contributors.some((existing) => existing.sourceId === contributor.sourceId)) {
+      throw new Error(
+        `bust coordinator: contributor ${contributor.sourceId} is already registered (fail closed)`,
+      );
+    }
+    this.contributors = [...this.contributors, contributor];
+    return () => {
+      this.contributors = this.contributors.filter((existing) => existing !== contributor);
+    };
   }
 
   /**

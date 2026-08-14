@@ -120,6 +120,18 @@ export class HistorianSemanticAdapterRegistry {
     }
   }
 
+  /**
+   * Phase F（Cordis）：可逆注销。只移除 `adapter` 自己拥有的 schemaId 条目
+   * （其他 adapter 的条目不动）。注册表纯内存，注销不触碰 durable 状态。
+   */
+  removeAdapter(adapter: SemanticAdapter): void {
+    for (const schemaId of adapter.schemaIds) {
+      if (this.adapters.get(schemaId) === adapter) {
+        this.adapters.delete(schemaId);
+      }
+    }
+  }
+
   /** 查询 schemaId 的 owner adapter（无 → undefined）。 */
   getAdapter(schemaId: string): SemanticAdapter | undefined {
     return this.adapters.get(schemaId);
