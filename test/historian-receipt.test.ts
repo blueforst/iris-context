@@ -1,13 +1,15 @@
 /**
- * Historian receipt + Context ACK + retirement port 测试（Phase D）。
+ * Historian receipt + Context ACK + retirement port 测试（Phase D + E）。
  *
  * 覆盖：
  *  - HistorianCommitReceiptV1 权威形状；
  *  - ContextRetirementPortV1.acknowledgeHistorianCommit 幂等 ACK →
  *    covered units 标记 compartmentalized_pending_bust；
  *  - 未覆盖单元不受影响；越权范围不标记；
- *  - markRepresentedAndRetired / reclaimRetiredPayloads 为 Phase E 占位
- *    （fail-closed 抛错，禁止绕过 BUST 推进 retirement）。
+ *  - markRepresentedAndRetired 只能在 canonical BUST 原子发布事务内调用
+ *    （事务外调用 fail-closed，watermark 不推进）；
+ *  - reclaimRetiredPayloads 只回收 retired 单元的 payload（无 retired 单元
+ *    时回收 0 行）。
  */
 import test from "node:test";
 
@@ -16,7 +18,6 @@ import assert from "node:assert/strict";
 import { ContextStore } from "../src/context/context-store.js";
 import { ContextIngest } from "../src/context/context-ingest.js";
 import { createContextRetirementPort } from "../src/context/context-retirement-port.js";
-import { RetirementNotImplementedError } from "../src/contracts/context-retirement.js";
 import {
   newClaimId,
   newReceiptId,
@@ -126,24 +127,34 @@ test("receipt: ACK never advances represented/retired watermarks (only Phase E B
   }
 });
 
-test("receipt: Phase E retirement operations fail closed (not implemented)", () => {
+test("receipt: Phase E retirement requires the BUST atomic publish transaction", () => {
   const dir = tempDir();
   try {
     const { store, ingest } = openContext(dir);
     try {
       ingest.ingestRuntimeEvent(userInput({ eventId: "e1", content: "a", sessionId: "session-1" }));
       const port = createContextRetirementPort(store);
+      // 事务外调用 markRepresentedAndRetired → fail-closed（绝不允许绕过 BUST
+      // 的逻辑退休），watermark 不推进。
       assert.throws(() => {
         port.markRepresentedAndRetired({
           contextLineageId: LINEAGE,
-          throughContextSeq: 1,
-          receipt: receipt("batch-1", 1, 1),
+          contextGenerationId: "gen-outside",
+          contextGenerationHash: "hash-outside",
+          representedThroughContextSeq: 1,
+          retiredThroughContextSeq: 1,
         });
-      }, RetirementNotImplementedError);
-      assert.throws(() => {
-        port.reclaimRetiredPayloads({ contextLineageId: LINEAGE, throughContextSeq: 1 });
-      }, RetirementNotImplementedError);
+      }, /BUST atomic publish transaction|markRepresentedAndRetired/);
+      const lineage = store.getLineageByLineageId(LINEAGE);
+      assert.equal(lineage?.representedThroughContextSeq, 0, "watermark untouched");
+      assert.equal(lineage?.retiredThroughContextSeq, 0, "retired watermark untouched");
+      assert.equal(lineage?.lastBustGenerationId, null, "no generation binding outside BUST");
       // 单元保持原状态（未推进 retirement）。
+      assert.equal(ingest.listUnits("session-1")[0]?.lifecycleState, "committed");
+      // reclaim 只回收 retired 单元：无 retired 单元 → 0 行。
+      const gc = port.reclaimRetiredPayloads({ maxRows: 100, maxBytes: 1_000_000 });
+      assert.equal(gc.reclaimedRows, 0);
+      assert.equal(gc.reclaimedBytes, 0);
       assert.equal(ingest.listUnits("session-1")[0]?.lifecycleState, "committed");
     } finally {
       store.close();

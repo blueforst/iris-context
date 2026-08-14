@@ -541,6 +541,75 @@ export class HistorianStore {
       );
   }
 
+  /**
+   * Phase E（canonical BUST P3）：读取某 lineage 的全部 committed
+   * CompartmentRevision（values-only，不可变 VALUE；按 compartment_sequence
+   * 升序 —— P3 projection 的确定性顺序）。compartments 表只在 Historian
+   * commit 的原子事务内写入，因此所有行都是 committed；本方法不涉及任何
+   * Context 状态，只把 Historian 拥有的 VALUE 暴露给 BUST coordinator。
+   */
+  listCommittedCompartments(lineageId: string): HistoricalCompartment[] {
+    const rows = this.db
+      .prepare(
+        "SELECT compartment_id, runtime_session_id, lineage_id, compartment_sequence, " +
+          "start_context_seq, end_context_seq, source_range_hash, content, p1, p2, p3, p4, " +
+          "importance, episode_type, attribution_manifest_id, publication_sequence, created_at " +
+          "FROM compartments WHERE lineage_id = ? ORDER BY compartment_sequence ASC",
+      )
+      .all(lineageId) as unknown as Array<{
+      compartment_id: string;
+      runtime_session_id: string;
+      lineage_id: string;
+      compartment_sequence: number;
+      start_context_seq: number;
+      end_context_seq: number;
+      source_range_hash: string;
+      content: string;
+      p1: string;
+      p2: string;
+      p3: string;
+      p4: string;
+      importance: string;
+      episode_type: string;
+      attribution_manifest_id: string;
+      publication_sequence: number | null;
+      created_at: string;
+    }>;
+    return rows.map((row) => {
+      const importance = row.importance as HistoricalCompartment["importance"];
+      const episodeType = row.episode_type as HistoricalCompartment["episodeType"];
+      if (
+        !["low", "medium", "high", "critical"].includes(importance) ||
+        !["request_response", "tool_execution", "maintenance"].includes(episodeType)
+      ) {
+        throw new Error(
+          `historian store: compartment ${row.compartment_id} has unknown ` +
+            `importance/episodeType (${JSON.stringify(row.importance)}/${JSON.stringify(row.episode_type)}) (fail closed)`,
+        );
+      }
+      return {
+        compartmentId: row.compartment_id,
+        lineageId: row.lineage_id,
+        runtimeSessionId: row.runtime_session_id,
+        compartmentSequence: row.compartment_sequence,
+        startContextSeq: row.start_context_seq,
+        endContextSeq: row.end_context_seq,
+        sourceRangeHash: row.source_range_hash,
+        content: row.content,
+        p1: row.p1,
+        p2: row.p2,
+        p3: row.p3,
+        p4: row.p4,
+        importance,
+        episodeType,
+        attributionManifestId: row.attribution_manifest_id,
+        ...(row.publication_sequence !== null
+          ? { publicationSequence: row.publication_sequence }
+          : {}),
+      };
+    });
+  }
+
   /** Insert 一个 attribution manifest（须在事务内；roles 保持区分）。 */
   insertAttributionManifest(manifest: AttributionManifest): void {
     this.db

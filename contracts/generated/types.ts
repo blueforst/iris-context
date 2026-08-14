@@ -46,6 +46,8 @@ export const KNOWN_SEMANTIC_SCHEMA_IDS = [
   "iris.semantic.context_message.tool_result.v1",
   "iris.semantic.context_message.body_event.v1",
   "iris.semantic.context_message.operational.v1",
+  "iris.semantic.compartment.v1",
+  "iris.semantic.recollection.v1",
 ] as const;
 
 // --- RuntimeEventKind → semanticSchemaId mapping ---

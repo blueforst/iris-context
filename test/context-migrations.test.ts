@@ -29,7 +29,7 @@ function tablesOf(db: { prepare(sql: string): { all(): unknown[] } }): Set<strin
   return new Set(rows.map((row) => row.name));
 }
 
-test("migrations: empty DB applies 0001-0011 fully and idempotently", () => {
+test("migrations: empty DB applies 0001-0012 fully and idempotently", () => {
   const dir = tempDir();
   try {
     const dbPath = join(dir, "context.db");
@@ -47,6 +47,7 @@ test("migrations: empty DB applies 0001-0011 fully and idempotently", () => {
       "0009_legacy_fence",
       "0010_legacy_cleanup",
       "0011_runtime_events",
+      "0012_bust_retirement",
     ]);
     const reopened = migrateDatabase(dbPath, MIGRATIONS_DIR);
     assert.equal(reopened.appliedVersions.length, 0, "re-open applies nothing (idempotent)");
@@ -158,14 +159,46 @@ test("migrations: 0011 creates canonical runtime_events in context.db", () => {
   }
 });
 
-test("migrations: existing-data-root compat — a 0001-0009-era DB opens and applies 0010/0011", () => {
+test("migrations: 0012 adds retired watermark + generation binding + payload reclaimed marker", () => {
+  const dir = tempDir();
+  try {
+    const dbPath = join(dir, "context.db");
+    migrateDatabase(dbPath, MIGRATIONS_DIR);
+    const db = new DatabaseSync(dbPath);
+    const lineageColumns = db
+      .prepare("PRAGMA table_info(context_lineages)")
+      .all()
+      .map((row) => (row as { name: string }).name);
+    for (const col of [
+      "retired_through_context_seq",
+      "last_bust_generation_id",
+      "last_bust_generation_hash",
+      "last_bust_at",
+    ]) {
+      assert.ok(lineageColumns.includes(col), `context_lineages.${col} exists`);
+    }
+    const unitColumns = db
+      .prepare("PRAGMA table_info(context_units)")
+      .all()
+      .map((row) => (row as { name: string }).name);
+    assert.ok(
+      unitColumns.includes("payload_reclaimed_at"),
+      "context_units.payload_reclaimed_at exists",
+    );
+    db.close();
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("migrations: existing-data-root compat — a 0001-0009-era DB opens and applies 0010/0011/0012", () => {
   const dir = tempDir();
   try {
     const dbPath = join(dir, "context.db");
     // 模拟老库：只应用 0001-0009 的迁移文件（截断目录到 0009）。
     const legacyDir = mkdtempSync(join(dir, "legacy-migrations-"));
     for (const file of readdirSync(MIGRATIONS_DIR)) {
-      if (file.startsWith("0010") || file.startsWith("0011")) {
+      if (file.startsWith("0010") || file.startsWith("0011") || file.startsWith("0012")) {
         continue;
       }
       copyFileSync(join(MIGRATIONS_DIR, file), join(legacyDir, file));
@@ -176,9 +209,13 @@ test("migrations: existing-data-root compat — a 0001-0009-era DB opens and app
     assert.ok(tablesOf(db).has("context_lkg_slots"));
     assert.ok(tablesOf(db).has("context_deferred_operations"));
     db.close();
-    // 用完整迁移目录重开：0010/0011 追加应用。
+    // 用完整迁移目录重开：0010/0011/0012 追加应用。
     const result = migrateDatabase(dbPath, MIGRATIONS_DIR);
-    assert.deepEqual(result.appliedVersions, ["0010_legacy_cleanup", "0011_runtime_events"]);
+    assert.deepEqual(result.appliedVersions, [
+      "0010_legacy_cleanup",
+      "0011_runtime_events",
+      "0012_bust_retirement",
+    ]);
     db = new DatabaseSync(dbPath);
     assert.ok(!tablesOf(db).has("context_lkg_slots"));
     assert.ok(tablesOf(db).has("runtime_events"));
@@ -186,7 +223,7 @@ test("migrations: existing-data-root compat — a 0001-0009-era DB opens and app
     // ContextStore 能以新 schema 打开（full path）。
     const store = ContextStore.open(dbPath);
     store.close();
-    assert.equal(LATEST_MIGRATION_VERSION, "0011_runtime_events");
+    assert.equal(LATEST_MIGRATION_VERSION, "0012_bust_retirement");
   } finally {
     cleanupDir(dir);
   }

@@ -65,7 +65,15 @@
     {
       "schemaId": "iris.semantic.context_message.operational.v1",
       "file": "json-schemas/semantic-context_message-operational-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.semantic.compartment.v1",
+      "file": "json-schemas/semantic-compartment-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.semantic.recollection.v1",
+      "file": "json-schemas/semantic-recollection-v1.schema.json"
     }
   ],
-  "manifestSha256": "7cc6f56c2656c3dd30a54ca7ef01568e271e1d4f5594127dc6b0056929a471bb"
+  "manifestSha256": "539442d867315587811208af0808857a484a2ed004ec8def50393c2424b2b603"
 }

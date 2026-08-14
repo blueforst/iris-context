@@ -40,6 +40,10 @@ const semantic_context_message_body_event_v1 =
   require("./json-schemas/semantic-context_message-body_event-v1.schema.json") as AnySchema;
 const semantic_context_message_operational_v1 =
   require("./json-schemas/semantic-context_message-operational-v1.schema.json") as AnySchema;
+const semantic_compartment_v1 =
+  require("./json-schemas/semantic-compartment-v1.schema.json") as AnySchema;
+const semantic_recollection_v1 =
+  require("./json-schemas/semantic-recollection-v1.schema.json") as AnySchema;
 
 // strictTypes is disabled because generated JsonValue unions are legal JSON
 // Schema (union of primitive/array/object) that Ajv's strictTypes check
@@ -71,6 +75,8 @@ ajv.addSchema(
   semantic_context_message_operational_v1,
   "iris.semantic.context_message.operational.v1",
 );
+ajv.addSchema(semantic_compartment_v1, "iris.semantic.compartment.v1");
+ajv.addSchema(semantic_recollection_v1, "iris.semantic.recollection.v1");
 
 // --- Generated validator functions ---
 
@@ -719,6 +725,162 @@ export function validateSemantic_iris_semantic_context_message_operational_v1(da
   return { valid: true };
 }
 
+export function validateSemantic_iris_semantic_compartment_v1(data: unknown): {
+  valid: boolean;
+  errors?: string[];
+} {
+  if (data !== null && typeof data === "object" && !Array.isArray(data)) {
+    const obj = data as Record<string, unknown>;
+    if ("contextUnitId" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: contextUnitId"],
+      };
+    if ("contextLineageId" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: contextLineageId"],
+      };
+    if ("contextSeq" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: contextSeq"],
+      };
+    if ("runtimeEventId" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: runtimeEventId"],
+      };
+    if ("semanticSchemaId" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: semanticSchemaId"],
+      };
+    if ("contentHash" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: contentHash"],
+      };
+    if ("lifecycleState" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: lifecycleState"],
+      };
+    if ("historianDisposition" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: historianDisposition"],
+      };
+    if ("layer" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: layer"],
+      };
+    if ("pLevel" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: pLevel"],
+      };
+    if ("sourceKind" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: sourceKind"],
+      };
+  }
+  const validate = ajv.getSchema("iris.semantic.compartment.v1");
+  if (!validate)
+    return { valid: false, errors: ["schema not registered: iris.semantic.compartment.v1"] };
+  const valid = validate(data);
+  if (!valid) {
+    return {
+      valid: false,
+      errors:
+        (validate.errors as ErrorObject[] | undefined)?.map(
+          (e) => `${e.instancePath}: ${e.message ?? ""}`,
+        ) ?? [],
+    };
+  }
+  return { valid: true };
+}
+
+export function validateSemantic_iris_semantic_recollection_v1(data: unknown): {
+  valid: boolean;
+  errors?: string[];
+} {
+  if (data !== null && typeof data === "object" && !Array.isArray(data)) {
+    const obj = data as Record<string, unknown>;
+    if ("contextUnitId" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: contextUnitId"],
+      };
+    if ("contextLineageId" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: contextLineageId"],
+      };
+    if ("contextSeq" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: contextSeq"],
+      };
+    if ("runtimeEventId" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: runtimeEventId"],
+      };
+    if ("semanticSchemaId" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: semanticSchemaId"],
+      };
+    if ("contentHash" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: contentHash"],
+      };
+    if ("lifecycleState" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: lifecycleState"],
+      };
+    if ("historianDisposition" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: historianDisposition"],
+      };
+    if ("layer" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: layer"],
+      };
+    if ("pLevel" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: pLevel"],
+      };
+    if ("sourceKind" in obj)
+      return {
+        valid: false,
+        errors: ["forbidden control metadata field in semanticContent: sourceKind"],
+      };
+  }
+  const validate = ajv.getSchema("iris.semantic.recollection.v1");
+  if (!validate)
+    return { valid: false, errors: ["schema not registered: iris.semantic.recollection.v1"] };
+  const valid = validate(data);
+  if (!valid) {
+    return {
+      valid: false,
+      errors:
+        (validate.errors as ErrorObject[] | undefined)?.map(
+          (e) => `${e.instancePath}: ${e.message ?? ""}`,
+        ) ?? [],
+    };
+  }
+  return { valid: true };
+}
+
 // --- Semantic schema registry dispatch ---
 export function validateSemanticContent(
   semanticSchemaId: string,
@@ -737,6 +899,10 @@ export function validateSemanticContent(
       return validateSemantic_iris_semantic_context_message_body_event_v1(content);
     case "iris.semantic.context_message.operational.v1":
       return validateSemantic_iris_semantic_context_message_operational_v1(content);
+    case "iris.semantic.compartment.v1":
+      return validateSemantic_iris_semantic_compartment_v1(content);
+    case "iris.semantic.recollection.v1":
+      return validateSemantic_iris_semantic_recollection_v1(content);
     default:
       return { valid: false, errors: [`unknown semanticSchemaId: \`${semanticSchemaId}\``] };
   }

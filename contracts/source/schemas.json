@@ -969,6 +969,155 @@
         "required": ["type"],
         "additionalProperties": false
       }
+    },
+    "iris.semantic.compartment.v1": {
+      "forbiddenPayloadFields": [
+        "contextUnitId",
+        "contextLineageId",
+        "contextSeq",
+        "runtimeEventId",
+        "semanticSchemaId",
+        "contentHash",
+        "lifecycleState",
+        "historianDisposition",
+        "layer",
+        "pLevel",
+        "sourceKind"
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "schemaId": {
+            "const": "iris.semantic.compartment.v1"
+          },
+          "compartmentId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "compartmentSequence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "lineageId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "startContextSeq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "endContextSeq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "sourceRangeHash": {
+            "type": "string",
+            "minLength": 1
+          },
+          "importance": {
+            "type": "string",
+            "enum": ["low", "medium", "high", "critical"]
+          },
+          "episodeType": {
+            "type": "string",
+            "enum": ["request_response", "tool_execution", "maintenance"]
+          },
+          "content": {
+            "type": "string"
+          },
+          "primarySummary": {
+            "type": "string"
+          },
+          "secondarySummary": {
+            "type": "string"
+          },
+          "decisions": {
+            "type": "string"
+          },
+          "openThreads": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaId",
+          "compartmentId",
+          "compartmentSequence",
+          "lineageId",
+          "startContextSeq",
+          "endContextSeq",
+          "sourceRangeHash",
+          "importance",
+          "episodeType"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "iris.semantic.recollection.v1": {
+      "forbiddenPayloadFields": [
+        "contextUnitId",
+        "contextLineageId",
+        "contextSeq",
+        "runtimeEventId",
+        "semanticSchemaId",
+        "contentHash",
+        "lifecycleState",
+        "historianDisposition",
+        "layer",
+        "pLevel",
+        "sourceKind"
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "schemaId": {
+            "const": "iris.semantic.recollection.v1"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["available", "unavailable"]
+          },
+          "recollectionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "statement": {
+            "type": "string"
+          },
+          "sourceTrust": {
+            "type": "string",
+            "enum": ["observed", "verified", "generated"]
+          },
+          "referenceTime": {
+            "type": "string"
+          },
+          "provenanceRef": {
+            "type": "string"
+          },
+          "relevanceScore": {
+            "type": "number"
+          },
+          "unavailableReason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": ["schemaId", "status"],
+        "additionalProperties": false,
+        "if": {
+          "properties": {
+            "status": {
+              "const": "available"
+            }
+          },
+          "required": ["status"]
+        },
+        "then": {
+          "required": ["recollectionId", "statement", "sourceTrust"]
+        },
+        "else": {
+          "required": ["unavailableReason"]
+        }
+      }
     }
   }
 }

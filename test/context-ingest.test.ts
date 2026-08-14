@@ -237,7 +237,7 @@ test("r2: empty context.db initializes cleanly; migrations 0001-0011 applied and
     store.close();
     const reopened = ContextStore.open(join(dir, "context.db"));
     reopened.close();
-    assert.equal(LATEST_MIGRATION_VERSION, "0011_runtime_events");
+    assert.equal(LATEST_MIGRATION_VERSION, "0012_bust_retirement");
   } finally {
     cleanupDir(dir);
   }

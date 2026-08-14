@@ -75,6 +75,7 @@ interface UnitRow {
   lifecycle_state: string;
   content_hash_basis: string;
   legacy_status: string;
+  payload_reclaimed_at: string | null;
   created_at: string;
 }
 
@@ -414,7 +415,7 @@ function parseLifecycleState(raw: string): ContextMessageUnitLifecycleState {
 // iris_agent#113: legacy fence — this key name is prohibited in new contracts
 // but must be read for backward-compatible SQLite deserialization
 const LEGACY_SOURCE_CONTEXT_MESSAGE_UNIT_IDS_KEY = "sourceContextUnitIds";
-export const LATEST_MIGRATION_VERSION = "0011_runtime_events";
+export const LATEST_MIGRATION_VERSION = "0012_bust_retirement";
 
 /**
  * R2-P3：每 session 的 context_units 软 cap（语义 ledger 有界化的第一级）。
@@ -567,6 +568,21 @@ export interface ContextLineage {
   systemProjectionHash: string;
   /** R2-P1：context_seq 空间 watermark（ContextMessageUnit 序号）。 */
   representedThroughContextSeq: number;
+  /**
+   * Phase E（canonical BUST）：retired watermark（contextSeq 坐标）。
+   * 只在 successful BUST full-rebuild 原子发布事务内单调推进；GC 只回收
+   * retired 单元的 semantic payload。P4 单元不推进 retirement。
+   */
+  retiredThroughContextSeq: number;
+  /**
+   * Phase E：最近一次成功 BUST 原子发布绑定的 generation id（audit）。
+   * markRepresentedAndRetired 只接受"已成功发布"的 generation 绑定。
+   */
+  lastBustGenerationId: string | null;
+  /** 同一发布的 generation hash（audit 绑定；BUST 不持久化可重放的旧 generation）。 */
+  lastBustGenerationHash: string | null;
+  /** 该发布时刻（audit）。 */
+  lastBustAt: string | null;
   emergencyState: "ok" | "transform_unavailable" | "emergency_fail_closed";
   lastTransformError: string | null;
   createdAt: string;
@@ -594,6 +610,10 @@ interface LineageRow {
   system_projection_hash: string;
   prepared_at: string;
   represented_through_context_seq: number;
+  retired_through_context_seq: number;
+  last_bust_generation_id: string | null;
+  last_bust_generation_hash: string | null;
+  last_bust_at: string | null;
   emergency_state: string;
   last_transform_error: string | null;
   created_at: string;
@@ -608,6 +628,10 @@ function rowToLineage(row: LineageRow): ContextLineage {
     canonicalSystemPrompt: row.canonical_system_prompt,
     systemProjectionHash: row.system_projection_hash,
     representedThroughContextSeq: row.represented_through_context_seq,
+    retiredThroughContextSeq: row.retired_through_context_seq,
+    lastBustGenerationId: row.last_bust_generation_id,
+    lastBustGenerationHash: row.last_bust_generation_hash,
+    lastBustAt: row.last_bust_at,
     emergencyState: row.emergency_state as ContextLineage["emergencyState"],
     lastTransformError: row.last_transform_error,
     createdAt: row.created_at,
@@ -884,6 +908,13 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
   /** R2 (iris_agent#9)：identity-level lineage id（one per data root）。 */
   readonly lineageId: string;
   private closed = false;
+  /**
+   * Phase E：canonical BUST 原子发布事务标志。markRepresentedAndRetired
+   * 只能在该事务内调用（fail-closed：事务外调用抛错，绝不允许绕过 BUST 的
+   * 逻辑退休）。beginBustTransaction/commit/rollback 由
+   * ContextRetirementPortV1.markRepresentedAndRetired 编排。
+   */
+  private bustTransactionActive = false;
 
   private constructor(db: DatabaseSync, options: ContextStoreOpenOptions) {
     this.db = db;
@@ -1333,6 +1364,40 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
     return rows.map((row) => this.rowToUnit(row));
   }
 
+  /**
+   * Phase E（canonical BUST P5 Live membership）：读取 durable live units。
+   *
+   * P5 只包含已 durable commit、尚未被 P3 安全表示的近期经历：
+   *   - lifecycle_state ∈ {committed, historian_eligible, historian_claimed,
+   *     compartmentalized_pending_bust}（represented_in_p3 / retired 已离开
+   *     live 集）；
+   *   - context_seq > afterContextSeqExclusive（P3 表示的 covered 边界 = BUST
+   *     将推进到的 represented-through watermark；未覆盖的 committed 单元仍
+   *     live）；
+   *   - disposition = 'include'（provider-visible；exclude/reference_only 与
+   *     listUnits 默认视图一致，不进入 P5）；
+   *   - legacy_status = 'none'（quarantined 行永不进入 canonical 读路径）。
+   *
+   * 按 context_seq 升序（确定性；buildContextGenerationV2 1:1 投影 +
+   * tamper 检测）。
+   */
+  listLiveUnitsForP5(lineageId: string, afterContextSeqExclusive: number): ContextMessageUnitV1[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM context_units
+         WHERE context_lineage_id = ? AND legacy_status = 'none'
+           AND disposition = 'include'
+           AND lifecycle_state IN (
+             'committed', 'historian_eligible', 'historian_claimed',
+             'compartmentalized_pending_bust'
+           )
+           AND context_seq > ?
+         ORDER BY context_seq`,
+      )
+      .all(lineageId, afterContextSeqExclusive) as unknown as UnitRow[];
+    return rows.map((row) => this.rowToUnit(row));
+  }
+
   /** R2-P3：该 session 的 context_units 行数（软/硬 cap 判定基准，含 excluded）。 */
   private countUnits(runtimeSessionId: string): number {
     const row = this.db
@@ -1436,6 +1501,56 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
           "is quarantined legacy data (content_hash_basis v1, pre-#113) and cannot be " +
           "read as current ContextMessageUnitV1 until an explicit verified migration/rebuild (fail closed)",
       );
+    }
+    // Phase E（bust-driven retirement GC）：payload 已被冷迁移回收的行。语义
+    // payload 已被清除（reclaimRetiredPayloads 只回收 lifecycle_state='retired'
+    // 的行），因此不能再重算 content_hash —— 保留的 hash 是退休前的 provenance。
+    // 读路径 fail-closed：reclaimed 行必须是 retired（否则状态机损坏）；返回的
+    // semanticContent 是显式冷迁移 marker（不得伪装成原始语义内容，也绝不进入
+    // P5/live 路径 —— P5 读按 lifecycle 过滤）。
+    if (row.payload_reclaimed_at !== null) {
+      const lifecycleState = parseLifecycleState(row.lifecycle_state);
+      if (lifecycleState !== "retired") {
+        throw new Error(
+          `context rowToUnit: unit ${row.unit_id} (context_seq ${row.context_seq}) ` +
+            `has payload_reclaimed_at set but lifecycle_state=${lifecycleState} ` +
+            "(only retired units may have their payload reclaimed) (fail closed)",
+        );
+      }
+      const kind = physicalUnitTypeToKind(row.unit_type);
+      const unit: ContextMessageUnitV1 = {
+        schemaId: "iris.context_message_unit.v1",
+        contextUnitId: row.unit_id,
+        contextLineageId: row.context_lineage_id,
+        contextSeq: row.context_seq,
+        runtimeEventId: row.runtime_event_id ?? row.source_event_id,
+        kind,
+        semanticSchemaId:
+          row.semantic_schema_id ??
+          KIND_TO_SEMANTIC_SCHEMA_ID[kind] ??
+          "iris.semantic.context_message.unknown.v1",
+        semanticContent: {
+          schemaId: "iris.cold_migration_marker.v1",
+          contextUnitId: row.unit_id,
+          contentHash: row.content_hash,
+          reclaimedAt: row.payload_reclaimed_at,
+        },
+        historianDisposition: physicalDispositionToHistorian(row.disposition),
+        contentHash: row.content_hash,
+        lifecycleState,
+        createdAt: row.created_at,
+      };
+      return {
+        unit,
+        persistenceMeta: {
+          sourceEventId: row.source_event_id,
+          entryId: row.entry_id,
+          entrySeq: row.entry_seq,
+          companionEntryId: row.companion_entry_id,
+          pairKey: row.pair_key,
+          paired: row.paired === 1,
+        },
+      };
     }
     const kind = physicalUnitTypeToKind(row.unit_type);
     const historianDisposition = physicalDispositionToHistorian(row.disposition);
@@ -1572,6 +1687,10 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
       system_projection_hash: input.systemProjectionHash,
       prepared_at: input.preparedAt,
       represented_through_context_seq: 0,
+      retired_through_context_seq: 0,
+      last_bust_generation_id: null,
+      last_bust_generation_hash: null,
+      last_bust_at: null,
       emergency_state: "ok",
       last_transform_error: null,
       created_at: now,
@@ -2403,6 +2522,220 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
       )
       .run(receipt.contextLineageId, receipt.fromContextSeq, receipt.throughContextSeq);
     void result;
+  }
+
+  // ---- Phase E：canonical BUST 原子发布事务 + retirement（唯一推进点）----
+
+  /**
+   * 开始 canonical BUST 原子发布事务。markRepresentedAndRetired 只能在该
+   * 事务内调用（事务标志断言，fail-closed）。嵌套 BEGIN 抛错；事务未结束前
+   * 再次 begin 抛错。
+   */
+  beginBustTransaction(): void {
+    if (this.bustTransactionActive) {
+      throw new Error(
+        "context beginBustTransaction: a BUST transaction is already active (fail closed)",
+      );
+    }
+    this.bustTransactionActive = true;
+    try {
+      this.db.exec("BEGIN IMMEDIATE");
+    } catch (error) {
+      this.bustTransactionActive = false;
+      throw error;
+    }
+  }
+
+  /** 提交 canonical BUST 原子发布事务。事务外调用抛错（fail-closed）。 */
+  commitBustTransaction(): void {
+    if (!this.bustTransactionActive) {
+      throw new Error("context commitBustTransaction: no active BUST transaction (fail closed)");
+    }
+    this.db.exec("COMMIT");
+    this.bustTransactionActive = false;
+  }
+
+  /** 回滚 canonical BUST 原子发布事务。事务外调用抛错（fail-closed）。 */
+  rollbackBustTransaction(): void {
+    if (!this.bustTransactionActive) {
+      throw new Error("context rollbackBustTransaction: no active BUST transaction (fail closed)");
+    }
+    this.db.exec("ROLLBACK");
+    this.bustTransactionActive = false;
+  }
+
+  /**
+   * Phase E：canonical BUST full-rebuild 原子发布成功后推进
+   * represented/retired watermark 并绑定新发布的 generation。
+   *
+   * 权威约束（Notion v27–v29）：
+   *   - 只能作为成功 BUST 原子发布事务的一部分调用（本方法断言
+   *     bustTransactionActive，事务外调用 fail-closed —— 绝不允许绕过 BUST
+   *     的逻辑退休）；
+   *   - 绑定新发布的 contextGenerationId + contextGenerationHash（audit；
+   *     BUST 不持久化可重放的旧 generation）；
+   *   - represented/retired watermark 单调只进不退（MAX 语义，重复/乱序调用
+   *     不产生回退）；
+   *   - covered units（≤ representedThrough）从 compartmentalized_pending_bust
+   *     推进为 represented_in_p3；≤ retiredThrough 的单元推进为 retired
+   *     （离开 live 集，payload 变为 GC 可回收）；P4 单元不持久化、不推进
+   *     retirement；
+   *   - BUST 失败（事务回滚）→ watermark 不推进。
+   */
+  markRepresentedAndRetired(
+    input: import("../contracts/context-retirement.js").RepresentAndRetireInput,
+  ): void {
+    if (!this.bustTransactionActive) {
+      throw new Error(
+        "context markRepresentedAndRetired: must be called inside a canonical BUST " +
+          "atomic publish transaction (beginBustTransaction) (fail closed)",
+      );
+    }
+    if (input.contextLineageId !== this.lineageId) {
+      throw new Error(
+        `context markRepresentedAndRetired: lineage ${input.contextLineageId} does not ` +
+          `match this store's lineage ${this.lineageId} (fail closed)`,
+      );
+    }
+    const now = new Date().toISOString();
+    const lineage = this.getLineageByLineageId(input.contextLineageId);
+    if (lineage === undefined) {
+      throw new Error(
+        `context markRepresentedAndRetired: no lineage ${input.contextLineageId} (fail closed)`,
+      );
+    }
+    // 单调只进不退：任何实现/调用顺序都不允许 watermark 回退。
+    const representedThrough = Math.max(
+      lineage.representedThroughContextSeq,
+      input.representedThroughContextSeq,
+    );
+    const retiredThrough = Math.max(
+      lineage.retiredThroughContextSeq,
+      input.retiredThroughContextSeq,
+    );
+    if (retiredThrough > representedThrough) {
+      throw new Error(
+        `context markRepresentedAndRetired: retiredThroughContextSeq (${retiredThrough}) ` +
+          `must not exceed representedThroughContextSeq (${representedThrough}) ` +
+          "(retirement is a subset of representation) (fail closed)",
+      );
+    }
+    const lineageResult = this.db
+      .prepare(
+        `UPDATE context_lineages SET
+           represented_through_context_seq = ?,
+           retired_through_context_seq = ?,
+           last_bust_generation_id = ?,
+           last_bust_generation_hash = ?,
+           last_bust_at = ?,
+           updated_at = ?
+         WHERE context_lineage_id = ?`,
+      )
+      .run(
+        representedThrough,
+        retiredThrough,
+        input.contextGenerationId,
+        input.contextGenerationHash,
+        now,
+        now,
+        input.contextLineageId,
+      );
+    if (lineageResult.changes !== 1) {
+      throw new Error(
+        `context markRepresentedAndRetired: no lineage row updated for ${input.contextLineageId} (fail closed)`,
+      );
+    }
+    // covered units：≤ representedThrough 的 pending_bust → represented_in_p3。
+    this.db
+      .prepare(
+        `UPDATE context_units SET lifecycle_state = 'represented_in_p3'
+         WHERE context_lineage_id = ? AND context_seq <= ?
+           AND lifecycle_state = 'compartmentalized_pending_bust'`,
+      )
+      .run(input.contextLineageId, representedThrough);
+    // covered units：≤ retiredThrough 的 represented_in_p3 / pending_bust → retired。
+    this.db
+      .prepare(
+        `UPDATE context_units SET lifecycle_state = 'retired'
+         WHERE context_lineage_id = ? AND context_seq <= ?
+           AND lifecycle_state IN ('represented_in_p3', 'compartmentalized_pending_bust')`,
+      )
+      .run(input.contextLineageId, retiredThrough);
+  }
+
+  /**
+   * Phase E：物理 GC —— 只回收 lifecycle_state='retired' 单元的 semantic
+   * payload（冷迁移占位），保留 identity/hash/binding/disposition/archive
+   * locator。无 retireEligible()：GC 绝不自行判断 eligibility，只处理成功
+   * BUST 已标记 retired 的单元。
+   *
+   * 有界化（maxRows / maxBytes，Notion Retirement Port）：单次回收不超过
+   * 行数与估算字节数（按原 payload 的 LENGTH 计）。返回实际回收行数/字节。
+   * 幂等：已回收（payload_reclaimed_at 非空）的行不重复计费。
+   */
+  reclaimRetiredPayloads(
+    input: import("../contracts/context-retirement.js").ReclaimRetiredInput,
+  ): import("../contracts/context-retirement.js").RetirementGcResult {
+    if (input.maxRows <= 0 || input.maxBytes <= 0) {
+      throw new Error(
+        "context reclaimRetiredPayloads: maxRows and maxBytes must be positive (fail closed)",
+      );
+    }
+    const candidates = this.db
+      .prepare(
+        `SELECT context_seq, unit_id, LENGTH(payload) AS payload_bytes
+         FROM context_units
+         WHERE context_lineage_id = ? AND legacy_status = 'none'
+           AND lifecycle_state = 'retired'
+           AND payload_reclaimed_at IS NULL
+         ORDER BY context_seq
+         LIMIT ?`,
+      )
+      .all(this.lineageId, input.maxRows) as unknown as Array<{
+      context_seq: number;
+      unit_id: string;
+      payload_bytes: number;
+    }>;
+    let reclaimedRows = 0;
+    let reclaimedBytes = 0;
+    const marker = JSON.stringify({
+      schemaId: "iris.cold_migration_marker.v1",
+      reclaimedAt: new Date().toISOString(),
+    });
+    for (const candidate of candidates) {
+      const bytes = candidate.payload_bytes ?? 0;
+      // 有界：累计回收字节数不超过 maxBytes（单行不可拆分 —— 首个候选单独
+      // 超预算时本次回收 0 行，保持字节预算严格有界）。
+      if (reclaimedBytes + bytes > input.maxBytes) {
+        break;
+      }
+      const result = this.db
+        .prepare(
+          `UPDATE context_units
+           SET payload = ?, payload_reclaimed_at = ?
+           WHERE context_lineage_id = ? AND context_seq = ?
+             AND lifecycle_state = 'retired' AND payload_reclaimed_at IS NULL`,
+        )
+        .run(marker, new Date().toISOString(), this.lineageId, candidate.context_seq);
+      if (result.changes === 1) {
+        reclaimedRows += 1;
+        reclaimedBytes += bytes;
+      }
+    }
+    const remainingRetiredRows = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM context_units
+           WHERE context_lineage_id = ? AND lifecycle_state = 'retired'
+             AND payload_reclaimed_at IS NULL`,
+        )
+        .get(this.lineageId) as { n: number }
+    ).n;
+    return {
+      reclaimedRows,
+      reclaimedBytes,
+      remainingRetiredRows,
+    };
   }
 
   setEmergencyState(
