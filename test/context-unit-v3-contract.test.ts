@@ -339,8 +339,10 @@ test("F1: generated v3-generation fixture is present and references v3 units", (
   };
   assert.equal(v3Gen.schemaId, "iris.context_generation.v3");
   assert.equal(v3Gen.units.length, 1);
-  assert.equal(v3Gen.units[0].schemaId, "iris.context_unit.v3");
-  assert.equal(v3Gen.units[0].sourceRef.schemaId, DSH_MESSAGE_REF_V1_SCHEMA_ID);
+  const unit = v3Gen.units[0];
+  assert.ok(unit !== undefined);
+  assert.equal(unit.schemaId, "iris.context_unit.v3");
+  assert.equal(unit.sourceRef.schemaId, DSH_MESSAGE_REF_V1_SCHEMA_ID);
 });
 
 // ---------------------------------------------------------------------------
