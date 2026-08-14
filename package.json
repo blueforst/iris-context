@@ -12,11 +12,17 @@
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json",
-    "check:codegen-freshness": "tsx scripts/check-codegen-freshness.ts",
-    "check": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm run check:codegen-freshness"
+    "codegen": "node scripts/codegen.mjs",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-generated-assets.mjs",
+    "test": "tsx --test test/context-v2-contract.test.ts test/context-v2-fail-closed-boundary.test.ts test/context-durable-contract-authority.test.ts test/semantic-schema-validation.test.ts",
+    "test:contracts": "tsx --test test/context-v2-contract.test.ts test/context-v2-fail-closed-boundary.test.ts test/context-durable-contract-authority.test.ts test/semantic-schema-validation.test.ts",
+    "check:codegen-freshness": "node scripts/check-codegen-freshness.mjs",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm run codegen && npm run check:codegen-freshness && npm test && npm run build"
   },
-  "dependencies": {},
+  "dependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1"
+  },
   "devDependencies": {
     "@eslint/js": "9.39.5",
     "@types/node": "22.19.0",
