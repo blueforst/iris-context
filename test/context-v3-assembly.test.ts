@@ -235,3 +235,47 @@ test("F3: validation fails closed on duplicate unitIds (identity collapse)", () 
     /duplicate unitId/,
   );
 });
+
+test("F3: validation returns invalid (not TypeError) on malformed header hash-basis fields", () => {
+  const dir2 = tempDir();
+  const store = ContextStore.open(join(dir2, "context.db"), { lineageId: LINEAGE });
+  store.createLineage(makeLineageInput("session-1", LINEAGE));
+  const admission = new ContextAdmission(store);
+  const u1 = admission.admit({
+    sourceRef: { schemaId: DSH_MESSAGE_REF_V1_SCHEMA_ID, sessionId: "s1", messageId: "m1" },
+    contentSchemaId: "iris.semantic.context_message.user.v1",
+    content: { role: "user", content: "hello" },
+    runtimeSessionId: "session-1",
+  });
+  const generation = buildContextGenerationV3(
+    {
+      contextLineageId: LINEAGE,
+      sourceSnapshotHash: "snap",
+      p0Units: [],
+      p1Units: [],
+      p2Units: [],
+      p3Units: [],
+      p4Units: [],
+      p5Units: [u1],
+    },
+    "gen-1",
+    "2026-08-01T00:00:00.000Z",
+  );
+  // 缺 contextLineageId → invalid（不是 TypeError）。
+  const noLineage = JSON.parse(JSON.stringify(generation)) as Record<
+    string,
+    Record<string, unknown>
+  >;
+  delete noLineage["header"]?.["contextLineageId"];
+  const r1 = validateContextGenerationV3(noLineage);
+  assert.ok(!r1.valid, "missing contextLineageId must return invalid");
+  assert.match(r1.reason ?? "", /contextLineageId/);
+  // 缺 sourceSnapshotHash → invalid。
+  const noSnap = JSON.parse(JSON.stringify(generation)) as Record<string, Record<string, unknown>>;
+  delete noSnap["header"]?.["sourceSnapshotHash"];
+  const r2 = validateContextGenerationV3(noSnap);
+  assert.ok(!r2.valid, "missing sourceSnapshotHash must return invalid");
+  assert.match(r2.reason ?? "", /sourceSnapshotHash/);
+  store.close();
+  cleanupDir(dir2);
+});

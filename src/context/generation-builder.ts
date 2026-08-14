@@ -430,11 +430,19 @@ export function validateContextGenerationV3(generation: unknown): {
     }
     seenUnitIds.add(unitId);
   }
+  const contextLineageId = header["contextLineageId"];
+  if (typeof contextLineageId !== "string" || contextLineageId.length === 0) {
+    return { valid: false, reason: "header.contextLineageId must be a non-empty string" };
+  }
+  const sourceSnapshotHash = header["sourceSnapshotHash"];
+  if (typeof sourceSnapshotHash !== "string" || sourceSnapshotHash.length === 0) {
+    return { valid: false, reason: "header.sourceSnapshotHash must be a non-empty string" };
+  }
   const typed = generation as ContextGenerationV3;
   const expectedGenHash = computeContextGenerationHashV3({
     schemaId: CONTEXT_GENERATION_V3_SCHEMA_ID,
-    contextLineageId: header["contextLineageId"] as string,
-    sourceSnapshotHash: header["sourceSnapshotHash"] as string,
+    contextLineageId,
+    sourceSnapshotHash,
     units: typed.units as unknown as readonly ContextUnit[],
     layerEnds: ends as [number, number, number, number, number, number],
   });
