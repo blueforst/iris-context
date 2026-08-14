@@ -19,7 +19,7 @@ import {
 } from "../src/historian/anti-echo.js";
 import { buildCompartment } from "../src/historian/historian-compartment.js";
 import { authorMemoryObservations } from "../src/historian/historian-publication.js";
-import type { HistorianBatchV1 } from "../src/contracts/historian.js";
+import type { HistorianBatchV2 } from "../src/contracts/historian.js";
 import {
   STUB_LINEAGE_ID,
   emptyDerivationRefs,
@@ -212,8 +212,8 @@ test("v29: exclude units never enter Compartment content or observation statemen
   assert.ok(compartment.compartment.content.includes("done"));
 
   // Observation statement must not contain the excluded unit's text.
-  const batch: HistorianBatchV1 = {
-    schemaId: "iris.historian_batch.v1",
+  const batch: HistorianBatchV2 = {
+    schemaId: "iris.historian_batch.v2",
     batchId: "batch-exclude-test",
     claimId: "claim-exclude-test",
     contextLineageId: STUB_LINEAGE_ID,

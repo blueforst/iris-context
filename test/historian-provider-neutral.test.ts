@@ -87,7 +87,7 @@ function batchUnits() {
 function authorFixture() {
   const units = batchUnits();
   const batch = {
-    schemaId: "iris.historian_batch.v1" as const,
+    schemaId: "iris.historian_batch.v2" as const,
     batchId: `batch-${STUB_LINEAGE_ID}-1-3`,
     claimId: "claim-1",
     contextLineageId: STUB_LINEAGE_ID,
@@ -222,7 +222,7 @@ test("provider-neutral: derived-only batch yields derivedOnly observations witho
     derivationRefs: { schemaId: "iris.semantic_derivation_refs.v1", memoryRefs: ["mem-1"] },
   });
   const batch = {
-    schemaId: "iris.historian_batch.v1" as const,
+    schemaId: "iris.historian_batch.v2" as const,
     batchId: `batch-${STUB_LINEAGE_ID}-1-1`,
     claimId: "c",
     contextLineageId: STUB_LINEAGE_ID,

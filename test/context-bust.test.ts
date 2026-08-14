@@ -36,6 +36,7 @@ import { cleanupDir, tempDir } from "./helpers/context-fixtures.js";
 import {
   admitRuntimeMessage,
   commitCompartment,
+  historianBatchUnitsOf,
   openBustEnvironment,
   type BustEnvironment,
 } from "./helpers/bust-fixtures.js";
@@ -216,7 +217,7 @@ test("BUST: committed compartment moves covered units from P5 into P3 and advanc
       const id2 = admitRuntimeMessage(env, "m2", "b", "session-1", "assistant");
       const id3 = admitRuntimeMessage(env, "m3", "c");
       // 模拟 Historian commit：ACK 覆盖 [1..3] → pending_bust；提交 compartment。
-      const units = env.contextStore.listUnitsByLineageRange(LINEAGE, 1, 3);
+      const units = historianBatchUnitsOf(env, 1, 3);
       env.retirementPort.acknowledgeHistorianCommit(receiptFor(1, 3, `compartment-${LINEAGE}-1`));
       const compartment = commitCompartment(env, 1, units);
       // Compartment source → Context admission → 新的 ContextUnit（确定性 identity）。
@@ -267,7 +268,7 @@ test("BUST: units committed after representation stay live (P5) on the next rebu
     try {
       admitRuntimeMessage(env, "m1", "a");
       admitRuntimeMessage(env, "m2", "b", "session-1", "assistant");
-      const units12 = env.contextStore.listUnitsByLineageRange(LINEAGE, 1, 2);
+      const units12 = historianBatchUnitsOf(env, 1, 2);
       env.retirementPort.acknowledgeHistorianCommit(receiptFor(1, 2, `compartment-${LINEAGE}-1`));
       commitCompartment(env, 1, units12);
       const coordinator = makeCoordinator(env);

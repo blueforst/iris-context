@@ -50,13 +50,7 @@ import type {
   MemoryServiceAdapter,
   RecallIntent,
 } from "../src/memory/memory-integration-coordinator.js";
-import {
-  assistantInput,
-  cleanupDir,
-  makeLineageInput,
-  tempDir,
-  userInput,
-} from "./helpers/context-fixtures.js";
+import { cleanupDir, makeLineageInput, tempDir, userInput } from "./helpers/context-fixtures.js";
 
 const SESSION = "session-1";
 
@@ -272,12 +266,20 @@ test("cordis: reversible effects —— auto-BUST listener 随 unload 注销；d
     const fiber = await mountFull(ctx, { dataRoot: dir });
     const lineageId = ctx.irisContext.lineageId;
     ctx.irisContext.createLineage(makeLineageInput(SESSION, lineageId));
-    ctx.irisContext.ingestRuntimeEvent(
-      userInput({ eventId: "u1", content: "hello", sessionId: SESSION }),
-    );
-    ctx.irisContext.ingestRuntimeEvent(
-      assistantInput({ eventId: "a1", content: "world", sessionId: SESSION }),
-    );
+    // Feature 5：DSH 正常 ingress 走统一 ContextUnit admission
+    // （admitRuntimeMessage）—— Historian 只消费 v3 ContextUnit。
+    ctx.irisContext.admitRuntimeMessage({
+      sessionId: SESSION,
+      messageId: "u1",
+      contentSchemaId: "iris.semantic.context_message.user.v1",
+      content: { role: "user", content: "hello" },
+    });
+    ctx.irisContext.admitRuntimeMessage({
+      sessionId: SESSION,
+      messageId: "a1",
+      contentSchemaId: "iris.semantic.context_message.assistant.v1",
+      content: { role: "assistant", content: "world", timestamp: 1 },
+    });
 
     // 装配点注册了 auto-BUST 监听（iris/historian-batch-committed）。
     const hooks = ctx.events._hooks;
@@ -397,12 +399,20 @@ test("cordis: durable context/historian 行在 unload/reload 后仍在，service
     const f1 = await mountFull(ctx1, { dataRoot: dir });
     const lineageId = ctx1.irisContext.lineageId;
     ctx1.irisContext.createLineage(makeLineageInput(SESSION, lineageId));
-    ctx1.irisContext.ingestRuntimeEvent(
-      userInput({ eventId: "u1", content: "durable-a", sessionId: SESSION }),
-    );
-    ctx1.irisContext.ingestRuntimeEvent(
-      assistantInput({ eventId: "a1", content: "durable-b", sessionId: SESSION }),
-    );
+    // Feature 5：DSH 正常 ingress 走统一 ContextUnit admission
+    // （admitRuntimeMessage）—— Historian 只消费 v3 ContextUnit。
+    ctx1.irisContext.admitRuntimeMessage({
+      sessionId: SESSION,
+      messageId: "u1",
+      contentSchemaId: "iris.semantic.context_message.user.v1",
+      content: { role: "user", content: "durable-a" },
+    });
+    ctx1.irisContext.admitRuntimeMessage({
+      sessionId: SESSION,
+      messageId: "a1",
+      contentSchemaId: "iris.semantic.context_message.assistant.v1",
+      content: { role: "assistant", content: "durable-b", timestamp: 1 },
+    });
     await ctx1.irisHistorian.triggerIncremental(SESSION);
     await ctx1.irisHistorian.pumpOnce();
     const before = ctx1.irisContext.listUnits(SESSION);

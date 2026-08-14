@@ -1664,6 +1664,28 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
   }
 
   /**
+   * Feature 5：按 lineage 闭区间 [fromContextSeq, toContextSeq] 读取统一
+   * ContextUnit + sidecar 状态（含 excluded/reference_only —— Historian 需要
+   * 完整分类视图做 anti-echo）。quarantined 行物理排除。
+   */
+  listContextUnitsWithState(
+    contextId: string,
+    fromContextSeq: number,
+    toContextSeq: number,
+  ): Array<{ unit: ContextUnit; state: ContextUnitSidecarState }> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM context_units
+         WHERE context_lineage_id = ? AND unit_schema_id = ?
+           AND legacy_status = 'none'
+           AND context_seq BETWEEN ? AND ?
+         ORDER BY context_seq`,
+      )
+      .all(contextId, "iris.context_unit.v3", fromContextSeq, toContextSeq) as unknown as UnitRow[];
+    return rows.map((row) => this.rowToContextUnit(row));
+  }
+
+  /**
    * v3 行 → 统一 ContextUnit（fail-closed 反序列化 + hash 校验）。
    * 非 v3 行（legacy/quarantined）→ 抛错（本方法是新模型的唯一合法读入口；
    * 旧模型用 rowToUnit）。

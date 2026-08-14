@@ -18,7 +18,8 @@
 
 import { createHash } from "node:crypto";
 
-import type { ContextMessageUnitV1, JsonValue } from "../contracts/context-v27.js";
+import type { JsonValue } from "../contracts/context-v27.js";
+import type { HistorianBatchUnit } from "../contracts/historian.js";
 import type { MemoryObservationV1 } from "../contracts/memory-publication.js";
 
 /**
@@ -36,7 +37,7 @@ export interface SemanticAdapter {
    *   - 不得直接生成最终 Compartment 或 MemoryPublication；
    *   - 返回值是唯一效果。
    */
-  interpret?(input: { unit: ContextMessageUnitV1; observation: MemoryObservationV1 }): {
+  interpret?(input: { unit: HistorianBatchUnit; observation: MemoryObservationV1 }): {
     annotation?: JsonValue;
   };
 }
@@ -168,7 +169,7 @@ export class HistorianSemanticAdapterRegistry {
    * interpret 之后重新校验 observation 未被修改（fail closed）。
    */
   invokeInterpret(input: {
-    unit: ContextMessageUnitV1;
+    unit: HistorianBatchUnit;
     observation: MemoryObservationV1;
   }): { annotation?: JsonValue } | undefined {
     const adapter = this.adapters.get(input.observation.semanticSchemaId);

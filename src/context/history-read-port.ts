@@ -24,8 +24,10 @@ import {
   historianBatchRangeHash,
   newBatchIdentity,
   newClaimId,
-  type HistorianBatchV1,
+  type HistorianBatchUnit,
+  type HistorianBatchV2,
 } from "../contracts/historian.js";
+import type { ContextUnit } from "../contracts/context-unit.js";
 import type { ContextLineage, ContextStore } from "./context-store.js";
 
 /** Context lineage 状态（与 context_lineages.emergency_state 语义同源）。 */
@@ -105,7 +107,7 @@ export interface ContextHistoryReadPort {
   claimHistorianBatch(input: {
     afterContextSeqExclusive: number;
     throughContextSeqInclusive: number;
-  }): HistorianBatchV1;
+  }): HistorianBatchV2;
 
   /**
    * Phase D（v29 freezeBatch）：Context 冻结完整 semantic boundary 并返回
@@ -121,7 +123,7 @@ export interface ContextHistoryReadPort {
     throughContextSeqInclusive: number;
     maxUnits?: number;
     maxTokens?: number;
-  }): HistorianBatchV1;
+  }): HistorianBatchV2;
 }
 
 /** 纯推导（可测）：lineageStatus 与 ContextStore 的 emergency 机制一致。 */
@@ -229,26 +231,27 @@ export function createContextHistoryReadPort(store: ContextStore): ContextHistor
       }));
     },
     claimHistorianBatch({ afterContextSeqExclusive, throughContextSeqInclusive }) {
-      // 只读 lineage 内闭区间单元；按 contextSeq 升序。
-      const units = store.listUnitsByLineageRange(
+      // 只读 lineage 内闭区间统一 ContextUnit + sidecar；按 contextSeq 升序。
+      const entries = store.listContextUnitsWithState(
         store.lineageId,
         afterContextSeqExclusive + 1,
         throughContextSeqInclusive,
       );
+      const units = entries.map(toHistorianBatchUnit);
       const actualThrough =
         units.length === 0
           ? afterContextSeqExclusive
           : (units[units.length - 1]?.contextSeq ?? afterContextSeqExclusive);
       const fromContextSeq = afterContextSeqExclusive + 1;
-      const semanticSchemaIds = [...new Set(units.map((unit) => unit.semanticSchemaId))];
+      const semanticSchemaIds = [...new Set(units.map((member) => member.unit.contentSchemaId))];
       const estimatedTokens = units.reduce(
-        (total, unit) => total + estimateSemanticTokens(unit.semanticContent),
+        (total, member) => total + estimateSemanticTokens(member.unit.content),
         0,
       );
       const frozenAt = new Date().toISOString();
       const leaseExpiresAt = new Date(Date.now() + 60_000).toISOString();
-      const batch: HistorianBatchV1 = {
-        schemaId: "iris.historian_batch.v1",
+      const batch: HistorianBatchV2 = {
+        schemaId: "iris.historian_batch.v2",
         batchId: newBatchIdentity(store.lineageId, fromContextSeq, actualThrough),
         claimId: newClaimId(),
         contextLineageId: store.lineageId,
@@ -268,11 +271,13 @@ export function createContextHistoryReadPort(store: ContextStore): ContextHistor
     freezeBatch({ afterContextSeqExclusive, throughContextSeqInclusive, maxUnits, maxTokens }) {
       // freezeBatch 与 claimHistorianBatch 同一 Context 坐标批选择；显式
       // 重新冻结（新 claimId + 新 lease），并可选做 units/tokens 有界化提示。
-      const claimed = store.listUnitsByLineageRange(
-        store.lineageId,
-        afterContextSeqExclusive + 1,
-        throughContextSeqInclusive,
-      );
+      const claimed = store
+        .listContextUnitsWithState(
+          store.lineageId,
+          afterContextSeqExclusive + 1,
+          throughContextSeqInclusive,
+        )
+        .map(toHistorianBatchUnit);
       let units = claimed;
       if (maxUnits !== undefined && maxUnits > 0 && units.length > maxUnits) {
         units = units.slice(0, maxUnits);
@@ -281,11 +286,11 @@ export function createContextHistoryReadPort(store: ContextStore): ContextHistor
         let tokens = 0;
         let cut = units.length;
         for (let index = 0; index < units.length; index += 1) {
-          const unit = units[index];
-          if (unit === undefined) {
+          const member = units[index];
+          if (member === undefined) {
             continue;
           }
-          tokens += estimateSemanticTokens(unit.semanticContent);
+          tokens += estimateSemanticTokens(member.unit.content);
           if (tokens > maxTokens) {
             cut = index;
             break;
@@ -298,15 +303,15 @@ export function createContextHistoryReadPort(store: ContextStore): ContextHistor
           ? afterContextSeqExclusive
           : (units[units.length - 1]?.contextSeq ?? afterContextSeqExclusive);
       const fromContextSeq = afterContextSeqExclusive + 1;
-      const semanticSchemaIds = [...new Set(units.map((unit) => unit.semanticSchemaId))];
+      const semanticSchemaIds = [...new Set(units.map((member) => member.unit.contentSchemaId))];
       const estimatedTokens = units.reduce(
-        (total, unit) => total + estimateSemanticTokens(unit.semanticContent),
+        (total, member) => total + estimateSemanticTokens(member.unit.content),
         0,
       );
       const frozenAt = new Date().toISOString();
       const leaseExpiresAt = new Date(Date.now() + 60_000).toISOString();
-      const batch: HistorianBatchV1 = {
-        schemaId: "iris.historian_batch.v1",
+      const batch: HistorianBatchV2 = {
+        schemaId: "iris.historian_batch.v2",
         batchId: newBatchIdentity(store.lineageId, fromContextSeq, actualThrough),
         claimId: newClaimId(),
         contextLineageId: store.lineageId,
@@ -322,5 +327,23 @@ export function createContextHistoryReadPort(store: ContextStore): ContextHistor
       batch.rangeHash = historianBatchRangeHash(batch);
       return batch;
     },
+  };
+}
+
+/**
+ * 统一 ContextUnit + sidecar state → HistorianBatchUnit（batch 成员 = 同一个
+ * ContextUnit + sidecar 坐标；sidecar 坐标绝不写回 Unit）。
+ */
+function toHistorianBatchUnit(entry: {
+  unit: ContextUnit;
+  state: import("./context-store.js").ContextUnitSidecarState;
+}): HistorianBatchUnit {
+  return {
+    unit: entry.unit,
+    contextSeq: entry.state.contextSeq,
+    ...(entry.state.kind !== undefined ? { kind: entry.state.kind } : {}),
+    historianDisposition: entry.state.historianDisposition,
+    ...(entry.unit.derivation !== undefined ? { derivation: entry.unit.derivation } : {}),
+    createdAt: entry.state.createdAt,
   };
 }

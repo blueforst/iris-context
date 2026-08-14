@@ -20,7 +20,7 @@ function batchOf(units = simpleUnits(3)): Parameters<typeof validateRange>[0]["b
   const from = units[0]?.contextSeq ?? 1;
   const through = units[units.length - 1]?.contextSeq ?? from;
   return {
-    schemaId: "iris.historian_batch.v1",
+    schemaId: "iris.historian_batch.v2",
     batchId: `batch-${STUB_LINEAGE_ID}-${from}-${through}`,
     claimId: "claim-1",
     contextLineageId: STUB_LINEAGE_ID,
@@ -64,7 +64,7 @@ test("B3: content drift → range hash mismatch fails closed (never commit drift
   // 篡改一个单元的内容 hash（模拟 Content drift）。
   const tampered = {
     ...units[1],
-    contentHash: "tampered",
+    unit: { ...units[1]?.unit, contentHash: "tampered" },
   } as (typeof units)[number];
   const first = units[0];
   const third = units[2];

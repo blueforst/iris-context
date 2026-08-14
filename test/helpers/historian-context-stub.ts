@@ -1,17 +1,19 @@
 /**
  * Phase D test helper: ContextHistoryReadPort stub —— 从可变的
- * ContextMessageUnitV1[] fixture 提供 claim/freeze/list 视图。
+ * HistorianBatchUnit[] fixture 提供 claim/freeze/list 视图。
  *
- * 权威边界（v29）：Historian 的唯一正常语义输入是 Context 冻结的
- * HistorianBatchV1（lineage + 全局 contextSeq）。本 stub 模拟
- * ContextHistoryReadPort 的 VALUE 视图（不持有 context.db）。
+ * 权威边界（v29 + Feature 5）：Historian 的唯一正常语义输入是 Context 冻结的
+ * HistorianBatchV2（lineage + 全局 contextSeq；units 成员为同一个
+ * ContextUnit + sidecar 坐标）。本 stub 模拟 ContextHistoryReadPort 的 VALUE
+ * 视图（不持有 context.db）。
  */
 import {
   estimateSemanticTokens,
   historianBatchRangeHash,
   newBatchIdentity,
   newClaimId,
-  type HistorianBatchV1,
+  type HistorianBatchUnit,
+  type HistorianBatchV2,
 } from "../../src/contracts/historian.js";
 import type { ContextMessageUnitV1 } from "../../src/contracts/context-v27.js";
 import type { ContextHistoryReadPort } from "../../src/context/history-read-port.js";
@@ -23,7 +25,14 @@ export function emptyDerivationRefs(): SemanticDerivationRefsV1 {
   return { schemaId: "iris.semantic_derivation_refs.v1" };
 }
 
-/** 构造一条 fixture ContextMessageUnitV1（按全局 contextSeq 升序提供）。 */
+/**
+ * 构造一条 fixture HistorianBatchUnit（同一个 ContextUnit + sidecar 坐标，按
+ * 全局 contextSeq 升序提供）。input 沿用旧 ContextMessageUnitV1 字段名：
+ * semanticContent/contextUnitId/semanticSchemaId/contentHash 映射到
+ * `unit.unit` 的 content/unitId/contentSchemaId/contentHash；kind 只保留
+ * user/assistant/tool_result，其他 kind（如 operational）映射为 undefined；
+ * sourceRef 使用通用 `iris.context_unit_source_ref.v1`；derivationRefs→derivation。
+ */
 export function fixtureUnit(input: {
   contextSeq: number;
   kind: ContextMessageUnitV1["kind"];
@@ -34,29 +43,42 @@ export function fixtureUnit(input: {
   rawArchiveRef?: ContextMessageUnitV1["rawArchiveRef"];
   contextUnitId?: string;
   createdAt?: string;
-}): ContextMessageUnitV1 {
+}): HistorianBatchUnit {
+  const contextUnitId = input.contextUnitId ?? `unit-${input.contextSeq}`;
+  const contentHash = `hash-${input.contextSeq}`;
+  const kind =
+    input.kind === "user" || input.kind === "assistant" || input.kind === "tool_result"
+      ? input.kind
+      : undefined;
   return {
-    schemaId: "iris.context_message_unit.v1",
-    contextUnitId: input.contextUnitId ?? `unit-${input.contextSeq}`,
-    contextLineageId: STUB_LINEAGE_ID,
+    unit: {
+      schemaId: "iris.context_unit.v3",
+      unitId: contextUnitId,
+      contextId: STUB_LINEAGE_ID,
+      contentSchemaId: input.semanticSchemaId,
+      content: input.semanticContent,
+      contentHash,
+      sourceRef: {
+        schemaId: "iris.context_unit_source_ref.v1",
+        sourceSchemaId: input.semanticSchemaId,
+        sourceId: contextUnitId,
+        sourceHash: contentHash,
+      },
+      ...(input.derivationRefs !== undefined ? { derivation: input.derivationRefs } : {}),
+    },
     contextSeq: input.contextSeq,
-    runtimeEventId: input.contextUnitId ?? `event-${input.contextSeq}`,
-    kind: input.kind,
-    semanticSchemaId: input.semanticSchemaId,
-    semanticContent: input.semanticContent,
+    ...(kind !== undefined ? { kind } : {}),
     historianDisposition: input.historianDisposition ?? "include",
-    ...(input.derivationRefs !== undefined ? { derivationRefs: input.derivationRefs } : {}),
+    ...(input.derivationRefs !== undefined ? { derivation: input.derivationRefs } : {}),
     ...(input.rawArchiveRef !== undefined ? { rawArchiveRef: input.rawArchiveRef } : {}),
-    contentHash: `hash-${input.contextSeq}`,
-    lifecycleState: "committed",
     createdAt:
       input.createdAt ?? new Date(Date.UTC(2026, 7, 1, 0, 0, input.contextSeq)).toISOString(),
   };
 }
 
 /** 常用 fixture：user + assistant（无派生引用）→ 非 derived-only。 */
-export function simpleUnits(count = 3): ContextMessageUnitV1[] {
-  const units: ContextMessageUnitV1[] = [];
+export function simpleUnits(count = 3): HistorianBatchUnit[] {
+  const units: HistorianBatchUnit[] = [];
   for (let seq = 1; seq <= count; seq += 1) {
     units.push(
       fixtureUnit({
@@ -81,7 +103,7 @@ export function simpleUnits(count = 3): ContextMessageUnitV1[] {
  * claimHistorianBatch / freezeBatch（lineage + 全局 contextSeq）。
  */
 export function createFixtureHistoryPort(options: {
-  units?: () => ContextMessageUnitV1[];
+  units?: () => HistorianBatchUnit[];
   representedThroughContextSeq?: number;
   lineageId?: string;
 }): ContextHistoryReadPort {
@@ -90,7 +112,7 @@ export function createFixtureHistoryPort(options: {
   const claim = (
     afterContextSeqExclusive: number,
     throughContextSeqInclusive: number,
-  ): HistorianBatchV1 => {
+  ): HistorianBatchV2 => {
     const claimed = units().filter(
       (unit) =>
         unit.contextSeq > afterContextSeqExclusive && unit.contextSeq <= throughContextSeqInclusive,
@@ -100,18 +122,18 @@ export function createFixtureHistoryPort(options: {
         ? afterContextSeqExclusive
         : (claimed[claimed.length - 1]?.contextSeq ?? afterContextSeqExclusive);
     const fromContextSeq = afterContextSeqExclusive + 1;
-    const batch: HistorianBatchV1 = {
-      schemaId: "iris.historian_batch.v1",
+    const batch: HistorianBatchV2 = {
+      schemaId: "iris.historian_batch.v2",
       batchId: newBatchIdentity(lineageId, fromContextSeq, actualThrough),
       claimId: newClaimId(),
       contextLineageId: lineageId,
       fromContextSeq,
       throughContextSeq: actualThrough,
       rangeHash: "",
-      semanticSchemaIds: [...new Set(claimed.map((unit) => unit.semanticSchemaId))],
+      semanticSchemaIds: [...new Set(claimed.map((unit) => unit.unit.contentSchemaId))],
       units: claimed,
       estimatedTokens: claimed.reduce(
-        (total, unit) => total + estimateSemanticTokens(unit.semanticContent),
+        (total, unit) => total + estimateSemanticTokens(unit.unit.content),
         0,
       ),
       frozenAt: new Date().toISOString(),
@@ -136,13 +158,18 @@ export function createFixtureHistoryPort(options: {
       return units()
         .filter((unit) => unit.contextSeq >= fromContextSeq && unit.contextSeq <= toContextSeq)
         .map((unit) => ({
-          contextUnitId: unit.contextUnitId,
+          // runtimeEventId 由 sourceRef 溯源（通用 source → sourceId），与
+          // anti-echo 层 unitViewOf 的权威推导一致。
+          contextUnitId: unit.unit.unitId,
           contextSeq: unit.contextSeq,
-          runtimeEventId: unit.runtimeEventId,
-          kind: unit.kind,
+          runtimeEventId:
+            unit.unit.sourceRef.schemaId === "iris.dsh_message_ref.v1"
+              ? `dsh:${unit.unit.sourceRef.sessionId}:${unit.unit.sourceRef.messageId}`
+              : unit.unit.sourceRef.sourceId,
+          kind: unit.kind ?? "operational",
           historianDisposition: unit.historianDisposition,
-          contentHash: unit.contentHash,
-          derivationRefs: unit.derivationRefs ?? emptyDerivationRefs(),
+          contentHash: unit.unit.contentHash,
+          derivationRefs: unit.derivation ?? emptyDerivationRefs(),
           ...(unit.rawArchiveRef !== undefined ? { rawArchiveRef: unit.rawArchiveRef } : {}),
         }));
     },
@@ -150,14 +177,17 @@ export function createFixtureHistoryPort(options: {
       return units()
         .filter((unit) => unit.contextSeq >= fromContextSeq && unit.contextSeq <= toContextSeq)
         .map((unit) => ({
-          contextUnitId: unit.contextUnitId,
+          contextUnitId: unit.unit.unitId,
           contextSeq: unit.contextSeq,
-          runtimeEventId: unit.runtimeEventId,
-          kind: unit.kind,
+          runtimeEventId:
+            unit.unit.sourceRef.schemaId === "iris.dsh_message_ref.v1"
+              ? `dsh:${unit.unit.sourceRef.sessionId}:${unit.unit.sourceRef.messageId}`
+              : unit.unit.sourceRef.sourceId,
+          kind: unit.kind ?? "operational",
           historianDisposition: unit.historianDisposition,
-          contentHash: unit.contentHash,
-          derivationRefs: unit.derivationRefs ?? emptyDerivationRefs(),
-          payload: unit.semanticContent,
+          contentHash: unit.unit.contentHash,
+          derivationRefs: unit.derivation ?? emptyDerivationRefs(),
+          payload: unit.unit.content,
           payloadTimestamp: unit.createdAt,
         }));
     },

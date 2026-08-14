@@ -15,15 +15,14 @@
  */
 
 import { historianBatchRangeHash } from "../contracts/historian.js";
-import type { HistorianBatchV1 } from "../contracts/historian.js";
-import type { ContextMessageUnitV1 } from "../contracts/context-v27.js";
+import type { HistorianBatchUnit, HistorianBatchV2 } from "../contracts/historian.js";
 
 /** The pure analysis view over a frozen batch. */
 export interface HistorianAnalysisView {
   lineageId: string;
-  batch: HistorianBatchV1;
-  /** The FINITE eligible units of the batch (never wider than the batch). */
-  units: ContextMessageUnitV1[];
+  batch: HistorianBatchV2;
+  /** The FINITE eligible batch members (each carries the same ContextUnit + sidecar). */
+  units: HistorianBatchUnit[];
   /** Raw eligible tokens (estimate). */
   trueRawEligibleTokens: number;
 }
@@ -36,9 +35,9 @@ export type ValidationOutcome =
   | { ok: false; errorCode: string; detail: string };
 
 /** Build the analysis view (pure). The batch is the authoritative finite window. */
-export function buildAnalysisView(batch: HistorianBatchV1): HistorianAnalysisView {
+export function buildAnalysisView(batch: HistorianBatchV2): HistorianAnalysisView {
   const rawTokens = batch.units.reduce(
-    (total, unit) => total + JSON.stringify(unit.semanticContent).length,
+    (total, member) => total + JSON.stringify(member.unit.content).length,
     0,
   );
   return {
@@ -60,7 +59,7 @@ export function buildAnalysisView(batch: HistorianBatchV1): HistorianAnalysisVie
  * 3. Zero progress: an empty window (through < from) is no_safe_prefix.
  */
 export function validateRange(input: {
-  batch: HistorianBatchV1;
+  batch: HistorianBatchV2;
   unprocessedFromContextSeq: number;
 }): ValidationOutcome {
   const { batch } = input;

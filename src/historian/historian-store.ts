@@ -2,7 +2,7 @@
  * HistorianStore — Historian 自己的持久化（historian.db，Phase D）。
  *
  * v29 边界：
- *  - Historian 只消费 ContextHistoryReadPort 冻结的 HistorianBatchV1；
+ *  - Historian 只消费 ContextHistoryReadPort 冻结的 HistorianBatchV2；
  *    绝不读取 Context repository，绝不写 Pi Session；
  *  - 每个 durable 写（batch claim/commit、Compartment、Publication、outbox、
  *    lineage cursor）在同一个原子事务内提交；
@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
 import { migrateDatabase } from "../db/migrate.js";
-import type { HistorianBatchV1, HistorianCursor } from "../contracts/historian.js";
+import type { HistorianBatchV2, HistorianCursor } from "../contracts/historian.js";
 import type { AttributionManifest, HistoricalCompartment } from "./historian-compartment.js";
 import type { OutboxRow, PublicationRecord } from "./historian-publication.js";
 import type { CompartmentReleaseView } from "./hot-row-reclaim.js";
@@ -355,7 +355,7 @@ export class HistorianStore {
   // ---- historian_batches（claim/lease/commit protocol）--------------------
 
   /** Claim 一个冻结 batch（claim 幂等刷新 lease；claimId/lease 每次新建）。 */
-  upsertBatchClaim(batch: HistorianBatchV1): void {
+  upsertBatchClaim(batch: HistorianBatchV2): void {
     const now = new Date(this.nowMs()).toISOString();
     this.db
       .prepare(

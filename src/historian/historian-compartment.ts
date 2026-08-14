@@ -20,7 +20,7 @@
 
 import { createHash } from "node:crypto";
 
-import type { ContextMessageUnitV1 } from "../contracts/context-v27.js";
+import type { HistorianBatchUnit } from "../contracts/historian.js";
 import type { EvidenceBasisRefV1 } from "../contracts/memory-publication.js";
 import { classifyEvidenceBasis, unitViewOf, type HistorianUnitView } from "./anti-echo.js";
 
@@ -71,8 +71,8 @@ export interface BuildCompartmentInput {
   /** attribution（可为空字符串）。 */
   runtimeSessionId: string;
   compartmentSequence: number;
-  /** 已提交、已验证的 eligible 单元（批量成员，升序 contextSeq）。 */
-  units: ContextMessageUnitV1[];
+  /** 已提交、已验证的 batch 成员（每个携带同一个 ContextUnit + sidecar，升序）。 */
+  units: HistorianBatchUnit[];
   estimateTokens?: (text: string) => number;
 }
 
@@ -92,10 +92,14 @@ export function compartmentRangeHash(input: {
   lineageId: string;
   fromContextSeq: number;
   throughContextSeq: number;
-  units: ReadonlyArray<Pick<ContextMessageUnitV1, "contextSeq" | "contextUnitId" | "contentHash">>;
+  units: ReadonlyArray<
+    Pick<HistorianBatchUnit, "contextSeq"> & {
+      unit: Pick<import("../contracts/context-unit.js").ContextUnit, "unitId" | "contentHash">;
+    }
+  >;
 }): string {
   const body = input.units
-    .map((unit) => `${unit.contextSeq}:${unit.contextUnitId}:${unit.contentHash}`)
+    .map((unit) => `${unit.contextSeq}:${unit.unit.unitId}:${unit.unit.contentHash}`)
     .join("\n");
   return createHash("sha256")
     .update(`${input.lineageId}|${input.fromContextSeq}|${input.throughContextSeq}|${body}`, "utf8")
@@ -107,8 +111,8 @@ export function compartmentRangeHash(input: {
  * （B4 content source —— 与 Context pipeline 同一渲染 basis；工具内部与
  * companion 元数据永不渲染）。
  */
-export function renderUnitProviderText(unit: ContextMessageUnitV1): string {
-  const content = unit.semanticContent;
+export function renderUnitProviderText(unit: HistorianBatchUnit): string {
+  const content = unit.unit.content;
   if (typeof content === "string") {
     return content;
   }
@@ -154,19 +158,16 @@ function renderPart(part: unknown): string {
 }
 
 /** unit kind → attribution role（保持区分，永不猜测）。 */
-function attributionRoleFor(unit: ContextMessageUnitV1): Attribution["role"] {
+function attributionRoleFor(unit: HistorianBatchUnit): Attribution["role"] {
   switch (unit.kind) {
     case "user":
       return "user";
     case "assistant":
       return "iris_decision";
-    case "tool_call":
-      return "iris_decision";
     case "tool_result":
       return "tool_observation";
-    case "body_event":
-      return "external_document";
-    case "operational":
+    default:
+      // P0-P4/派生单元无 runtime kind（不进入 batch）→ 保守 external_document。
       return "external_document";
   }
 }
@@ -177,7 +178,7 @@ export function buildCompartment(input: BuildCompartmentInput): BuiltCompartment
   // v29：`exclude` 单元不进入模型分析正文（telemetry / RuntimeRecoveryNotice /
   // 软 cap 超限单元等）。正文渲染与 attribution 只基于 include/reference_only；
   // cursor 仍按全窗口推进（Historian runner 独立处理）。
-  const analysisUnits = units.filter((unit) => unit.historianDisposition !== "exclude");
+  const analysisUnits = units.filter((member) => member.historianDisposition !== "exclude");
   if (analysisUnits.length === 0) {
     return null;
   }
@@ -191,14 +192,14 @@ export function buildCompartment(input: BuildCompartmentInput): BuiltCompartment
 
   const contentParts: string[] = [];
   const attributions = new Map<Attribution["role"], string[]>();
-  for (const unit of analysisUnits) {
-    const text = renderUnitProviderText(unit);
+  for (const member of analysisUnits) {
+    const text = renderUnitProviderText(member);
     if (text.length > 0) {
       contentParts.push(text);
     }
-    const role = attributionRoleFor(unit);
+    const role = attributionRoleFor(member);
     const existing = attributions.get(role) ?? [];
-    existing.push(unit.contextUnitId);
+    existing.push(member.unit.unitId);
     attributions.set(role, existing);
   }
   const content = contentParts.join("\n");
@@ -290,7 +291,7 @@ function extractOpenThreads(content: string): string {
   return threads.join("\n");
 }
 
-function deriveImportance(content: string, units: ContextMessageUnitV1[]): CompartmentImportance {
+function deriveImportance(content: string, units: HistorianBatchUnit[]): CompartmentImportance {
   const toolResults = units.filter((unit) => unit.kind === "tool_result").length;
   const userMessages = units.filter((unit) => unit.kind === "user").length;
   if (toolResults >= 3 || content.length > 8000) return "high";
@@ -298,7 +299,7 @@ function deriveImportance(content: string, units: ContextMessageUnitV1[]): Compa
   return "low";
 }
 
-function deriveEpisodeType(units: ContextMessageUnitV1[]): CompartmentEpisodeType {
+function deriveEpisodeType(units: HistorianBatchUnit[]): CompartmentEpisodeType {
   const hasTool = units.some((unit) => unit.kind === "tool_result");
   const hasUser = units.some((unit) => unit.kind === "user");
   if (hasTool) return "tool_execution";

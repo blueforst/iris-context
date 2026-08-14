@@ -12,11 +12,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { ContextStore } from "../src/context/context-store.js";
-import { ContextIngest } from "../src/context/context-ingest.js";
-import {
-  computeContextMessageUnitContentHashV1,
-  type JsonValue,
-} from "../src/contracts/context-v27.js";
+import { ContextAdmission } from "../src/context/context-admission.js";
+import { DSH_MESSAGE_REF_V1_SCHEMA_ID } from "../src/contracts/context-unit.js";
 import { createContextHistoryReadPort } from "../src/context/history-read-port.js";
 import { createContextRetirementPort } from "../src/context/context-retirement-port.js";
 import { HistorianStore } from "../src/historian/historian-store.js";
@@ -25,45 +22,71 @@ import {
   type MemoryDeliveryClientPort,
 } from "../src/historian/historian-manager.js";
 import type { MemoryDeliveryReceipt } from "../src/historian/historian-publication.js";
-import {
-  assistantInput,
-  cleanupDir,
-  makeLineageInput,
-  tempDir,
-  toolResultInput,
-  userInput,
-} from "./helpers/context-fixtures.js";
+import { cleanupDir, makeLineageInput, tempDir } from "./helpers/context-fixtures.js";
 import { join } from "node:path";
 
 const LINEAGE = "identity-integration";
 
-function openContext(dir: string): { store: ContextStore; ingest: ContextIngest } {
+/** runtime-origin 语义 schema（contentSchemaId → kind 判别）。 */
+const KIND_TO_SCHEMA: Record<"user" | "assistant" | "tool_result", string> = {
+  user: "iris.semantic.context_message.user.v1",
+  assistant: "iris.semantic.context_message.assistant.v1",
+  tool_result: "iris.semantic.context_message.tool_result.v1",
+};
+
+/**
+ * 经统一 ContextUnit admission 接纳一条 runtime-origin 消息（Feature 5：
+ * Historian 只消费 v3 ContextUnit，legacy ContextIngest 不再驱动 Historian）。
+ */
+function admitMessage(
+  admission: ContextAdmission,
+  sessionId: string,
+  messageId: string,
+  kind: "user" | "assistant" | "tool_result",
+  content: string,
+): void {
+  const contentByKind: Record<"user" | "assistant" | "tool_result", unknown> = {
+    user: { role: "user", content },
+    assistant: { role: "assistant", content, timestamp: 1 },
+    tool_result: {
+      role: "toolResult",
+      toolCallId: `tool-${messageId}`,
+      toolName: "echo",
+      content: [{ type: "text", text: content }],
+      isError: false,
+      timestamp: 1,
+    },
+  };
+  admission.admit({
+    sourceRef: { schemaId: DSH_MESSAGE_REF_V1_SCHEMA_ID, sessionId, messageId },
+    contentSchemaId: KIND_TO_SCHEMA[kind],
+    content: contentByKind[kind] as never,
+    runtimeSessionId: sessionId,
+  });
+}
+
+function openContext(dir: string): { store: ContextStore; admission: ContextAdmission } {
   const store = ContextStore.open(join(dir, "context.db"), { lineageId: LINEAGE });
   store.createLineage(makeLineageInput("session-1", LINEAGE));
-  const ingest = new ContextIngest(store, LINEAGE);
-  return { store, ingest };
+  const admission = new ContextAdmission(store);
+  return { store, admission };
 }
 
 test("B8: full pipeline — trigger → commit → receipt → ACK → outbox delivery", async () => {
   const dir = tempDir();
   try {
-    const { store: contextStore, ingest } = openContext(dir);
+    const { store: contextStore, admission } = openContext(dir);
     const historianStore = HistorianStore.open({
       databasePath: join(dir, "historian.db"),
       nowMs: () => 1_000,
     });
     try {
-      // Ingest committed Context units (user + assistant + tool result).
-      ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e1", content: "hello iris", sessionId: "session-1" }),
-      );
-      ingest.ingestRuntimeEvent(
-        assistantInput({ eventId: "e2", content: "hi there", sessionId: "session-1" }),
-      );
-      ingest.ingestRuntimeEvent(
-        toolResultInput({ eventId: "e3", text: "ok", sessionId: "session-1" }),
-      );
-      const before = ingest.listUnits("session-1");
+      // Admit committed Context units (user + assistant + tool result) via the
+      // unified ContextUnit admission path (Historian consumes v3 only).
+      admitMessage(admission, "session-1", "e1", "user", "hello iris");
+      admitMessage(admission, "session-1", "e2", "assistant", "hi there");
+      admitMessage(admission, "session-1", "e3", "tool_result", "ok");
+      const before = contextStore.listUnits("session-1");
       assert.ok(before.length >= 3, "committed units exist");
       assert.equal(before[0]?.lifecycleState, "committed");
 
@@ -107,7 +130,7 @@ test("B8: full pipeline — trigger → commit → receipt → ACK → outbox de
       assert.equal(health.cursor.processedThroughContextSeq, 3, "cursor advanced to batch ceiling");
 
       // Commit protocol: covered units marked compartmentalized_pending_bust.
-      const after = ingest.listUnits("session-1");
+      const after = contextStore.listUnits("session-1");
       for (const unit of after) {
         if (unit.contextSeq <= 3) {
           assert.equal(
@@ -154,18 +177,14 @@ test("B8: full pipeline — trigger → commit → receipt → ACK → outbox de
 test("B8: recover() replays un-acked committed receipts (no duplicate publication)", async () => {
   const dir = tempDir();
   try {
-    const { store: contextStore, ingest } = openContext(dir);
+    const { store: contextStore, admission } = openContext(dir);
     const historianStore = HistorianStore.open({
       databasePath: join(dir, "historian.db"),
       nowMs: () => 1_000,
     });
     try {
-      ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e1", content: "hello", sessionId: "session-1" }),
-      );
-      ingest.ingestRuntimeEvent(
-        assistantInput({ eventId: "e2", content: "hi", sessionId: "session-1" }),
-      );
+      admitMessage(admission, "session-1", "e1", "user", "hello");
+      admitMessage(admission, "session-1", "e2", "assistant", "hi");
       const historyPort = createContextHistoryReadPort(contextStore);
       const retirementPort = createContextRetirementPort(contextStore);
       const manager = new HistorianManager({
@@ -200,7 +219,7 @@ test("B8: recover() replays un-acked committed receipts (no duplicate publicatio
         nowMs: () => 2_000,
       });
       await manager2.recover();
-      const units = ingest.listUnits("session-1");
+      const units = contextStore.listUnits("session-1");
       assert.equal(
         units[0]?.lifecycleState,
         "compartmentalized_pending_bust",
@@ -221,18 +240,14 @@ test("B8: recover() replays un-acked committed receipts (no duplicate publicatio
 test("B8: outbox delivery rejects a receipt with WRONG canonicalPayloadHash (binding fail-closed)", async () => {
   const dir = tempDir();
   try {
-    const { store: contextStore, ingest } = openContext(dir);
+    const { store: contextStore, admission } = openContext(dir);
     const historianStore = HistorianStore.open({
       databasePath: join(dir, "historian.db"),
       nowMs: () => 1_000,
     });
     try {
-      ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e1", content: "hello", sessionId: "session-1" }),
-      );
-      ingest.ingestRuntimeEvent(
-        assistantInput({ eventId: "e2", content: "hi", sessionId: "session-1" }),
-      );
+      admitMessage(admission, "session-1", "e1", "user", "hello");
+      admitMessage(admission, "session-1", "e2", "assistant", "hi");
       const historyPort = createContextHistoryReadPort(contextStore);
       const retirementPort = createContextRetirementPort(contextStore);
 
@@ -297,18 +312,14 @@ test("B8: outbox delivery rejects a receipt with WRONG canonicalPayloadHash (bin
 test("B8: outbox delivery rejects a receipt with UNKNOWN contractVersion (binding fail-closed)", async () => {
   const dir = tempDir();
   try {
-    const { store: contextStore, ingest } = openContext(dir);
+    const { store: contextStore, admission } = openContext(dir);
     const historianStore = HistorianStore.open({
       databasePath: join(dir, "historian.db"),
       nowMs: () => 1_000,
     });
     try {
-      ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e1", content: "hello", sessionId: "session-1" }),
-      );
-      ingest.ingestRuntimeEvent(
-        assistantInput({ eventId: "e2", content: "hi", sessionId: "session-1" }),
-      );
+      admitMessage(admission, "session-1", "e1", "user", "hello");
+      admitMessage(admission, "session-1", "e2", "assistant", "hi");
       const historyPort = createContextHistoryReadPort(contextStore);
       const retirementPort = createContextRetirementPort(contextStore);
 
@@ -354,62 +365,25 @@ test("B8: outbox delivery rejects a receipt with UNKNOWN contractVersion (bindin
 test("B8: all-exclude batch advances the cursor (no stall) and later include units process normally", async () => {
   const dir = tempDir();
   try {
-    const { store: contextStore, ingest } = openContext(dir);
+    const { store: contextStore, admission } = openContext(dir);
     const historianStore = HistorianStore.open({
       databasePath: join(dir, "historian.db"),
       nowMs: () => 1_000,
     });
     try {
-      // Ingest two units, then force both to historian_disposition='exclude'
+      // Admit two units, then force both to historian_disposition='exclude'
       // (e.g. soft-cap overflow / telemetry) → an all-exclude window.
-      // NOTE: disposition is part of the canonical content-hash basis, so a
-      // legitimate disposition transition must recompute content_hash — the
-      // store fails closed otherwise (tamper detection, correctly).
-      ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e1", content: "telemetry-a", sessionId: "session-1" }),
-      );
-      ingest.ingestRuntimeEvent(
-        assistantInput({ eventId: "e2", content: "telemetry-b", sessionId: "session-1" }),
-      );
-      const unitRows = contextStore
+      // NOTE（Feature 5）：v3（ContextUnit）canonical content-hash basis 不含
+      // disposition —— disposition 是 sidecar 状态，不属于 immutable Unit，
+      // 所以直接 UPDATE disposition 即可，无需重算 content_hash。
+      admitMessage(admission, "session-1", "e1", "user", "telemetry-a");
+      admitMessage(admission, "session-1", "e2", "assistant", "telemetry-b");
+      contextStore
         .raw()
         .prepare(
-          "SELECT context_seq, semantic_schema_id, unit_type, payload, derivation_refs FROM context_units WHERE context_lineage_id = ? AND context_seq <= 2",
+          "UPDATE context_units SET disposition = 'exclude' WHERE context_lineage_id = ? AND context_seq <= 2",
         )
-        .all(LINEAGE) as unknown as Array<{
-        context_seq: number;
-        semantic_schema_id: string;
-        unit_type: string;
-        payload: string;
-        derivation_refs: string | null;
-      }>;
-      const KIND_FROM_UNIT_TYPE: Record<string, "user" | "assistant" | "tool_result"> = {
-        input: "user",
-        assistant: "assistant",
-        tool_result: "tool_result",
-      };
-      for (const row of unitRows) {
-        const content = JSON.parse(row.payload) as JsonValue;
-        const refs =
-          row.derivation_refs === null
-            ? { schemaId: "iris.semantic_derivation_refs.v1" as const }
-            : (JSON.parse(row.derivation_refs) as Parameters<
-                typeof computeContextMessageUnitContentHashV1
-              >[0]["derivationRefs"]);
-        const hash = computeContextMessageUnitContentHashV1({
-          semanticSchemaId: row.semantic_schema_id,
-          kind: KIND_FROM_UNIT_TYPE[row.unit_type] ?? "user",
-          historianDisposition: "exclude",
-          derivationRefs: refs,
-          semanticContent: content,
-        });
-        contextStore
-          .raw()
-          .prepare(
-            "UPDATE context_units SET disposition = 'exclude', content_hash = ? WHERE context_lineage_id = ? AND context_seq = ?",
-          )
-          .run(hash, LINEAGE, row.context_seq);
-      }
+        .run(LINEAGE);
 
       const historyPort = createContextHistoryReadPort(contextStore);
       const retirementPort = createContextRetirementPort(contextStore);
@@ -458,9 +432,7 @@ test("B8: all-exclude batch advances the cursor (no stall) and later include uni
       assert.equal(batchState, "skipped");
 
       // A later include unit must now process normally (lineage not stalled).
-      ingest.ingestRuntimeEvent(
-        userInput({ eventId: "e3", content: "real user message", sessionId: "session-1" }),
-      );
+      admitMessage(admission, "session-1", "e3", "user", "real user message");
       assert.equal(await manager.triggerIncremental("session-1"), true);
       await manager.pumpOnce();
       assert.equal(

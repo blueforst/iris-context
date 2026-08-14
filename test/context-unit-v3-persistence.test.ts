@@ -471,3 +471,61 @@ test("F2: ContextAdmission rejects unknown contentSchemaId (fail closed)", () =>
     cleanupDir(dir);
   }
 });
+
+test("F5: retirement mutates lifecycle sidecar, never canonical unit content", () => {
+  const dir = tempDir();
+  try {
+    const store = openStore(dir);
+    const admission = new ContextAdmission(store);
+    const unit = admission.admit({
+      sourceRef: { schemaId: DSH_MESSAGE_REF_V1_SCHEMA_ID, sessionId: "s1", messageId: "m1" },
+      contentSchemaId: "iris.semantic.context_message.user.v1",
+      content: { role: "user", content: "immutable content" },
+      runtimeSessionId: "session-1",
+    });
+    // 先 ACK Historian commit（committed → compartmentalized_pending_bust），
+    // 再标记 retired（模拟成功 BUST 后的 retirement sidecar 推进）。
+    store.acknowledgeHistorianCommit({
+      schemaId: "iris.historian_commit_receipt.v1",
+      receiptId: "receipt-1",
+      batchId: "batch-1",
+      claimId: "claim-1",
+      contextLineageId: LINEAGE,
+      fromContextSeq: 1,
+      throughContextSeq: 1,
+      rangeHash: "rh",
+      compartmentIds: ["comp-1"],
+      publicationIds: [],
+      outputHash: "oh",
+      committedAt: "2026-08-01T00:00:00.000Z",
+    });
+    store.beginBustTransaction();
+    try {
+      store.markRepresentedAndRetired({
+        contextLineageId: LINEAGE,
+        contextGenerationId: "gen-1",
+        contextGenerationHash: "gen-hash",
+        representedThroughContextSeq: 1,
+        retiredThroughContextSeq: 1,
+      });
+      store.commitBustTransaction();
+    } catch (error) {
+      store.rollbackBustTransaction();
+      throw error;
+    }
+    // canonical content 未被修改（同一 identity/content/hash）。
+    const after = store.getContextUnitByUnitId(LINEAGE, unit.unitId);
+    assert.equal(after?.unitId, unit.unitId);
+    assert.deepEqual(after?.content, unit.content);
+    assert.equal(after?.contentHash, unit.contentHash);
+    // lifecycle sidecar 已推进（retired）。
+    const row = store
+      .raw()
+      .prepare("SELECT lifecycle_state FROM context_units WHERE unit_id = ?")
+      .get(unit.unitId) as { lifecycle_state: string };
+    assert.equal(row.lifecycle_state, "retired");
+    store.close();
+  } finally {
+    cleanupDir(dir);
+  }
+});

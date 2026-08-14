@@ -16,7 +16,7 @@
  * 负责 ContextRetirementPortV1.acknowledgeHistorianCommit 幂等 ACK）。
  */
 
-import type { HistorianBatchV1, HistorianCommitReceiptV1 } from "../contracts/historian.js";
+import type { HistorianBatchV2, HistorianCommitReceiptV1 } from "../contracts/historian.js";
 import type { ContextHistoryReadPort } from "../context/history-read-port.js";
 import { buildCompartment, type BuiltCompartment } from "./historian-compartment.js";
 import { validateRange } from "./historian-analysis.js";
@@ -29,7 +29,7 @@ export interface RunnerCommitHook {
    * 推进）。返回 HistorianCommitReceiptV1（commit protocol 的 emit receipt）。
    */
   commitBatch(input: {
-    batch: HistorianBatchV1;
+    batch: HistorianBatchV2;
     built: BuiltCompartment;
     /** batch claim 时冻结的 processing profile id。 */
     processingProfileId: string;
@@ -76,7 +76,7 @@ export class HistorianRunner {
    * 验证失败不抛错（返回 validation_failed，调用方以相同 batch 重试）；
    * 存储错误抛出（调用方 requeue，cursor 从未推进）。
    */
-  run(input: { batch: HistorianBatchV1; runtimeSessionId?: string }): RunnerResult {
+  run(input: { batch: HistorianBatchV2; runtimeSessionId?: string }): RunnerResult {
     const { batch } = input;
     const lineageId = this.historyPort.lineageId();
     if (batch.contextLineageId !== lineageId) {

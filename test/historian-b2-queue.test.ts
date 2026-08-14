@@ -14,12 +14,12 @@ import {
   HistorianWorker,
   type HistorianJob,
 } from "../src/historian/historian-queue.js";
-import type { HistorianBatchV1 } from "../src/contracts/historian.js";
+import type { HistorianBatchV2 } from "../src/contracts/historian.js";
 import { STUB_LINEAGE_ID, simpleUnits } from "./helpers/historian-context-stub.js";
 
-function fakeBatch(from = 1, through = 2): HistorianBatchV1 {
+function fakeBatch(from = 1, through = 2): HistorianBatchV2 {
   return {
-    schemaId: "iris.historian_batch.v1",
+    schemaId: "iris.historian_batch.v2",
     batchId: `batch-${STUB_LINEAGE_ID}-${from}-${through}`,
     claimId: "claim-1",
     contextLineageId: STUB_LINEAGE_ID,

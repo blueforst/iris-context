@@ -33,7 +33,7 @@ function storeFixture(): { store: HistorianStore; dir: string; path: string } {
 function makeBatch(from = 1, through = 3) {
   const units = simpleUnits(through);
   const batch = {
-    schemaId: "iris.historian_batch.v1" as const,
+    schemaId: "iris.historian_batch.v2" as const,
     batchId: `batch-${STUB_LINEAGE_ID}-${from}-${through}`,
     claimId: newClaimId(),
     contextLineageId: STUB_LINEAGE_ID,

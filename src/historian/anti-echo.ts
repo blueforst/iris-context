@@ -17,11 +17,11 @@
  */
 
 import type {
-  ContextMessageUnitV1,
   HistorianDisposition,
   RuntimeEventKind,
   SemanticDerivationRefsV1,
 } from "../contracts/context-v27.js";
+import type { HistorianBatchUnit } from "../contracts/historian.js";
 import type { EvidenceBasisRefV1 } from "../contracts/memory-publication.js";
 
 /** Historian 消费的单元视图（ContextHistoryReadPort 暴露的 values-only 窄视图）。 */
@@ -34,7 +34,7 @@ export interface HistorianUnitView {
   contentHash: string;
   derivationRefs: SemanticDerivationRefsV1;
   /** raw archive 引用（attribution；缺失不影响 anti-echo 分类）。 */
-  rawArchiveRef?: ContextMessageUnitV1["rawArchiveRef"];
+  rawArchiveRef?: import("../contracts/context-v27.js").RawArchiveRefV1;
 }
 
 /**
@@ -169,18 +169,25 @@ export function classifyEvidenceBasis(
   return { evidenceBasis, derivedOnly: evidenceBasis.length === 0 };
 }
 
-/** 从 ContextMessageUnitV1 构造窄视图（runner/authoring 使用）。 */
-export function unitViewOf(lineageId: string, unit: ContextMessageUnitV1): HistorianUnitView {
+/**
+ * 从 HistorianBatchUnit（同一个 ContextUnit + sidecar 坐标）构造窄视图
+ * （runner/authoring 使用）。runtimeEventId 在新模型下由 sourceRef 溯源：
+ * DshMessageRef → `dsh:<sessionId>:<messageId>`；通用 source → sourceId。
+ */
+export function unitViewOf(lineageId: string, unit: HistorianBatchUnit): HistorianUnitView {
+  const ref = unit.unit.sourceRef;
+  const runtimeEventId =
+    ref.schemaId === "iris.dsh_message_ref.v1"
+      ? `dsh:${ref.sessionId}:${ref.messageId}`
+      : ref.sourceId;
   return {
-    contextUnitId: unit.contextUnitId,
+    contextUnitId: unit.unit.unitId,
     contextSeq: unit.contextSeq,
-    runtimeEventId: unit.runtimeEventId,
-    kind: unit.kind,
+    runtimeEventId,
+    kind: unit.kind ?? "operational",
     historianDisposition: unit.historianDisposition,
-    contentHash: unit.contentHash,
-    derivationRefs: unit.derivationRefs ?? {
-      schemaId: "iris.semantic_derivation_refs.v1",
-    },
+    contentHash: unit.unit.contentHash,
+    derivationRefs: unit.derivation ?? { schemaId: "iris.semantic_derivation_refs.v1" },
     ...(unit.rawArchiveRef !== undefined ? { rawArchiveRef: unit.rawArchiveRef } : {}),
   };
 }

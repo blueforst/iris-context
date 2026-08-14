@@ -34,7 +34,7 @@ function batchOf(units = simpleUnits(3)) {
   const from = units[0]?.contextSeq ?? 1;
   const through = units[units.length - 1]?.contextSeq ?? from;
   const batch = {
-    schemaId: "iris.historian_batch.v1" as const,
+    schemaId: "iris.historian_batch.v2" as const,
     batchId: `batch-${STUB_LINEAGE_ID}-${from}-${through}`,
     claimId: "claim-1",
     contextLineageId: STUB_LINEAGE_ID,
@@ -76,7 +76,11 @@ test("B10: content drift → validation_failed, cursor NOT advanced, no publicat
       firstUnit !== undefined && secondUnit !== undefined && thirdUnit !== undefined,
       "fixture units present",
     );
-    const tampered = batchOf([{ ...firstUnit, contentHash: "tampered" }, secondUnit, thirdUnit]);
+    const tampered = batchOf([
+      { ...firstUnit, unit: { ...firstUnit.unit, contentHash: "tampered" } },
+      secondUnit,
+      thirdUnit,
+    ]);
     tampered.rangeHash = batch.rangeHash; // 保留冻结 hash
     const result = runner.run({ batch: tampered, runtimeSessionId: "s" });
     assert.equal(result.status, "validation_failed");

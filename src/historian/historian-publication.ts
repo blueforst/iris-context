@@ -24,8 +24,12 @@
 
 import { createHash } from "node:crypto";
 
-import type { ContextMessageUnitV1 } from "../contracts/context-v27.js";
-import type { HistorianBatchV1, HistorianCommitReceiptV1 } from "../contracts/historian.js";
+import type { JsonValue } from "../contracts/context-v27.js";
+import type {
+  HistorianBatchUnit,
+  HistorianBatchV2,
+  HistorianCommitReceiptV1,
+} from "../contracts/historian.js";
 import { newReceiptId } from "../contracts/historian.js";
 import type {
   EvidenceBasisRefV1,
@@ -132,8 +136,8 @@ export class HistorianProvenanceError extends Error {
 // Provider-neutral observation authoring（替代旧 partitionEpisodeSources）
 // ---------------------------------------------------------------------------
 
-/** unit kind → provider-neutral semantic metadata。 */
-function unitSemanticMetadata(unit: ContextMessageUnitV1): {
+/** batch 成员 kind → provider-neutral semantic metadata（P0–P4/派生单元不进入 batch）。 */
+function unitSemanticMetadata(unit: HistorianBatchUnit): {
   semanticKind: string;
   attributionClass: ObservationAttributionClass;
   sourceTrust: ObservationSourceTrust;
@@ -147,25 +151,13 @@ function unitSemanticMetadata(unit: ContextMessageUnitV1): {
         attributionClass: "iris_decision",
         sourceTrust: "generated",
       };
-    case "tool_call":
-      return {
-        semanticKind: "tool_call",
-        attributionClass: "iris_decision",
-        sourceTrust: "generated",
-      };
     case "tool_result":
       return {
         semanticKind: "tool_result",
         attributionClass: "tool_observation",
         sourceTrust: "verified",
       };
-    case "body_event":
-      return {
-        semanticKind: "body_event",
-        attributionClass: "external_document",
-        sourceTrust: "observed",
-      };
-    case "operational":
+    default:
       return {
         semanticKind: "system_event",
         attributionClass: "external_document",
@@ -176,7 +168,7 @@ function unitSemanticMetadata(unit: ContextMessageUnitV1): {
 
 export interface AuthorObservationsInput {
   lineageId: string;
-  batch: HistorianBatchV1;
+  batch: HistorianBatchV2;
   /** 本批 evidence basis（anti-echo 已过滤；只含 include 且非 derived-only）。 */
   evidenceBasis: EvidenceBasisRefV1[];
   /** 本批 derivedOnly 标记。 */
@@ -208,7 +200,7 @@ export function authorMemoryObservations(input: AuthorObservationsInput): Author
 
   // 按语义角色分组连续单元 → 每条 partition 一条 observation。
   const partitions: Array<{
-    units: ContextMessageUnitV1[];
+    units: HistorianBatchUnit[];
     meta: ReturnType<typeof unitSemanticMetadata>;
   }> = [];
   for (const unit of batch.units) {
@@ -239,9 +231,9 @@ export function authorMemoryObservations(input: AuthorObservationsInput): Author
     });
     const statement = partUnits.map((unit) => renderUnitProviderText(unit)).join("\n");
     const partBasis = partUnits
-      .filter((unit) => basisIds.has(unit.contextUnitId))
+      .filter((unit) => basisIds.has(unit.unit.unitId))
       .map((unit) => {
-        const ref = basisByUnitId.get(unit.contextUnitId);
+        const ref = basisByUnitId.get(unit.unit.unitId);
         return ref === undefined ? undefined : { ...ref };
       })
       .filter((ref): ref is EvidenceBasisRefV1 => ref !== undefined);
@@ -280,7 +272,7 @@ export function authorMemoryObservations(input: AuthorObservationsInput): Author
         observation.statement = {
           text: statementRecord,
           annotation,
-        } as ContextMessageUnitV1["semanticContent"];
+        } as unknown as JsonValue;
       }
     }
     observations.push(observation);
@@ -294,7 +286,7 @@ export function authorMemoryObservations(input: AuthorObservationsInput): Author
 // ---------------------------------------------------------------------------
 
 export interface CommitBatchInput {
-  batch: HistorianBatchV1;
+  batch: HistorianBatchV2;
   built: BuiltCompartment;
   /** batch claim 时冻结的 processing profile id。 */
   processingProfileId: string;

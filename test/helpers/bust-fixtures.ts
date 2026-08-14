@@ -13,7 +13,6 @@ import { createCommittedCompartmentReadPort } from "../../src/context/committed-
 import { HistorianStore } from "../../src/historian/historian-store.js";
 import { buildCompartment } from "../../src/historian/historian-compartment.js";
 import { MemoryIntegrationCoordinator } from "../../src/memory/memory-integration-coordinator.js";
-import type { ContextMessageUnitV1 } from "../../src/contracts/context-v27.js";
 import { DSH_MESSAGE_REF_V1_SCHEMA_ID } from "../../src/contracts/context-unit.js";
 import { makeLineageInput } from "./context-fixtures.js";
 
@@ -91,11 +90,12 @@ export function admitRuntimeMessage(
 }
 
 /** 从 units 构建并插入一个 committed Compartment（模拟 Historian commit 产物）。
- * 返回构建出的 HistoricalCompartment（测试可用其 source 计算 P3 unitId）。 */
+ * 返回构建出的 HistoricalCompartment（测试可用其 source 计算 P3 unitId）。
+ * units 为统一 ContextUnit + sidecar（HistorianBatchUnit 形状）。 */
 export function commitCompartment(
   env: BustEnvironment,
   compartmentSequence: number,
-  units: ContextMessageUnitV1[],
+  units: import("../../src/contracts/historian.js").HistorianBatchUnit[],
 ): import("../../src/historian/historian-compartment.js").HistoricalCompartment {
   const built = buildCompartment({
     lineageId: env.contextStore.lineageId,
@@ -116,4 +116,25 @@ export function commitCompartment(
     throw error;
   }
   return built.compartment;
+}
+
+/**
+ * Feature 5：把 lineage 闭区间内的统一 ContextUnit + sidecar 转换为
+ * HistorianBatchUnit（供 commitCompartment 模拟 Historian 输入）。
+ */
+export function historianBatchUnitsOf(
+  env: BustEnvironment,
+  fromContextSeq: number,
+  toContextSeq: number,
+): import("../../src/contracts/historian.js").HistorianBatchUnit[] {
+  return env.contextStore
+    .listContextUnitsWithState(env.contextStore.lineageId, fromContextSeq, toContextSeq)
+    .map((entry) => ({
+      unit: entry.unit,
+      contextSeq: entry.state.contextSeq,
+      ...(entry.state.kind !== undefined ? { kind: entry.state.kind } : {}),
+      historianDisposition: entry.state.historianDisposition,
+      ...(entry.unit.derivation !== undefined ? { derivation: entry.unit.derivation } : {}),
+      createdAt: entry.state.createdAt,
+    }));
 }

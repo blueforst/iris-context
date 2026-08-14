@@ -31,7 +31,7 @@ function fixture() {
 function makeBatch() {
   const units = simpleUnits(3);
   const batch = {
-    schemaId: "iris.historian_batch.v1" as const,
+    schemaId: "iris.historian_batch.v2" as const,
     batchId: `batch-${STUB_LINEAGE_ID}-1-3`,
     claimId: "claim-1",
     contextLineageId: STUB_LINEAGE_ID,

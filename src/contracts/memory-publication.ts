@@ -18,7 +18,7 @@
 
 import { createHash } from "node:crypto";
 
-import type { ContextMessageUnitV1, JsonValue } from "./context-v27.js";
+import type { JsonValue } from "./context-v27.js";
 
 /** 反回显分类（anti-echo 输出为 provider-neutral observation authoring）。 */
 export type ObservationAttributionClass =
@@ -148,10 +148,14 @@ export function memoryRangeHash(input: {
   contextLineageId: string;
   fromContextSeq: number;
   throughContextSeq: number;
-  units: ReadonlyArray<Pick<ContextMessageUnitV1, "contextSeq" | "contextUnitId" | "contentHash">>;
+  units: ReadonlyArray<
+    Pick<import("./historian.js").HistorianBatchUnit, "contextSeq"> & {
+      unit: Pick<import("./context-unit.js").ContextUnit, "unitId" | "contentHash">;
+    }
+  >;
 }): string {
   const body = input.units
-    .map((unit) => `${unit.contextSeq}:${unit.contextUnitId}:${unit.contentHash}`)
+    .map((unit) => `${unit.contextSeq}:${unit.unit.unitId}:${unit.unit.contentHash}`)
     .join("\n");
   return createHash("sha256")
     .update(

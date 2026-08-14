@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { HistorianStore } from "../src/historian/historian-store.js";
 import { HistorianQueue, type HistorianJob } from "../src/historian/historian-queue.js";
 import { STUB_LINEAGE_ID, simpleUnits } from "./helpers/historian-context-stub.js";
-import type { HistorianBatchV1 } from "../src/contracts/historian.js";
+import type { HistorianBatchV2 } from "../src/contracts/historian.js";
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "iris-b11-"));
@@ -26,8 +26,8 @@ function fixture() {
 }
 
 function fakeJob(overrides?: Partial<HistorianJob>): HistorianJob {
-  const batch: HistorianBatchV1 = {
-    schemaId: "iris.historian_batch.v1",
+  const batch: HistorianBatchV2 = {
+    schemaId: "iris.historian_batch.v2",
     batchId: "batch-1",
     claimId: "c1",
     contextLineageId: STUB_LINEAGE_ID,

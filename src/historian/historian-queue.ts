@@ -14,7 +14,7 @@
  *  - worker 永不与其他 Historian writer 并行（单 worker loop 是唯一 writer）。
  */
 
-import type { HistorianBatchV1 } from "../contracts/historian.js";
+import type { HistorianBatchV2 } from "../contracts/historian.js";
 
 export type HistorianJobPriority = "highest" | "manual";
 
@@ -36,7 +36,7 @@ export interface HistorianJob {
   /** 失败后的最早可重试时刻（exponential backoff）。 */
   retryAtMs?: number;
   /** 冻结的 Context batch（worker 消费 EXACTLY 这个 batch）。 */
-  batch: HistorianBatchV1;
+  batch: HistorianBatchV2;
 }
 
 export type EnqueueOutcome = "queued" | "merged" | "refused";

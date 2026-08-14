@@ -44,7 +44,7 @@ function batchOf(unitsToUse: ReturnType<typeof units>, lineageId = STUB_LINEAGE_
   const from = unitsToUse[0]?.contextSeq ?? 1;
   const through = unitsToUse[unitsToUse.length - 1]?.contextSeq ?? from;
   const batch = {
-    schemaId: "iris.historian_batch.v1" as const,
+    schemaId: "iris.historian_batch.v2" as const,
     batchId: `batch-${lineageId}-${from}-${through}`,
     claimId: "claim-1",
     contextLineageId: lineageId,
