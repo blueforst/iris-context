@@ -35,7 +35,7 @@ export interface HistorianStoreOptions {
 }
 
 /** historian_batches 的 claim/commit 状态（commit protocol）。 */
-export type HistorianBatchState = "claimed" | "committed" | "failed";
+export type HistorianBatchState = "claimed" | "committed" | "skipped" | "failed";
 
 /** historian_batches 物理行形状。 */
 interface BatchRowShape {
@@ -433,6 +433,17 @@ export class HistorianStore {
       .run(now, batchId);
   }
 
+  /**
+   * 在 skip 事务内标记 batch skipped（全 exclude 窗口：无 Compartment/
+   * Publication/outbox，cursor 仍按全窗口推进，避免 lineage 停摆）。
+   */
+  markBatchSkipped(batchId: string): void {
+    const now = new Date(this.nowMs()).toISOString();
+    this.db
+      .prepare("UPDATE historian_batches SET state = 'skipped', updated_at = ? WHERE batch_id = ?")
+      .run(now, batchId);
+  }
+
   getBatch(batchId: string): HistorianBatchRow | undefined {
     const row = this.db
       .prepare(
@@ -463,7 +474,7 @@ export class HistorianStore {
 
   private batchRow(row: BatchRowShape): HistorianBatchRow {
     const state = row.state as HistorianBatchState;
-    if (state !== "claimed" && state !== "committed" && state !== "failed") {
+    if (state !== "claimed" && state !== "committed" && state !== "skipped" && state !== "failed") {
       throw new Error(
         `historian store: unknown batch state ${JSON.stringify(row.state)} (fail closed)`,
       );

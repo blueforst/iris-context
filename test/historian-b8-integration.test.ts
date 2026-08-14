@@ -13,6 +13,10 @@ import assert from "node:assert/strict";
 
 import { ContextStore } from "../src/context/context-store.js";
 import { ContextIngest } from "../src/context/context-ingest.js";
+import {
+  computeContextMessageUnitContentHashV1,
+  type JsonValue,
+} from "../src/contracts/context-v27.js";
 import { createContextHistoryReadPort } from "../src/context/history-read-port.js";
 import { createContextRetirementPort } from "../src/context/context-retirement-port.js";
 import { HistorianStore } from "../src/historian/historian-store.js";
@@ -337,6 +341,134 @@ test("B8: outbox delivery rejects a receipt with UNKNOWN contractVersion (bindin
       const metrics = await manager.drainOutbox(10);
       assert.equal(metrics.rejected, 1, "unknown contractVersion receipt must be rejected");
       assert.equal(metrics.accepted, 0);
+      manager.close();
+    } finally {
+      historianStore.close();
+      contextStore.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("B8: all-exclude batch advances the cursor (no stall) and later include units process normally", async () => {
+  const dir = tempDir();
+  try {
+    const { store: contextStore, ingest } = openContext(dir);
+    const historianStore = HistorianStore.open({
+      databasePath: join(dir, "historian.db"),
+      nowMs: () => 1_000,
+    });
+    try {
+      // Ingest two units, then force both to historian_disposition='exclude'
+      // (e.g. soft-cap overflow / telemetry) → an all-exclude window.
+      // NOTE: disposition is part of the canonical content-hash basis, so a
+      // legitimate disposition transition must recompute content_hash — the
+      // store fails closed otherwise (tamper detection, correctly).
+      ingest.ingestRuntimeEvent(
+        userInput({ eventId: "e1", content: "telemetry-a", sessionId: "session-1" }),
+      );
+      ingest.ingestRuntimeEvent(
+        assistantInput({ eventId: "e2", content: "telemetry-b", sessionId: "session-1" }),
+      );
+      const unitRows = contextStore
+        .raw()
+        .prepare(
+          "SELECT context_seq, semantic_schema_id, unit_type, payload, derivation_refs FROM context_units WHERE context_lineage_id = ? AND context_seq <= 2",
+        )
+        .all(LINEAGE) as unknown as Array<{
+        context_seq: number;
+        semantic_schema_id: string;
+        unit_type: string;
+        payload: string;
+        derivation_refs: string | null;
+      }>;
+      const KIND_FROM_UNIT_TYPE: Record<string, "user" | "assistant" | "tool_result"> = {
+        input: "user",
+        assistant: "assistant",
+        tool_result: "tool_result",
+      };
+      for (const row of unitRows) {
+        const content = JSON.parse(row.payload) as JsonValue;
+        const refs =
+          row.derivation_refs === null
+            ? { schemaId: "iris.semantic_derivation_refs.v1" as const }
+            : (JSON.parse(row.derivation_refs) as Parameters<
+                typeof computeContextMessageUnitContentHashV1
+              >[0]["derivationRefs"]);
+        const hash = computeContextMessageUnitContentHashV1({
+          semanticSchemaId: row.semantic_schema_id,
+          kind: KIND_FROM_UNIT_TYPE[row.unit_type] ?? "user",
+          historianDisposition: "exclude",
+          derivationRefs: refs,
+          semanticContent: content,
+        });
+        contextStore
+          .raw()
+          .prepare(
+            "UPDATE context_units SET disposition = 'exclude', content_hash = ? WHERE context_lineage_id = ? AND context_seq = ?",
+          )
+          .run(hash, LINEAGE, row.context_seq);
+      }
+
+      const historyPort = createContextHistoryReadPort(contextStore);
+      const retirementPort = createContextRetirementPort(contextStore);
+      const manager = new HistorianManager({
+        store: historianStore,
+        historyPort,
+        retirementPort,
+        maxQueuedJobs: 8,
+        nowMs: () => 1_000,
+      });
+
+      assert.equal(await manager.triggerIncremental("session-1"), true);
+      await manager.pumpOnce();
+
+      // Cursor MUST advance over the all-exclude window (no permanent stall).
+      assert.equal(
+        manager.health().cursor.processedThroughContextSeq,
+        2,
+        "cursor advanced over all-exclude window",
+      );
+      // No Compartment / Publication / outbox rows were produced.
+      const compartmentCount = (
+        historianStore.raw().prepare("SELECT COUNT(*) AS c FROM compartments").get() as {
+          c: number;
+        }
+      ).c;
+      const publicationCount = (
+        historianStore.raw().prepare("SELECT COUNT(*) AS c FROM publications").get() as {
+          c: number;
+        }
+      ).c;
+      const outboxCount = (
+        historianStore.raw().prepare("SELECT COUNT(*) AS c FROM publication_outbox").get() as {
+          c: number;
+        }
+      ).c;
+      assert.equal(compartmentCount, 0, "no compartment for all-exclude window");
+      assert.equal(publicationCount, 0, "no publication for all-exclude window");
+      assert.equal(outboxCount, 0, "no outbox row for all-exclude window");
+      // Batch row exists in 'skipped' state.
+      const batchState = (
+        historianStore.raw().prepare("SELECT state FROM historian_batches LIMIT 1").get() as {
+          state: string;
+        }
+      ).state;
+      assert.equal(batchState, "skipped");
+
+      // A later include unit must now process normally (lineage not stalled).
+      ingest.ingestRuntimeEvent(
+        userInput({ eventId: "e3", content: "real user message", sessionId: "session-1" }),
+      );
+      assert.equal(await manager.triggerIncremental("session-1"), true);
+      await manager.pumpOnce();
+      assert.equal(
+        manager.health().cursor.processedThroughContextSeq,
+        3,
+        "later include unit processed",
+      );
+      assert.equal(manager.health().publicationCount, 1, "one publication for the include unit");
       manager.close();
     } finally {
       historianStore.close();

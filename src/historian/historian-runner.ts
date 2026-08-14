@@ -52,7 +52,7 @@ export interface RunnerResult {
   /** True when a safe prefix was committed (cursor advanced + receipt emitted). */
   committed: boolean;
   commitThroughContextSeq: number;
-  status: "committed" | "nothing_new" | "validation_failed";
+  status: "committed" | "nothing_new" | "skipped" | "validation_failed";
   errorCode?: string;
   detail?: string;
   receipt?: HistorianCommitReceiptV1;
@@ -119,11 +119,35 @@ export class HistorianRunner {
       units: batch.units,
     });
     if (built === null) {
-      return {
-        committed: false,
-        commitThroughContextSeq: processedThroughContextSeq,
-        status: "nothing_new",
-      };
+      // 有效但全 exclude 窗口（或无可分析单元）：不产出 Compartment/
+      // Publication/outbox，但必须在同一原子事务内把 lineage cursor 与
+      // session state 推进到 batch 上界并标记 batch skipped —— 否则 lineage
+      // 永久停摆（后续 include 单元永不处理）。
+      this.store.begin();
+      try {
+        this.store.upsertBatchClaim(batch);
+        this.store.markBatchSkipped(batch.batchId);
+        this.store.upsertLineageCursor(
+          lineageId,
+          outcome.commitThroughContextSeq,
+          outcome.commitThroughContextSeq,
+        );
+        this.store.upsertSessionState({
+          runtimeSessionId,
+          status: "active",
+          processedThroughContextSeq: outcome.commitThroughContextSeq,
+          updatedAt: new Date(this.store.now()).toISOString(),
+        });
+        this.store.commit();
+        return {
+          committed: false,
+          commitThroughContextSeq: outcome.commitThroughContextSeq,
+          status: "skipped",
+        };
+      } catch (error) {
+        this.store.rollback();
+        throw error;
+      }
     }
 
     // batch claim 时冻结 processing profile。

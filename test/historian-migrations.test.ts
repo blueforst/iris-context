@@ -127,14 +127,14 @@ test("historian migrations: 0011 drops superseded tables and finalizer column", 
   }
 });
 
-test("historian migrations: existing 0001-0010-era DB opens and applies 0011", () => {
+test("historian migrations: existing 0001-0010-era DB opens and applies 0011+0012", () => {
   const dir = mkdtempSync(join(tmpdir(), "iris-hm-compat-"));
   try {
     const dbPath = join(dir, "historian.db");
     // 只应用 0001-0010 的迁移文件（模拟老库）。
     const legacyDir = mkdtempSync(join(dir, "legacy-migrations-"));
     for (const file of readdirSync(MIGRATIONS_DIR)) {
-      if (file.startsWith("0011")) {
+      if (file.startsWith("0011") || file.startsWith("0012")) {
         continue;
       }
       copyFileSync(join(MIGRATIONS_DIR, file), join(legacyDir, file));
@@ -149,12 +149,34 @@ test("historian migrations: existing 0001-0010-era DB opens and applies 0011", (
     );
     db.close();
 
-    // 用完整迁移目录重开：0011 追加应用。
+    // 用完整迁移目录重开：0011+0012 追加应用。
     const result = migrateDatabase(dbPath, MIGRATIONS_DIR);
-    assert.deepEqual(result.appliedVersions, ["0011_phase_d_provider_neutral"]);
+    assert.deepEqual(result.appliedVersions, [
+      "0011_phase_d_provider_neutral",
+      "0012_batch_skipped_state",
+    ]);
     db = new DatabaseSync(dbPath);
     assert.ok(!tablesOf(db).has("continuity_snapshots"), "0011 drops continuity_snapshots");
     assert.ok(tablesOf(db).has("historian_batches"), "0011 creates historian_batches");
+    // 0012 重建后 state CHECK 允许 'skipped'。
+    const insert = db.prepare(
+      "INSERT INTO historian_batches (batch_id, claim_id, context_lineage_id, from_context_seq, through_context_seq, range_hash, semantic_schema_ids_json, unit_count, estimated_tokens, frozen_at, lease_expires_at, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,'skipped',?,?)",
+    );
+    insert.run(
+      "b-skip",
+      "c-skip",
+      "lineage",
+      1,
+      1,
+      "hash",
+      "[]",
+      1,
+      1,
+      "2026-08-05T00:00:00Z",
+      "2026-08-05T00:01:00Z",
+      "2026-08-05T00:00:00Z",
+      "2026-08-05T00:00:00Z",
+    );
     db.close();
 
     // HistorianStore 能以新 schema 打开。
