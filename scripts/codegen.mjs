@@ -404,8 +404,10 @@ const addFormats = require("ajv-formats") as typeof import("ajv-formats").defaul
   // These fixtures are part of the generated release manifest (freshness-gated):
   //   - v1-flat-generation.fixture.json   superseded flat V1 layout (must be REJECTED)
   //   - v1-flat-unit.fixture.json         superseded flat V1 unit (must be REJECTED)
-  //   - v2-generation.fixture.json        current structured V2 generation (must PASS)
+  //   - v2-generation.fixture.json        superseded structured V2 generation (REJECTED by v3)
   //   - v2-v1-mixed-generation.fixture.json  mixed V1+V2 members (must be REJECTED)
+  //   - v3-unit.fixture.json              current unified ContextUnit v3 (must PASS)
+  //   - v3-generation.fixture.json        current unified generation v3 (must PASS)
   const FIXTURE_DIR = path.join(OUTPUT_DIR, "migration-fixtures");
   fs.mkdirSync(FIXTURE_DIR, { recursive: true });
 
@@ -531,11 +533,84 @@ const addFormats = require("ajv-formats") as typeof import("ajv-formats").defaul
     ],
   };
 
+  // Current unified ContextUnit v3 (single ContextUnit lifecycle). The unit
+  // carries canonical content + stable identity + immutable sourceRef
+  // (DshMessageRef for runtime-origin). No header nesting, no lifecycle/
+  // ordering fields — those live in sidecar state outside the unit.
+  // contentHash MUST use the same canonical basis as the domain module
+  // (computeContextUnitContentHash in src/contracts/context-unit.ts):
+  // sha256(canonicalJson({basis, schemaId, unitId, contextId, contentSchemaId,
+  // content, sourceRef, derivation?})).
+  const v3Unit = {
+    schemaId: "iris.context_unit.v3",
+    unitId: "fixture-unit-v3-0001",
+    contextId: "fixture-lineage-v3",
+    contentSchemaId: "iris.semantic.context_message.user.v1",
+    content: { role: "user", content: "v3 unified unit" },
+    sourceRef: {
+      schemaId: "iris.dsh_message_ref.v1",
+      sessionId: "fixture-session-v3",
+      messageId: "fixture-message-v3-0001",
+      eventSeq: 3,
+    },
+  };
+  v3Unit.contentHash = sha256(
+    canonicalJson({
+      basis: "iris.context_unit.content_hash.v3",
+      schemaId: v3Unit.schemaId,
+      unitId: v3Unit.unitId,
+      contextId: v3Unit.contextId,
+      contentSchemaId: v3Unit.contentSchemaId,
+      content: v3Unit.content,
+      sourceRef: v3Unit.sourceRef,
+    }),
+  );
+
+  const v3Generation = {
+    schemaId: "iris.context_generation.v3",
+    header: {
+      schemaId: "iris.context_generation_header.v1",
+      contextGenerationId: "fixture-gen-v3-0001",
+      contextLineageId: "fixture-lineage-v3",
+      sourceSnapshotHash: "fixture-source-snapshot-v3",
+      layerEnds: [0, 0, 0, 0, 0, 1],
+      contextGenerationHash: "",
+      createdAt: "2026-08-01T00:00:00Z",
+    },
+    units: [v3Unit],
+  };
+  const v3GenHashInput = {
+    schemaId: v3Generation.schemaId,
+    contextLineageId: v3Generation.header.contextLineageId,
+    sourceSnapshotHash: v3Generation.header.sourceSnapshotHash,
+    units: v3Generation.units,
+    layerEnds: v3Generation.header.layerEnds,
+  };
+  const v3h = createHash("sha256");
+  v3h.update(v3GenHashInput.schemaId, "utf8");
+  v3h.update("\0");
+  v3h.update(v3GenHashInput.contextLineageId, "utf8");
+  v3h.update("\0");
+  v3h.update(v3GenHashInput.sourceSnapshotHash, "utf8");
+  v3h.update("\0");
+  for (const unit of v3GenHashInput.units) {
+    v3h.update(unit.unitId, "utf8");
+    v3h.update("\0");
+    v3h.update(unit.contentSchemaId, "utf8");
+    v3h.update("\0");
+    v3h.update(unit.contentHash, "utf8");
+    v3h.update("\0");
+  }
+  v3h.update(v3GenHashInput.layerEnds.join(","), "utf8");
+  v3Generation.header.contextGenerationHash = v3h.digest("hex");
+
   const fixtures = {
     "v1-flat-generation.fixture.json": v1FlatGeneration,
     "v1-flat-unit.fixture.json": v1FlatUnit,
     "v2-generation.fixture.json": v2Generation,
     "v2-v1-mixed-generation.fixture.json": v2V1MixedGeneration,
+    "v3-unit.fixture.json": v3Unit,
+    "v3-generation.fixture.json": v3Generation,
   };
   for (const [fileName, fixture] of Object.entries(fixtures)) {
     fs.writeFileSync(

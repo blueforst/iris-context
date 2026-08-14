@@ -1,0 +1,134 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "iris.context_generation.v3",
+  "title": "ContextGenerationV3",
+  "type": "object",
+  "properties": {
+    "schemaId": {
+      "const": "iris.context_generation.v3"
+    },
+    "header": {
+      "type": "object",
+      "properties": {
+        "schemaId": {
+          "const": "iris.context_generation_header.v1"
+        },
+        "contextGenerationId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contextLineageId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceSnapshotHash": {
+          "type": "string",
+          "minLength": 1
+        },
+        "layerEnds": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "minItems": 6,
+          "maxItems": 6
+        },
+        "contextGenerationHash": {
+          "type": "string",
+          "minLength": 1
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "schemaId",
+        "contextGenerationId",
+        "contextLineageId",
+        "sourceSnapshotHash",
+        "layerEnds",
+        "contextGenerationHash",
+        "createdAt"
+      ],
+      "additionalProperties": false
+    },
+    "units": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "schemaId": {
+            "const": "iris.context_unit.v3"
+          },
+          "unitId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "contextId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "contentSchemaId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "content": {
+            "type": ["string", "number", "boolean", "null", "object", "array"]
+          },
+          "contentHash": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sourceRef": {
+            "type": "object"
+          },
+          "derivation": {
+            "type": "object",
+            "properties": {
+              "schemaId": {
+                "const": "iris.semantic_derivation_refs.v1"
+              },
+              "memoryRefs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "compartmentIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "workSnapshotVersion": {
+                "type": "integer"
+              },
+              "sourceContextMessageUnitIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": ["schemaId"],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "schemaId",
+          "unitId",
+          "contextId",
+          "contentSchemaId",
+          "content",
+          "contentHash",
+          "sourceRef"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["schemaId", "header", "units"],
+  "additionalProperties": false
+}

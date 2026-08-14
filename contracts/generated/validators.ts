@@ -23,7 +23,11 @@ const context_unit_source_ref_v1 =
   require("./json-schemas/context_unit_source_ref-v1.schema.json") as AnySchema;
 const context_unit_header_v1 =
   require("./json-schemas/context_unit_header-v1.schema.json") as AnySchema;
+const dsh_message_ref_v1 = require("./json-schemas/dsh_message_ref-v1.schema.json") as AnySchema;
+const context_unit_v3 = require("./json-schemas/context_unit-v3.schema.json") as AnySchema;
 const context_unit_v2 = require("./json-schemas/context_unit-v2.schema.json") as AnySchema;
+const context_generation_v3 =
+  require("./json-schemas/context_generation-v3.schema.json") as AnySchema;
 const context_generation_header_v1 =
   require("./json-schemas/context_generation_header-v1.schema.json") as AnySchema;
 const context_generation_v2 =
@@ -56,7 +60,10 @@ ajv.addSchema(semantic_derivation_refs_v1, "iris.semantic_derivation_refs.v1");
 ajv.addSchema(context_message_unit_v1, "iris.context_message_unit.v1");
 ajv.addSchema(context_unit_source_ref_v1, "iris.context_unit_source_ref.v1");
 ajv.addSchema(context_unit_header_v1, "iris.context_unit_header.v1");
+ajv.addSchema(dsh_message_ref_v1, "iris.dsh_message_ref.v1");
+ajv.addSchema(context_unit_v3, "iris.context_unit.v3");
 ajv.addSchema(context_unit_v2, "iris.context_unit.v2");
+ajv.addSchema(context_generation_v3, "iris.context_generation.v3");
 ajv.addSchema(context_generation_header_v1, "iris.context_generation_header.v1");
 ajv.addSchema(context_generation_v2, "iris.context_generation.v2");
 
@@ -180,12 +187,71 @@ export function validate_iris_context_unit_header_v1(data: unknown): {
   return { valid: true };
 }
 
+export function validate_iris_dsh_message_ref_v1(data: unknown): {
+  valid: boolean;
+  errors?: string[];
+} {
+  const validate = ajv.getSchema("iris.dsh_message_ref.v1");
+  if (!validate)
+    return { valid: false, errors: ["schema not registered: iris.dsh_message_ref.v1"] };
+  const valid = validate(data);
+  if (!valid) {
+    return {
+      valid: false,
+      errors:
+        (validate.errors as ErrorObject[] | undefined)?.map(
+          (e) => `${e.instancePath}: ${e.message ?? ""}`,
+        ) ?? [],
+    };
+  }
+  return { valid: true };
+}
+
+export function validate_iris_context_unit_v3(data: unknown): {
+  valid: boolean;
+  errors?: string[];
+} {
+  const validate = ajv.getSchema("iris.context_unit.v3");
+  if (!validate) return { valid: false, errors: ["schema not registered: iris.context_unit.v3"] };
+  const valid = validate(data);
+  if (!valid) {
+    return {
+      valid: false,
+      errors:
+        (validate.errors as ErrorObject[] | undefined)?.map(
+          (e) => `${e.instancePath}: ${e.message ?? ""}`,
+        ) ?? [],
+    };
+  }
+  return { valid: true };
+}
+
 export function validate_iris_context_unit_v2(data: unknown): {
   valid: boolean;
   errors?: string[];
 } {
   const validate = ajv.getSchema("iris.context_unit.v2");
   if (!validate) return { valid: false, errors: ["schema not registered: iris.context_unit.v2"] };
+  const valid = validate(data);
+  if (!valid) {
+    return {
+      valid: false,
+      errors:
+        (validate.errors as ErrorObject[] | undefined)?.map(
+          (e) => `${e.instancePath}: ${e.message ?? ""}`,
+        ) ?? [],
+    };
+  }
+  return { valid: true };
+}
+
+export function validate_iris_context_generation_v3(data: unknown): {
+  valid: boolean;
+  errors?: string[];
+} {
+  const validate = ajv.getSchema("iris.context_generation.v3");
+  if (!validate)
+    return { valid: false, errors: ["schema not registered: iris.context_generation.v3"] };
   const valid = validate(data);
   if (!valid) {
     return {

@@ -33,7 +33,10 @@ export const IRIS_SEMANTIC_DERIVATION_REFS_V1_SCHEMA_ID =
 export const IRIS_CONTEXT_MESSAGE_UNIT_V1_SCHEMA_ID = "iris.context_message_unit.v1" as const;
 export const IRIS_CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID = "iris.context_unit_source_ref.v1" as const;
 export const IRIS_CONTEXT_UNIT_HEADER_V1_SCHEMA_ID = "iris.context_unit_header.v1" as const;
+export const IRIS_DSH_MESSAGE_REF_V1_SCHEMA_ID = "iris.dsh_message_ref.v1" as const;
+export const IRIS_CONTEXT_UNIT_V3_SCHEMA_ID = "iris.context_unit.v3" as const;
 export const IRIS_CONTEXT_UNIT_V2_SCHEMA_ID = "iris.context_unit.v2" as const;
+export const IRIS_CONTEXT_GENERATION_V3_SCHEMA_ID = "iris.context_generation.v3" as const;
 export const IRIS_CONTEXT_GENERATION_HEADER_V1_SCHEMA_ID =
   "iris.context_generation_header.v1" as const;
 export const IRIS_CONTEXT_GENERATION_V2_SCHEMA_ID = "iris.context_generation.v2" as const;
@@ -112,10 +115,35 @@ export interface ContextUnitHeaderV1 {
   readonly contentHash: string;
 }
 
+export interface DshMessageRefV1 {
+  readonly schemaId: "iris.dsh_message_ref.v1";
+  readonly sessionId: string;
+  readonly messageId: string;
+  readonly eventSeq?: number;
+  readonly sourceHash?: string;
+}
+
+export interface ContextUnitV3 {
+  readonly schemaId: "iris.context_unit.v3";
+  readonly unitId: string;
+  readonly contextId: string;
+  readonly contentSchemaId: string;
+  readonly content: JsonValue;
+  readonly contentHash: string;
+  readonly sourceRef: Record<string, unknown>;
+  readonly derivation?: SemanticDerivationRefsV1;
+}
+
 export interface ContextUnitV2 {
   readonly schemaId: "iris.context_unit.v2";
   readonly header: ContextUnitHeaderV1;
   readonly semanticContent: JsonValue;
+}
+
+export interface ContextGenerationV3 {
+  readonly schemaId: "iris.context_generation.v3";
+  readonly header: ContextGenerationHeaderV1;
+  readonly units: readonly ContextUnitV3[];
 }
 
 export interface ContextGenerationHeaderV1 {

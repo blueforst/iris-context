@@ -1,0 +1,17 @@
+{
+  "schemaId": "iris.context_unit.v3",
+  "unitId": "fixture-unit-v3-0001",
+  "contextId": "fixture-lineage-v3",
+  "contentSchemaId": "iris.semantic.context_message.user.v1",
+  "content": {
+    "role": "user",
+    "content": "v3 unified unit"
+  },
+  "sourceRef": {
+    "schemaId": "iris.dsh_message_ref.v1",
+    "sessionId": "fixture-session-v3",
+    "messageId": "fixture-message-v3-0001",
+    "eventSeq": 3
+  },
+  "contentHash": "341d0994b9da1bee761385c7032edaba6adf12d9725ba177d5a7b5f0b8aa0464"
+}
