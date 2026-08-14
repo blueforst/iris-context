@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:expansion-request:v1",
+  "title": "ExpansionRequestV1",
+  "description": "Request for provenance expansion of a stable memory reference.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "memoryRef", "maxTokens"],
+  "properties": {
+    "schemaVersion": {
+      "const": "expansion-request-v1"
+    },
+    "memoryRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "maxTokens": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    }
+  }
+}

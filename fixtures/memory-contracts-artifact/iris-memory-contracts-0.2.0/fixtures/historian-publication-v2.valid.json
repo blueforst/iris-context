@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "historian-publication-v2",
+  "publicationId": "11111111-2222-4333-8444-555555555555",
+  "sourceSequence": 1,
+  "publishedAt": "2026-08-05T00:00:00.000Z",
+  "payloadHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "contextRange": {
+    "contextLineageId": "identity-0123456789abcdef",
+    "fromContextSeq": 1,
+    "toContextSeq": 4,
+    "rangeHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "semanticSourceVersion": "context-unit-v1",
+  "compartmentCount": 1,
+  "segmentCount": 1,
+  "evidenceCount": 2,
+  "evidenceBasis": [
+    {
+      "contextUnitId": "input-e-1",
+      "contextSeq": 1,
+      "runtimeEventId": "evt-1",
+      "contentHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "historianDisposition": "include",
+      "rawArchiveRef": {
+        "scheme": "pi-session-entry",
+        "locator": "pi://session/iris-runtime-2026-08-05-1/entry/entry-1"
+      },
+      "derivationRefs": {
+        "memoryRefs": [],
+        "compartmentIds": ["comp-1"],
+        "sourceContextUnitIds": []
+      }
+    },
+    {
+      "contextUnitId": "tool_result-e-2",
+      "contextSeq": 2,
+      "runtimeEventId": "evt-2",
+      "contentHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "historianDisposition": "include"
+    }
+  ],
+  "derivedOnly": false,
+  "summary": "User asked; tool returned; assistant answered."
+}

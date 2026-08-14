@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:unsupported-version-error:v1",
+  "title": "UnsupportedVersionErrorV1",
+  "description": "Fail-closed response for an unsupported contract major/minor version.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "error", "contractVersion", "supportedMajor", "supportedMinor"],
+  "properties": {
+    "schemaVersion": {
+      "const": "unsupported-version-error-v1"
+    },
+    "error": {
+      "const": "unsupported_contract_version"
+    },
+    "contractVersion": {
+      "type": "string"
+    },
+    "supportedMajor": {
+      "const": 0
+    },
+    "supportedMinor": {
+      "const": 1
+    },
+    "message": {
+      "type": "string"
+    }
+  }
+}

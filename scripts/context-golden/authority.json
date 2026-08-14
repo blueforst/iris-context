@@ -1,0 +1,24 @@
+{
+  "repository": "https://github.com/cortexkit/magic-context",
+  "release": "v0.33.0",
+  "commit": "48ab531d8fa98af2f463db2e4d9f8ffdd63d765e",
+  "generatorVersion": "1",
+  "serializerVersion": "iris-context-golden-v1",
+  "authoritativeFiles": [
+    "packages/plugin/src/hooks/magic-context/inject-compartments.ts",
+    "packages/plugin/src/hooks/magic-context/compartment-trigger.ts",
+    "packages/plugin/src/hooks/magic-context/derive-budgets.ts",
+    "packages/plugin/src/hooks/magic-context/protected-tail-boundary.ts",
+    "packages/plugin/src/hooks/magic-context/sentinel.ts",
+    "packages/plugin/src/hooks/magic-context/m0m1-taxonomy.test.ts",
+    "packages/plugin/src/hooks/magic-context/protected-tail-boundary.test.ts"
+  ],
+  "notes": [
+    "Golden truth is mechanically extracted from the locked released authority ONLY (cortexkit/magic-context v0.33.0 @ 48ab531d).",
+    "The generator never derives expected values from Iris's own implementation (no self-certification).",
+    "Re-generating requires the local authority checkout at MC_AUTHORITY_PATH with HEAD == the locked commit;",
+    "without network the committed fixtures under test/fixtures/context/opencode-v0.33.0/ remain runnable.",
+    "Updating the authority commit is an explicit, reviewed action that changes this manifest only.",
+    "Memory Mural / experimental.mural is explicitly out of scope and must never appear in any generated fixture."
+  ]
+}

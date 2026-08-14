@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:sequence-conflict-error:v1",
+  "title": "SequenceConflictErrorV1",
+  "description": "A different publication already owns the requested source sequence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "error",
+    "publicationId",
+    "sourceSequence",
+    "expectedCanonicalPayloadHash",
+    "receivedCanonicalPayloadHash"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "sequence-conflict-error-v1"
+    },
+    "error": {
+      "const": "source_sequence_conflict"
+    },
+    "publicationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sourceSequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "expectedCanonicalPayloadHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "receivedCanonicalPayloadHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "unsupported-version-error-v1",
+  "error": "unsupported_contract_version",
+  "contractVersion": "1.0.0",
+  "supportedMajor": 1,
+  "supportedMinor": 1,
+  "message": "contract 1.0.0 is outside the supported 0.1.x wire contract"
+}

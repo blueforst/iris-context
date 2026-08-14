@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:evidence-basis-ref:v1",
+  "title": "EvidenceBasisRefV1",
+  "description": "A committed Context semantic unit that may serve as a new Evidence basis. Only historianDisposition=include units inside the committed Historian batch qualify.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contextUnitId",
+    "contextSeq",
+    "runtimeEventId",
+    "contentHash",
+    "historianDisposition"
+  ],
+  "properties": {
+    "contextUnitId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "contextSeq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "runtimeEventId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "contentHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "historianDisposition": {
+      "type": "string",
+      "enum": ["include", "reference_only", "exclude"]
+    },
+    "rawArchiveRef": {
+      "$ref": "urn:iris:memory:raw-archive-ref:v1"
+    },
+    "derivationRefs": {
+      "$ref": "urn:iris:memory:semantic-derivation-refs:v1"
+    }
+  }
+}

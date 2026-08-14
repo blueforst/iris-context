@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:recall-request:v1",
+  "title": "RecallRequestV1",
+  "description": "Request for memory recall; implementation is outside this slice.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "query", "maxResults"],
+  "properties": {
+    "schemaVersion": {
+      "const": "recall-request-v1"
+    },
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "maxResults": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50
+    },
+    "includeProvenance": {
+      "type": "boolean"
+    }
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:historian-publication:v1",
+  "title": "HistorianPublicationV1",
+  "description": "Versioned Historian publication envelope owned by iris-memory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "publicationId",
+    "sourceSequence",
+    "publishedAt",
+    "payloadHash",
+    "compartmentCount",
+    "segmentCount",
+    "evidenceCount",
+    "summary"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "historian-publication-v1"
+    },
+    "publicationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sourceSequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "publishedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payloadHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "compartmentCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "segmentCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "evidenceCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    }
+  }
+}

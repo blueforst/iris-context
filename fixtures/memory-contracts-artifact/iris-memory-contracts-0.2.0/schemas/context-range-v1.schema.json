@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:context-range:v1",
+  "title": "ContextRangeV1",
+  "description": "A lineage-global monotonic Context range covered by a Publication, with a deterministic range hash.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contextLineageId", "fromContextSeq", "toContextSeq", "rangeHash"],
+  "properties": {
+    "contextLineageId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "fromContextSeq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "toContextSeq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "rangeHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

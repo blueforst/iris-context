@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:capability-handshake:v2",
+  "title": "MemoryCapabilityHandshakeV2",
+  "description": "Capability and contract-version handshake returned by GET /v1/capabilities. The authoritative wire contract for service readiness and the exact set of available/unavailable capabilities.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "serviceName",
+    "serviceVersion",
+    "contractPackage",
+    "contractVersion",
+    "contractVersions",
+    "supportedMajor",
+    "supportedMinor",
+    "manifestSha256",
+    "capabilities",
+    "unavailableCapabilities",
+    "graphitiStatus",
+    "readiness",
+    "degradedReasons"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "capability-handshake-v2"
+    },
+    "serviceName": {
+      "const": "iris-memory"
+    },
+    "serviceVersion": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "contractPackage": {
+      "const": "iris-memory-contracts"
+    },
+    "contractVersion": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "contractVersions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "major",
+        "minor"
+      ],
+      "properties": {
+        "major": {
+          "type": "integer"
+        },
+        "minor": {
+          "type": "integer"
+        }
+      }
+    },
+    "supportedMajor": {
+      "type": "integer"
+    },
+    "supportedMinor": {
+      "type": "integer"
+    },
+    "manifestSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "schemaCount": {
+      "type": "integer"
+    },
+    "fixtureCount": {
+      "type": "integer"
+    },
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "health.read",
+          "publication.accept",
+          "capability.handshake"
+        ]
+      }
+    },
+    "unavailableCapabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "graphiti.ingest",
+          "recall",
+          "expand",
+          "reindex",
+          "stableMemoryRef"
+        ]
+      }
+    },
+    "graphitiStatus": {
+      "const": "not_configured"
+    },
+    "readiness": {
+      "enum": [
+        "bootstrap",
+        "not_ready",
+        "ready",
+        "degraded"
+      ]
+    },
+    "degradedReasons": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
+    },
+    "supportedMinors": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "minItems": 1
+    }
+  }
+}

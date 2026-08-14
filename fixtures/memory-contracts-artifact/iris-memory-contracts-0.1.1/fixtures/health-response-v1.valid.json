@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "health-response-v1",
+  "service": "iris-memory",
+  "status": "degraded",
+  "contractVersion": "0.1.0",
+  "databaseExists": true,
+  "graphitiStatus": "not_configured",
+  "capabilities": ["health.read", "publication.accept"]
+}

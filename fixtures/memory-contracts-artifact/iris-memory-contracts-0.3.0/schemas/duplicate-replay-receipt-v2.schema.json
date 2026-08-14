@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:duplicate-replay-receipt:v2",
+  "title": "DuplicateReplayReceiptV2",
+  "description": "Duplicate-replay receipt for v3 publications (iris_memory#11): binds the replayed request to the ORIGINAL accepted publication, its exact canonical payload hash and its contract version — a replayed publication can never be re-ingested or re-mapped.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "originalPublicationId",
+    "originalContractVersion",
+    "originalCanonicalPayloadHash",
+    "originalAcceptedAt",
+    "replayedAt"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "duplicate-replay-receipt-v2"
+    },
+    "status": {
+      "const": "duplicate_replay"
+    },
+    "originalPublicationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "originalContractVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16
+    },
+    "originalCanonicalPayloadHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "originalAcceptedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "replayedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:memory:publication-acceptance-request:v2",
+  "title": "PublicationAcceptanceRequestV2",
+  "description": "Acceptance request envelope carrying a historian-publication-v2 payload.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "contractVersion", "idempotencyKey", "publication"],
+  "properties": {
+    "schemaVersion": {
+      "const": "publication-acceptance-request-v2"
+    },
+    "contractVersion": {
+      "type": "string",
+      "pattern": "^0\\.2\\.\\d+$"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "publication": {
+      "$ref": "urn:iris:memory:historian-publication:v2"
+    }
+  }
+}
