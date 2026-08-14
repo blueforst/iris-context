@@ -106,6 +106,22 @@ export interface ContextHistoryReadPort {
     afterContextSeqExclusive: number;
     throughContextSeqInclusive: number;
   }): HistorianBatchV1;
+
+  /**
+   * Phase D（v29 freezeBatch）：Context 冻结完整 semantic boundary 并返回
+   * 有限、不可变、带 rangeHash 与 claim lease 的 HistorianBatchV1。
+   * 与 claimHistorianBatch 同一批选择语义；freezeBatch 显式表达
+   * "Context 在事务中冻结 + claim lease"（frozenAt / leaseExpiresAt /
+   * claimId 每次新建）。Historian 不得扩大 range、不得绕开
+   * historianDisposition、不得回读 Session 修补边界。可选 maxUnits/maxTokens
+   * 是批量有界化提示（不改变批内 membership 的 Context 坐标权威性）。
+   */
+  freezeBatch(input: {
+    afterContextSeqExclusive: number;
+    throughContextSeqInclusive: number;
+    maxUnits?: number;
+    maxTokens?: number;
+  }): HistorianBatchV1;
 }
 
 /** 纯推导（可测）：lineageStatus 与 ContextStore 的 emergency 机制一致。 */
@@ -246,6 +262,63 @@ export function createContextHistoryReadPort(store: ContextStore): ContextHistor
         leaseExpiresAt,
       };
       // 先确定实际端点再计算 hash（hash 覆盖真实窗口）。
+      batch.rangeHash = historianBatchRangeHash(batch);
+      return batch;
+    },
+    freezeBatch({ afterContextSeqExclusive, throughContextSeqInclusive, maxUnits, maxTokens }) {
+      // freezeBatch 与 claimHistorianBatch 同一 Context 坐标批选择；显式
+      // 重新冻结（新 claimId + 新 lease），并可选做 units/tokens 有界化提示。
+      const claimed = store.listUnitsByLineageRange(
+        store.lineageId,
+        afterContextSeqExclusive + 1,
+        throughContextSeqInclusive,
+      );
+      let units = claimed;
+      if (maxUnits !== undefined && maxUnits > 0 && units.length > maxUnits) {
+        units = units.slice(0, maxUnits);
+      }
+      if (maxTokens !== undefined && maxTokens > 0) {
+        let tokens = 0;
+        let cut = units.length;
+        for (let index = 0; index < units.length; index += 1) {
+          const unit = units[index];
+          if (unit === undefined) {
+            continue;
+          }
+          tokens += estimateSemanticTokens(unit.semanticContent);
+          if (tokens > maxTokens) {
+            cut = index;
+            break;
+          }
+        }
+        units = units.slice(0, cut);
+      }
+      const actualThrough =
+        units.length === 0
+          ? afterContextSeqExclusive
+          : (units[units.length - 1]?.contextSeq ?? afterContextSeqExclusive);
+      const fromContextSeq = afterContextSeqExclusive + 1;
+      const semanticSchemaIds = [...new Set(units.map((unit) => unit.semanticSchemaId))];
+      const estimatedTokens = units.reduce(
+        (total, unit) => total + estimateSemanticTokens(unit.semanticContent),
+        0,
+      );
+      const frozenAt = new Date().toISOString();
+      const leaseExpiresAt = new Date(Date.now() + 60_000).toISOString();
+      const batch: HistorianBatchV1 = {
+        schemaId: "iris.historian_batch.v1",
+        batchId: newBatchIdentity(store.lineageId, fromContextSeq, actualThrough),
+        claimId: newClaimId(),
+        contextLineageId: store.lineageId,
+        fromContextSeq,
+        throughContextSeq: actualThrough,
+        rangeHash: "",
+        semanticSchemaIds,
+        units,
+        estimatedTokens,
+        frozenAt,
+        leaseExpiresAt,
+      };
       batch.rangeHash = historianBatchRangeHash(batch);
       return batch;
     },

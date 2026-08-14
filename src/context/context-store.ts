@@ -2374,6 +2374,37 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
     }
   }
 
+  /**
+   * Phase D（Notion v29 commit protocol）：幂等 ACK Historian commit receipt。
+   *
+   * 把 receipt covered 的 units（context_seq ∈ [from..through]，lifecycle_state
+   * ∈ {committed, historian_eligible, historian_claimed}）标记为
+   * `compartmentalized_pending_bust`。这是 Context 侧对 Historian commit 的
+   * 唯一正常响应：
+   *   - 绝不在此推进 represented/retired 水位（只有 Phase E 的 canonical BUST
+   *     full-rebuild 事务才能推进）；
+   *   - 重复 ACK（启动时 receipt 重放）幂等：已标记的单元不再改变；
+   *   - 单元必须属于 receipt.contextLineageId，且只覆盖 receipt 声明的
+   *     contextSeq 闭区间 —— 绝不越权标记其他范围。
+   *
+   * 本方法**不开启**自己的事务：供 Historian manager 在 commit 后以 autocommit
+   * 调用，也可在原子事务内由编排层调用。单条 SQL 原子完成（幂等条件写在
+   * WHERE 中）。
+   */
+  acknowledgeHistorianCommit(
+    receipt: import("./../contracts/historian.js").HistorianCommitReceiptV1,
+  ): void {
+    const result = this.db
+      .prepare(
+        `UPDATE context_units SET lifecycle_state = 'compartmentalized_pending_bust'
+         WHERE context_lineage_id = ?
+           AND context_seq BETWEEN ? AND ?
+           AND lifecycle_state IN ('committed', 'historian_eligible', 'historian_claimed')`,
+      )
+      .run(receipt.contextLineageId, receipt.fromContextSeq, receipt.throughContextSeq);
+    void result;
+  }
+
   setEmergencyState(
     runtimeSessionId: string,
     state: ContextLineage["emergencyState"],

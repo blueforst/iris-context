@@ -66,3 +66,43 @@ export function newBatchIdentity(contextLineageId: string, from: number, through
 export function newClaimId(): string {
   return randomUUID();
 }
+
+/**
+ * Historian 拥有的权威游标（Notion v29 HistorianCursor）：只以 Context 全局
+ * contextSeq 表达。`processedThroughContextSeq` 为 exclusive cursor（下一个
+ * eligible batch 从 +1 开始）；`lastCommittedCompartmentSequence` 为最近一次
+ * 提交的 lineage-scoped compartment sequence（Compartment 反馈回路水位）。
+ * `updatedAt` 为最近更新时刻。
+ */
+export interface HistorianCursor {
+  processedThroughContextSeq: number;
+  lastCommittedCompartmentSequence: number;
+  updatedAt: string;
+}
+
+/**
+ * 权威 commit receipt（Notion v29 commit protocol 的"emit HistorianCommitReceipt
+ * → Context idempotently ACKs → marks covered units compartmentalized_pending_bust"
+ * 步骤）。由 Historian store 在原子 commit 事务内产出；Context 侧
+ * ContextRetirementPortV1.acknowledgeHistorianCommit 幂等消费。字段只以
+ * [01 Canonical Schemas｜HistorianCommitReceiptV1] 为准。
+ */
+export interface HistorianCommitReceiptV1 {
+  schemaId: "iris.historian_commit_receipt.v1";
+  receiptId: string;
+  batchId: string;
+  claimId: string;
+  contextLineageId: string;
+  fromContextSeq: number;
+  throughContextSeq: number;
+  rangeHash: string;
+  compartmentIds: string[];
+  publicationIds: string[];
+  outputHash: string;
+  committedAt: string;
+}
+
+/** 确定性 receipt 身份（绑定 batch + claim）。 */
+export function newReceiptId(batchId: string, claimId: string): string {
+  return `receipt-${batchId}-${claimId}`;
+}
