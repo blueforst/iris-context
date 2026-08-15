@@ -350,6 +350,10 @@ export function computeContextUnitContentHash(input: {
  * （长度由 JSON 语法保证、无分隔符歧义）编码全部 identity 字段，根除该类碰撞。
  *
  * 字段分类（单一事实来源，unitId 与 anchor 共享同一套规则，禁止复制）：
+ *   - type discriminator（ref 类型判别符 —— 防跨类型 identity 碰撞，review
+ *     minor-1）：DshMessageRef / PiArchiveEntryRef / 通用 ref 的 schemaId 进入
+ *     identity，杜绝「某 DSH sessionId+messageId 恰好等于某 Pi
+ *     runtimeSessionId+entryId」时的确定性合并/碰撞；
  *   - stable identity fields（对同一 source 永不变化，构成逻辑 identity）：
  *       DshMessageRef         → sessionId + messageId
  *       PiArchiveEntryRefV1   → runtimeSessionId + entryId（A2）
@@ -361,19 +365,20 @@ export function computeContextUnitContentHash(input: {
  *       DshMessageRef.eventSeq；PiArchiveEntryRefV1.entrySeq（A2）
  *
  * 版本字符串进入 hash basis：未来改变编码/字段集合时 bump 版本，避免新旧
- * 派生静默混用。
+ * 派生静默混用。v3：加入 type discriminator（schemaId）。
  */
-export const SOURCE_IDENTITY_ENCODING_VERSION = "iris.source_identity.v2" as const;
+export const SOURCE_IDENTITY_ENCODING_VERSION = "iris.source_identity.v3" as const;
 
-/** 归一化的 identity 字段（stable + semantic revision；locator 排除）。 */
+/** 归一化的 identity 字段（type discriminator + stable + semantic revision；locator 排除）。 */
 export function sourceIdentityFields(sourceRef: ContextUnitSourceRef): (string | null)[] {
   if (isDshMessageRef(sourceRef)) {
-    return [sourceRef.sessionId, sourceRef.messageId];
+    return [IRIS_DSH_MESSAGE_REF_V1_SCHEMA_ID, sourceRef.sessionId, sourceRef.messageId];
   }
   if (isPiArchiveEntryRef(sourceRef)) {
-    return [sourceRef.runtimeSessionId, sourceRef.entryId];
+    return [IRIS_PI_ARCHIVE_ENTRY_REF_V1_SCHEMA_ID, sourceRef.runtimeSessionId, sourceRef.entryId];
   }
   return [
+    IRIS_CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID,
     sourceRef.sourceSchemaId,
     sourceRef.sourceId,
     sourceRef.sourceRevision ?? null,

@@ -32,6 +32,8 @@ import assert from "node:assert/strict";
 
 import {
   CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID,
+  DSH_MESSAGE_REF_V1_SCHEMA_ID,
+  PI_ARCHIVE_ENTRY_REF_V1_SCHEMA_ID,
   computeContextUnitContentHash,
   deriveContextUnitId,
   sourceAnchorOf,
@@ -106,6 +108,27 @@ test("A1: sourceId containing ':' cannot collide with a revision boundary swap",
   assert.notEqual(sourceAnchorOf(colon1), sourceAnchorOf(colon2));
 });
 
+test("A1: cross-type identity cannot collide (DSH vs Pi vs generic with identical field values)", () => {
+  // 某 DSH sessionId+messageId 恰好等于某 Pi runtimeSessionId+entryId（跨系统
+  // ID 撞值）→ type discriminator 保证 unitId/anchor 不同（review minor-1）。
+  const dsh = {
+    schemaId: DSH_MESSAGE_REF_V1_SCHEMA_ID,
+    sessionId: "same-ids",
+    messageId: "same-ids",
+  } as const;
+  const pi = {
+    schemaId: PI_ARCHIVE_ENTRY_REF_V1_SCHEMA_ID,
+    runtimeSessionId: "same-ids",
+    entryId: "same-ids",
+    sourceHash: "h",
+  } as const;
+  const generic = genericSourceRef({ sourceId: "same-ids", hash: "h" });
+  assert.notEqual(deriveContextUnitId(LINEAGE, dsh), deriveContextUnitId(LINEAGE, pi));
+  assert.notEqual(deriveContextUnitId(LINEAGE, dsh), deriveContextUnitId(LINEAGE, generic));
+  assert.notEqual(deriveContextUnitId(LINEAGE, pi), deriveContextUnitId(LINEAGE, generic));
+  assert.notEqual(sourceAnchorOf(dsh), sourceAnchorOf(pi));
+});
+
 test("A1: Unicode / emoji / combining characters are unambiguous identity content", () => {
   const emoji1 = genericSourceRef({ sourceId: "🔍\u0301", revision: "r", hash: "h" });
   const emoji2 = genericSourceRef({ sourceId: "🔍", revision: "\u0301r", hash: "h" });
@@ -150,8 +173,13 @@ test("F1: same source identity + same revision/hash → same anchor (idempotent)
   const b = genericSourceRef({ sourceId: "comp-1", revision: "r1", hash: "h1" });
   assert.equal(genericSourceAnchor(a), genericSourceAnchor(b));
   assert.equal(sourceAnchorOf(a), sourceAnchorOf(b));
-  // 与 unitId 共享同一 identity 字段规则（versioned canonical basis）。
-  assert.equal(sourceIdentityFields(a).length, 4, "stable+revision fields, no locator");
+  // 与 unitId 共享同一 identity 字段规则（versioned canonical basis；
+  // type discriminator + stable + revision，无 locator）。
+  assert.equal(
+    sourceIdentityFields(a).length,
+    5,
+    "type discriminator + stable + revision, no locator",
+  );
 });
 
 test("F1: changed revision → different anchor", () => {
