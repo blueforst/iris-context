@@ -17,7 +17,7 @@ import type { MemoryService } from "./memory-service.js";
 
 declare module "@deepseek-ai/cordis" {
   interface Context {
-    /** Identity scope 的 Context 服务（ContextStore + ContextIngest + BustCoordinator）。 */
+    /** Identity scope 的 Context 服务（ContextStore + ContextAdmission + BustCoordinator）。 */
     irisContext: ContextService;
     /** Identity scope 的 Historian 服务（HistorianStore + HistorianManager）。 */
     irisHistorian: HistorianService;

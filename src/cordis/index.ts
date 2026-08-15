@@ -3,7 +3,7 @@
  *
  * 导出的 typed services（带 `iris` 前缀，经 `declare module '@deepseek-ai/cordis'`
  * 挂到 ctx）：
- *  - `ctx.irisContext`  —— ContextService（ContextStore + ContextIngest +
+ *  - `ctx.irisContext`  —— ContextService（ContextStore + ContextAdmission +
  *    BustCoordinator + 当前 generation）；
  *  - `ctx.irisHistorian` —— HistorianService（HistorianStore + HistorianManager；
  *    inject=['irisContext']）；

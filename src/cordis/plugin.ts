@@ -4,7 +4,7 @@
  * `createIrisContextPlugin(config)` —— 单个 root plugin（apply 函数）：
  *   1. 打开 historian.db（装配点持有；irisHistorian 复用同一句柄）；
  *   2. 注册 `irisMemory`（MemoryIntegrationCoordinator；zero-or-one adapter）；
- *   3. 注册 `irisContext`（ContextStore + ContextIngest + BustCoordinator），
+ *   3. 注册 `irisContext`（ContextStore + ContextAdmission + BustCoordinator），
  *      `open(dataRoot)` 作为可逆 effect（fiber unload 自动 close）；
  *   4. 加载 `irisHistorian`（inject=['irisContext']；PENDING 直到 Context
  *      ACTIVE —— 不 await，避免加载顺序死锁）；
