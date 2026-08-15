@@ -34,6 +34,8 @@ export const IRIS_CONTEXT_MESSAGE_UNIT_V1_SCHEMA_ID = "iris.context_message_unit
 export const IRIS_CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID = "iris.context_unit_source_ref.v1" as const;
 export const IRIS_CONTEXT_UNIT_HEADER_V1_SCHEMA_ID = "iris.context_unit_header.v1" as const;
 export const IRIS_DSH_MESSAGE_REF_V1_SCHEMA_ID = "iris.dsh_message_ref.v1" as const;
+export const IRIS_PI_ARCHIVE_ENTRY_REF_V1_SCHEMA_ID = "iris.pi_archive_entry_ref.v1" as const;
+export const IRIS_DSH_ATTACHMENT_REF_V1_SCHEMA_ID = "iris.dsh_attachment_ref.v1" as const;
 export const IRIS_CONTEXT_UNIT_V3_SCHEMA_ID = "iris.context_unit.v3" as const;
 export const IRIS_CONTEXT_UNIT_V2_SCHEMA_ID = "iris.context_unit.v2" as const;
 export const IRIS_CONTEXT_GENERATION_V3_SCHEMA_ID = "iris.context_generation.v3" as const;
@@ -121,6 +123,24 @@ export interface DshMessageRefV1 {
   readonly messageId: string;
   readonly eventSeq?: number;
   readonly sourceHash?: string;
+}
+
+export interface PiArchiveEntryRefV1 {
+  readonly schemaId: "iris.pi_archive_entry_ref.v1";
+  readonly runtimeSessionId: string;
+  readonly entryId: string;
+  readonly entrySeq?: number;
+  readonly sourceHash: string;
+}
+
+export interface DshAttachmentRefV1 {
+  readonly schemaId: "iris.dsh_attachment_ref.v1";
+  readonly attachmentId: string;
+  readonly mediaType: string;
+  readonly bytes: number;
+  readonly width: number;
+  readonly height: number;
+  readonly name?: string;
 }
 
 export interface ContextUnitV3 {

@@ -30,6 +30,8 @@ import type {
   ContextGenerationV3,
   ContextUnitSourceRefV1,
   DshMessageRefV1,
+  PiArchiveEntryRefV1,
+  DshAttachmentRefV1,
   JsonValue,
   SemanticDerivationRefsV1,
 } from "../../contracts/generated/types.js";
@@ -37,6 +39,8 @@ import {
   IRIS_CONTEXT_UNIT_V3_SCHEMA_ID,
   IRIS_DSH_MESSAGE_REF_V1_SCHEMA_ID,
   IRIS_CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID,
+  IRIS_PI_ARCHIVE_ENTRY_REF_V1_SCHEMA_ID,
+  IRIS_DSH_ATTACHMENT_REF_V1_SCHEMA_ID,
   IRIS_SEMANTIC_DERIVATION_REFS_V1_SCHEMA_ID,
   IRIS_CONTEXT_GENERATION_V3_SCHEMA_ID,
   IRIS_CONTEXT_GENERATION_HEADER_V1_SCHEMA_ID,
@@ -44,6 +48,8 @@ import {
 import {
   validate_iris_dsh_message_ref_v1,
   validate_iris_context_unit_source_ref_v1,
+  validate_iris_pi_archive_entry_ref_v1,
+  validate_iris_dsh_attachment_ref_v1,
   validate_iris_semantic_derivation_refs_v1,
   validateSemanticContent,
 } from "../../contracts/generated/validators.js";
@@ -64,6 +70,8 @@ export { KIND_TO_SEMANTIC_SCHEMA_ID } from "../../contracts/generated/types.js";
 export { IRIS_CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID as CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID } from "../../contracts/generated/types.js";
 export { IRIS_CONTEXT_UNIT_V3_SCHEMA_ID as CONTEXT_UNIT_V3_SCHEMA_ID };
 export { IRIS_DSH_MESSAGE_REF_V1_SCHEMA_ID as DSH_MESSAGE_REF_V1_SCHEMA_ID };
+export { IRIS_PI_ARCHIVE_ENTRY_REF_V1_SCHEMA_ID as PI_ARCHIVE_ENTRY_REF_V1_SCHEMA_ID };
+export { IRIS_DSH_ATTACHMENT_REF_V1_SCHEMA_ID as DSH_ATTACHMENT_REF_V1_SCHEMA_ID };
 export { IRIS_CONTEXT_GENERATION_V3_SCHEMA_ID as CONTEXT_GENERATION_V3_SCHEMA_ID };
 export { IRIS_CONTEXT_GENERATION_HEADER_V1_SCHEMA_ID as CONTEXT_GENERATION_HEADER_V1_SCHEMA_ID };
 
@@ -89,12 +97,24 @@ export type { ContextUnitV3 };
  *  - `ContextUnitSourceRefV1`（通用 source：sourceSchemaId/sourceId/
  *    sourceRevision?/sourceHash）—— P0–P4 / 派生 Unit；
  *  - `DshMessageRefV1`（runtime-origin P5：sessionId/messageId/eventSeq?/
- *    sourceHash?）—— DSH Session 中对应 message 的稳定唯一引用。
+ *    sourceHash?）—— DSH Session 中对应 message 的稳定唯一引用；
+ *  - `PiArchiveEntryRefV1`（Pi compatibility runtime-origin：runtimeSessionId/
+ *    entryId/entrySeq?/sourceHash）—— Pi archive entry 的专用判别引用
+ *    （iris_agent#130 A2）。稳定 identity = runtimeSessionId + entryId；
+ *    `entrySeq` 是 archive-local locator（可保存/恢复扫描，不进入语义
+ *    revision、不进入稳定 identity）。raw provenance 查找只依赖本持久化
+ *    sourceRef 即可定位原 Pi runtime/archive，不依赖当前 Session binding。
  */
-export type ContextUnitSourceRef = ContextUnitSourceRefV1 | DshMessageRefV1;
+export type ContextUnitSourceRef = ContextUnitSourceRefV1 | DshMessageRefV1 | PiArchiveEntryRefV1;
 
 /** `DshMessageRef` —— runtime-origin Unit 的原始事实来源引用。 */
 export type DshMessageRef = DshMessageRefV1;
+
+/** `PiArchiveEntryRef` —— Pi archive entry 的专用判别 source 引用。 */
+export type PiArchiveEntryRef = PiArchiveEntryRefV1;
+
+/** `DshAttachmentRef` —— DSH durable attachment 的 typed reference（A3）。 */
+export type DshAttachmentRef = DshAttachmentRefV1;
 
 export { IRIS_SEMANTIC_DERIVATION_REFS_V1_SCHEMA_ID as SEMANTIC_DERIVATION_REFS_V1_SCHEMA_ID };
 export type { SemanticDerivationRefsV1 };
@@ -145,10 +165,35 @@ export function isGenericSourceRef(value: unknown): value is ContextUnitSourceRe
   return true;
 }
 
+/** 类型守卫：是否 PiArchiveEntryRef（Pi compatibility runtime-origin source）。 */
+export function isPiArchiveEntryRef(value: unknown): value is PiArchiveEntryRefV1 {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if (record["schemaId"] !== IRIS_PI_ARCHIVE_ENTRY_REF_V1_SCHEMA_ID) {
+    return false;
+  }
+  if (
+    typeof record["runtimeSessionId"] !== "string" ||
+    (record["runtimeSessionId"] as string).length === 0
+  ) {
+    return false;
+  }
+  if (typeof record["entryId"] !== "string" || (record["entryId"] as string).length === 0) {
+    return false;
+  }
+  if (typeof record["sourceHash"] !== "string" || (record["sourceHash"] as string).length === 0) {
+    return false;
+  }
+  return true;
+}
+
 /**
- * 严格解析 `ContextUnitSourceRef`（fail-closed）：既不是 DshMessageRef 也不是
- * 通用 source ref → 抛错；形状合法但未通过生成式机器权威 schema 校验（未知键、
- * 可选字段类型错误）→ 同样抛错。这是 Unit 反序列化/校验的唯一合法入口。
+ * 严格解析 `ContextUnitSourceRef`（fail-closed）：既不是 DshMessageRef、
+ * PiArchiveEntryRef 也不是通用 source ref → 抛错；形状合法但未通过生成式
+ * 机器权威 schema 校验（未知键、可选字段类型错误）→ 同样抛错。这是 Unit
+ * 反序列化/校验的唯一合法入口。
  */
 export function parseContextUnitSourceRef(value: unknown): ContextUnitSourceRef {
   if (isDshMessageRef(value)) {
@@ -156,6 +201,16 @@ export function parseContextUnitSourceRef(value: unknown): ContextUnitSourceRef 
     if (!check.valid) {
       throw new Error(
         `context unit: DshMessageRef failed generated schema validation: ` +
+          `${check.errors?.join("; ") ?? "invalid"} (fail closed)`,
+      );
+    }
+    return value;
+  }
+  if (isPiArchiveEntryRef(value)) {
+    const check = validate_iris_pi_archive_entry_ref_v1(value);
+    if (!check.valid) {
+      throw new Error(
+        `context unit: PiArchiveEntryRef failed generated schema validation: ` +
           `${check.errors?.join("; ") ?? "invalid"} (fail closed)`,
       );
     }
@@ -172,8 +227,35 @@ export function parseContextUnitSourceRef(value: unknown): ContextUnitSourceRef 
     return value;
   }
   throw new Error(
-    `context unit: sourceRef must be a DshMessageRefV1 or ContextUnitSourceRefV1, got ${JSON.stringify(value)} (fail closed)`,
+    `context unit: sourceRef must be a DshMessageRefV1, PiArchiveEntryRefV1 or ` +
+      `ContextUnitSourceRefV1, got ${JSON.stringify(value)} (fail closed)`,
   );
+}
+
+/**
+ * 严格解析 DSH typed attachment ref（`iris.dsh_attachment_ref.v1`；A3）。
+ * 未知 schemaId / 畸形形状 → 抛错（fail-closed）。渲染器/Provider 边界用它
+ * 把 canonical image part 的 `attachmentRef` 收窄为类型化引用 —— opaque
+ * attachmentId 绝不作为图片 data。
+ */
+export function parseDshAttachmentRef(value: unknown): DshAttachmentRefV1 {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`context unit: attachmentRef is not an object (fail closed)`);
+  }
+  const record = value as Record<string, unknown>;
+  if (record["schemaId"] !== IRIS_DSH_ATTACHMENT_REF_V1_SCHEMA_ID) {
+    throw new Error(
+      `context unit: attachmentRef has unknown schemaId ${JSON.stringify(record["schemaId"])} (fail closed)`,
+    );
+  }
+  const check = validate_iris_dsh_attachment_ref_v1(value);
+  if (!check.valid) {
+    throw new Error(
+      `context unit: DshAttachmentRef failed generated schema validation: ` +
+        `${check.errors?.join("; ") ?? "invalid"} (fail closed)`,
+    );
+  }
+  return value as DshAttachmentRefV1;
 }
 
 // ---------------------------------------------------------------------------
@@ -229,7 +311,15 @@ export function computeContextUnitContentHash(input: {
           messageId,
           ...(sourceHash !== undefined ? { sourceHash } : {}),
         }) as DshMessageRefV1)(input.sourceRef)
-    : input.sourceRef;
+    : isPiArchiveEntryRef(input.sourceRef)
+      ? (({ runtimeSessionId, entryId, sourceHash, schemaId }) =>
+          ({
+            schemaId,
+            runtimeSessionId,
+            entryId,
+            sourceHash,
+          }) as PiArchiveEntryRefV1)(input.sourceRef)
+      : input.sourceRef;
   return sha256(
     canonicalJson({
       basis: CONTEXT_UNIT_CONTENT_HASH_BASIS_VERSION,
@@ -247,29 +337,86 @@ export function computeContextUnitContentHash(input: {
 }
 
 // ---------------------------------------------------------------------------
-// 确定性 unitId 派生
+// 确定性 unitId 派生 与 exactly-once 锚（单一版本化 canonical identity）
 // ---------------------------------------------------------------------------
 
 /**
- * 确定性 unitId 派生（admission 用）。同一 contextId + 同一 sourceRef + 同一
- * contentSchemaId 必须产生同一 unitId（source 未变化 → 解析为同一逻辑 Unit；
- * rebuild 不产生随机新 identity）。
+ * 版本化 canonical identity encoder（iris-context#2 + #4 hardening，A1）。
  *
- * - runtime-origin（DshMessageRef）：`unit-<sha256(contextId|sessionId|messageId)>`；
- *   `eventSeq` 只是 archive-local 定位键，不进入 identity。
- * - 通用 source（ContextUnitSourceRefV1）：`unit-<sha256(contextId|sourceSchemaId|
- *   sourceId|sourceRevision?|sourceHash)>`。
+ * 背景：旧实现用 `|` / `:` 拼接 source 字段派生 unitId 与 exactly-once 锚，
+ * 而任意 source 字段（sessionId/sourceId/revision/…）都可能包含这些字符，
+ * 存在**确定性**序列化碰撞（例如 sourceId="a|b" + revision=undefined 与
+ * sourceId="a" + revision="b" 撞同一 unitId）。本模块用 canonical JSON 数组
+ * （长度由 JSON 语法保证、无分隔符歧义）编码全部 identity 字段，根除该类碰撞。
  *
- * contextId 参与派生：unitId 在 contextId 内唯一且跨 lineage 不碰撞。
+ * 字段分类（单一事实来源，unitId 与 anchor 共享同一套规则，禁止复制）：
+ *   - stable identity fields（对同一 source 永不变化，构成逻辑 identity）：
+ *       DshMessageRef         → sessionId + messageId
+ *       PiArchiveEntryRefV1   → runtimeSessionId + entryId（A2）
+ *       ContextUnitSourceRefV1 → sourceSchemaId + sourceId
+ *   - semantic revision fields（语义修订；变化 → 新的 ContextUnit）：
+ *       ContextUnitSourceRefV1 → sourceRevision? + sourceHash
+ *   - locator-only fields（archive-local 定位；**绝不**进入稳定 identity /
+ *       unitId / anchor）：
+ *       DshMessageRef.eventSeq；PiArchiveEntryRefV1.entrySeq（A2）
+ *
+ * 版本字符串进入 hash basis：未来改变编码/字段集合时 bump 版本，避免新旧
+ * 派生静默混用。
+ */
+export const SOURCE_IDENTITY_ENCODING_VERSION = "iris.source_identity.v2" as const;
+
+/** 归一化的 identity 字段（stable + semantic revision；locator 排除）。 */
+export function sourceIdentityFields(sourceRef: ContextUnitSourceRef): (string | null)[] {
+  if (isDshMessageRef(sourceRef)) {
+    return [sourceRef.sessionId, sourceRef.messageId];
+  }
+  if (isPiArchiveEntryRef(sourceRef)) {
+    return [sourceRef.runtimeSessionId, sourceRef.entryId];
+  }
+  return [
+    sourceRef.sourceSchemaId,
+    sourceRef.sourceId,
+    sourceRef.sourceRevision ?? null,
+    sourceRef.sourceHash,
+  ];
+}
+
+/** 版本化 identity key（unitId 与 anchor 的公共 hash basis 前缀；无歧义）。 */
+export function sourceIdentityBasis(sourceRef: ContextUnitSourceRef): string {
+  return canonicalJson([SOURCE_IDENTITY_ENCODING_VERSION, ...sourceIdentityFields(sourceRef)]);
+}
+
+/**
+ * 确定性 unitId 派生（admission 用）。同一 contextId + 同一 sourceRef 必须
+ * 产生同一 unitId（source 未变化 → 解析为同一逻辑 Unit；rebuild 不产生随机
+ * 新 identity）。contextId 进入 basis：unitId 在 contextId 内唯一且跨 lineage
+ * 不碰撞。
+ *
+ * 64-bit 截断审计（A1）：保持 `unit-<16 hex>` 长度不变（64 bit SHA-256 前缀）
+ * —— 既有 durable Unit identity 不得静默改变。碰撞风险：同 lineage 内两个
+ * 不同 source 撞同一 unitId 的概率 ~2^-64；`UNIQUE(context_lineage_id, unit_id)`
+ * 索引使碰撞在 INSERT 时 fail-closed（可检测，不静默）。编码歧义（`|`/`:`）
+ * 已由 canonical JSON 根除；截断级碰撞风险保留为已审计的可接受项。未来若要
+ * 加长 ID，必须新增 forward-only migration + compatibility lookup，不得静默
+ * 改变既有 identity。
  */
 export function deriveContextUnitId(contextId: string, sourceRef: ContextUnitSourceRef): string {
-  if (isDshMessageRef(sourceRef)) {
-    return `unit-${sha256(`${contextId}|${sourceRef.sessionId}|${sourceRef.messageId}`).slice(0, 16)}`;
-  }
-  const basis = [contextId, sourceRef.sourceSchemaId, sourceRef.sourceId]
-    .concat(sourceRef.sourceRevision !== undefined ? [sourceRef.sourceRevision] : [])
-    .concat([sourceRef.sourceHash]);
-  return `unit-${sha256(basis.join("|")).slice(0, 16)}`;
+  const basis = canonicalJson([
+    SOURCE_IDENTITY_ENCODING_VERSION,
+    contextId,
+    ...sourceIdentityFields(sourceRef),
+  ]);
+  return `unit-${sha256(basis).slice(0, 16)}`;
+}
+
+/**
+ * 默认 exactly-once 锚（source_event_id）。与 unitId 共享同一 identity 字段
+ * 规则（sourceIdentityFields），但只对 sourceRef 本身取 hash（不含 contextId：
+ * 锚是全局 source 去重键，现有 UNIQUE(source_event_id) 语义保持）。96-bit
+ * 截断；碰撞由 UNIQUE 索引 fail-closed。
+ */
+export function sourceAnchorOf(sourceRef: ContextUnitSourceRef): string {
+  return `src-${sha256(sourceIdentityBasis(sourceRef)).slice(0, 24)}`;
 }
 
 // ---------------------------------------------------------------------------

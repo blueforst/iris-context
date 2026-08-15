@@ -32,6 +32,7 @@ import { join } from "node:path";
 import {
   CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID,
   DSH_MESSAGE_REF_V1_SCHEMA_ID,
+  PI_ARCHIVE_ENTRY_REF_V1_SCHEMA_ID,
   canonicalJson,
   type ContextUnit,
 } from "../contracts/context-unit.js";
@@ -302,6 +303,53 @@ export class ContextService extends Service {
       contentSchemaId: input.contentSchemaId,
       content: input.content,
       ...(input.runtimeSessionId !== undefined ? { runtimeSessionId: input.runtimeSessionId } : {}),
+      ...(input.runtimeSourceKind !== undefined
+        ? { runtimeSourceKind: input.runtimeSourceKind }
+        : {}),
+    });
+  }
+
+  /**
+   * Pi compatibility runtime-origin 的专用统一 admission（iris_agent#130 A2）。
+   *
+   * Pi 消息被接纳为 `ContextUnit`，其 `sourceRef` 使用**专用判别类型**
+   * `PiArchiveEntryRefV1`（schemaId = `iris.pi_archive_entry_ref.v1`），
+   * 而不是通用 `ContextUnitSourceRefV1`，也不是 `DshMessageRef`：
+   *   - 稳定 identity = `runtimeSessionId + entryId`（raw provenance 只依赖
+   *     持久化 sourceRef 即可定位原 Pi runtime/archive，不依赖当前 Session
+   *     binding，也不依赖 Session→lineage 推断历史 archive）；
+   *   - `entrySeq` 是 archive-local locator：可以保存、可以用于恢复扫描，
+   *     **不得**作为 semantic revision、不得进入稳定 identity/unitId；
+   *   - `sourceHash` 是 entry content 指纹（语义修订字段）。
+   *
+   * canonical content 语义与 DSH 路径一致（同一 ContextUnit 模型，保留接纳
+   * 时确定的 canonical content）；不恢复旧 RuntimeEvent/ContextMessageUnit
+   * 双链；不写 DSH Session。
+   */
+  admitPiArchiveEntry(input: {
+    runtimeSessionId: string;
+    entryId: string;
+    entrySeq?: number;
+    sourceHash?: string;
+    contentSchemaId: string;
+    content: import("../contracts/context-unit.js").JsonValue;
+    runtimeSourceKind?: "user" | "plugin" | "model" | "tool" | "other";
+  }): ContextUnit {
+    const admission = this.requireOpen(this.admissionValue, "admitPiArchiveEntry");
+    const sourceHash =
+      input.sourceHash ??
+      createHash("sha256").update(canonicalJson(input.content), "utf8").digest("hex");
+    return admission.admit({
+      sourceRef: {
+        schemaId: PI_ARCHIVE_ENTRY_REF_V1_SCHEMA_ID,
+        runtimeSessionId: input.runtimeSessionId,
+        entryId: input.entryId,
+        ...(input.entrySeq !== undefined ? { entrySeq: input.entrySeq } : {}),
+        sourceHash,
+      },
+      contentSchemaId: input.contentSchemaId,
+      content: input.content,
+      runtimeSessionId: input.runtimeSessionId,
       ...(input.runtimeSourceKind !== undefined
         ? { runtimeSourceKind: input.runtimeSourceKind }
         : {}),
