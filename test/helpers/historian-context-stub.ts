@@ -154,43 +154,6 @@ export function createFixtureHistoryPort(options: {
     lineageId() {
       return lineageId;
     },
-    listUnitsForHistorian(_lineageId, fromContextSeq, toContextSeq) {
-      return units()
-        .filter((unit) => unit.contextSeq >= fromContextSeq && unit.contextSeq <= toContextSeq)
-        .map((unit) => ({
-          // runtimeEventId 由 sourceRef 溯源（通用 source → sourceId），与
-          // anti-echo 层 unitViewOf 的权威推导一致。
-          contextUnitId: unit.unit.unitId,
-          contextSeq: unit.contextSeq,
-          runtimeEventId:
-            unit.unit.sourceRef.schemaId === "iris.dsh_message_ref.v1"
-              ? `dsh:${unit.unit.sourceRef.sessionId}:${unit.unit.sourceRef.messageId}`
-              : unit.unit.sourceRef.sourceId,
-          kind: unit.kind ?? "operational",
-          historianDisposition: unit.historianDisposition,
-          contentHash: unit.unit.contentHash,
-          derivationRefs: unit.derivation ?? emptyDerivationRefs(),
-          ...(unit.rawArchiveRef !== undefined ? { rawArchiveRef: unit.rawArchiveRef } : {}),
-        }));
-    },
-    listUnitsWithPayload(_lineageId, fromContextSeq, toContextSeq) {
-      return units()
-        .filter((unit) => unit.contextSeq >= fromContextSeq && unit.contextSeq <= toContextSeq)
-        .map((unit) => ({
-          contextUnitId: unit.unit.unitId,
-          contextSeq: unit.contextSeq,
-          runtimeEventId:
-            unit.unit.sourceRef.schemaId === "iris.dsh_message_ref.v1"
-              ? `dsh:${unit.unit.sourceRef.sessionId}:${unit.unit.sourceRef.messageId}`
-              : unit.unit.sourceRef.sourceId,
-          kind: unit.kind ?? "operational",
-          historianDisposition: unit.historianDisposition,
-          contentHash: unit.unit.contentHash,
-          derivationRefs: unit.derivation ?? emptyDerivationRefs(),
-          payload: unit.unit.content,
-          payloadTimestamp: unit.createdAt,
-        }));
-    },
     claimHistorianBatch({ afterContextSeqExclusive, throughContextSeqInclusive }) {
       return claim(afterContextSeqExclusive, throughContextSeqInclusive);
     },

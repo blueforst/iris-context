@@ -50,7 +50,7 @@ import type {
   MemoryServiceAdapter,
   RecallIntent,
 } from "../src/memory/memory-integration-coordinator.js";
-import { cleanupDir, makeLineageInput, tempDir, userInput } from "./helpers/context-fixtures.js";
+import { cleanupDir, makeLineageInput, tempDir } from "./helpers/context-fixtures.js";
 
 const SESSION = "session-1";
 
@@ -299,7 +299,10 @@ test("cordis: reversible effects —— auto-BUST listener 随 unload 注销；d
     // durable 文件与行存在。
     assert.ok(existsSync(join(dir, "context.db")));
     assert.ok(existsSync(join(dir, "historian.db")));
-    assert.equal(ctx.irisContext.listUnits(SESSION).length, 2);
+    assert.equal(
+      ctx.irisContext.getStore().listContextUnits(lineageId, { disposition: "all" }).length,
+      2,
+    );
 
     // unload → 进程内 listener 全部注销。
     await fiber.dispose();
@@ -322,9 +325,12 @@ test("cordis: reversible effects —— contributor unregister 后不再投影",
     const fiber = await mountFull(ctx, { dataRoot: dir });
     const lineageId = ctx.irisContext.lineageId;
     ctx.irisContext.createLineage(makeLineageInput(SESSION, lineageId));
-    ctx.irisContext.ingestRuntimeEvent(
-      userInput({ eventId: "u1", content: "a", sessionId: SESSION }),
-    );
+    ctx.irisContext.admitRuntimeMessage({
+      sessionId: SESSION,
+      messageId: "u1",
+      contentSchemaId: "iris.semantic.context_message.user.v1",
+      content: { role: "user", content: "a" },
+    });
 
     const { contributor, calls } = trackingContributor("persona", "p0-unit");
     const disposeContributor = ctx.irisContext.registerContributor(contributor);
@@ -415,7 +421,7 @@ test("cordis: durable context/historian 行在 unload/reload 后仍在，service
     });
     await ctx1.irisHistorian.triggerIncremental(SESSION);
     await ctx1.irisHistorian.pumpOnce();
-    const before = ctx1.irisContext.listUnits(SESSION);
+    const before = ctx1.irisContext.getStore().listContextUnits(lineageId, { disposition: "all" });
     assert.equal(before.length, 2);
     assert.equal(ctx1.irisHistorian.health().cursor.processedThroughContextSeq, 2);
     assert.equal(ctx1.irisHistorian.health().publicationCount, 1);
@@ -425,13 +431,13 @@ test("cordis: durable context/historian 行在 unload/reload 后仍在，service
     const ctx2 = new Context();
     const f2 = await mountFull(ctx2, { dataRoot: dir });
     try {
-      const after = ctx2.irisContext.listUnits(SESSION);
+      const after = ctx2.irisContext.getStore().listContextUnits(lineageId, { disposition: "all" });
       assert.equal(after.length, 2, "durable context rows rebuilt after reload");
       assert.deepEqual(
-        after.map((unit) => unit.contextUnitId),
-        before.map((unit) => unit.contextUnitId),
+        after.map((unit) => unit.unitId),
+        before.map((unit) => unit.unitId),
       );
-      assert.equal(after[0]?.kind, "user");
+      assert.equal(after[0]?.contentSchemaId, "iris.semantic.context_message.user.v1");
       // Historian durable 状态重建：cursor 与 publication 计数保留。
       assert.equal(
         ctx2.irisHistorian.health().cursor.processedThroughContextSeq,
@@ -501,9 +507,12 @@ test("cordis: P4 recall 只经 BUST —— invocation-time recall fail-closed；
     const fiber = await mountFull(ctx, { dataRoot: dir });
     const lineageId = ctx.irisContext.lineageId;
     ctx.irisContext.createLineage(makeLineageInput(SESSION, lineageId));
-    ctx.irisContext.ingestRuntimeEvent(
-      userInput({ eventId: "u1", content: "a", sessionId: SESSION }),
-    );
+    ctx.irisContext.admitRuntimeMessage({
+      sessionId: SESSION,
+      messageId: "u1",
+      contentSchemaId: "iris.semantic.context_message.user.v1",
+      content: { role: "user", content: "a" },
+    });
 
     const adapter = fakeAdapter();
     const disposeAdapter = ctx.irisMemory.setAdapter(adapter);
@@ -553,9 +562,12 @@ test("cordis: typed events 经 ctx.emit 发出（bust-requested / generation-pub
     const fiber = await mountFull(ctx, { dataRoot: dir });
     const lineageId = ctx.irisContext.lineageId;
     ctx.irisContext.createLineage(makeLineageInput(SESSION, lineageId));
-    ctx.irisContext.ingestRuntimeEvent(
-      userInput({ eventId: "u1", content: "a", sessionId: SESSION }),
-    );
+    ctx.irisContext.admitRuntimeMessage({
+      sessionId: SESSION,
+      messageId: "u1",
+      contentSchemaId: "iris.semantic.context_message.user.v1",
+      content: { role: "user", content: "a" },
+    });
 
     const bustReasons: string[] = [];
     const offBust = ctx.on("iris/bust-requested", (reason) => {
@@ -596,9 +608,12 @@ test("cordis: scope —— Agent scope dispose 不 dispose Identity services", a
     const fiber = await mountFull(identity, { dataRoot: dir });
     const lineageId = identity.irisContext.lineageId;
     identity.irisContext.createLineage(makeLineageInput(SESSION, lineageId));
-    identity.irisContext.ingestRuntimeEvent(
-      userInput({ eventId: "u1", content: "a", sessionId: SESSION }),
-    );
+    identity.irisContext.admitRuntimeMessage({
+      sessionId: SESSION,
+      messageId: "u1",
+      contentSchemaId: "iris.semantic.context_message.user.v1",
+      content: { role: "user", content: "a" },
+    });
 
     // Runtime Agent scope：Identity 之下的独立 fiber（agent facet）。
     const agentObserved = { generationId: undefined as string | undefined };

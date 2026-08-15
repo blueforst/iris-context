@@ -1,8 +1,8 @@
 /**
  * Phase F（Cordis）：irisContext —— Context 服务（Identity scope）。
  *
- * 组合 ContextStore（context.db 唯一 owner）+ ContextIngest（canonical
- * runtime-event 归一化/原子 ingest）+ BustCoordinator（唯一 canonical BUST
+ * 组合 ContextStore（context.db 唯一 owner）+ ContextAdmission（DSH Message →
+ * ContextUnit 统一 ingress）+ BustCoordinator（唯一 canonical BUST
  * materializer）+ 当前 generation。
  *
  * 生命周期（reversible effects）：
@@ -29,12 +29,9 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 
-import type { ContextMessageUnitV1, UnitDispositionFilter } from "../contracts/context-v27.js";
-import type { CanonicalRuntimeEventV1, RuntimeEventInput } from "../contracts/runtime-events.js";
 import { DSH_MESSAGE_REF_V1_SCHEMA_ID, type ContextUnit } from "../contracts/context-unit.js";
 import type { ContextRetirementPortV1 } from "../contracts/context-retirement.js";
 import { ContextAdmission } from "../context/context-admission.js";
-import { ContextIngest } from "../context/context-ingest.js";
 import {
   BustCoordinator,
   type BustEvidence,
@@ -92,7 +89,7 @@ export interface ContextOpenOptions {
 }
 
 /**
- * irisContext —— Context 服务。ContextStore + ContextIngest +
+ * irisContext —— Context 服务。ContextStore + ContextAdmission +
  * BustCoordinator + 当前 generation；暴露给 Historian 的窄端口
  * （historyPort / retirementPort）只以 VALUE 呈现。
  */
@@ -110,7 +107,6 @@ export class ContextService extends Service {
   private readonly now: (() => string) | undefined;
 
   private storeValue: ContextStore | undefined;
-  private ingestValue: ContextIngest | undefined;
   private admissionValue: ContextAdmission | undefined;
   private bustValue: BustCoordinator | undefined;
   private historyPortValue: ContextHistoryReadPort | undefined;
@@ -159,7 +155,6 @@ export class ContextService extends Service {
       lineageId: this.lineageId,
       ...options.contextStoreOptions,
     });
-    const ingest = new ContextIngest(store, this.lineageId);
     // DSH 正常路径的统一 admission（ContextAdmission；DSH Message → ContextUnit）。
     const admission = new ContextAdmission(store);
     // BUST-only recall 授权门：装配 irisMemory 时，BUST coordinator 经
@@ -187,7 +182,6 @@ export class ContextService extends Service {
       ...(this.now !== undefined ? { now: this.now } : {}),
     });
     this.storeValue = store;
-    this.ingestValue = ingest;
     this.admissionValue = admission;
     this.bustValue = bust;
     this.historyPortValue = createContextHistoryReadPort(store);
@@ -213,8 +207,6 @@ export class ContextService extends Service {
       return;
     }
     this.closed = true;
-    this.ingestValue?.close();
-    this.ingestValue = undefined;
     this.admissionValue = undefined;
     this.storeValue = undefined;
     this.bustValue = undefined;
@@ -261,51 +253,6 @@ export class ContextService extends Service {
         ? { runtimeSourceKind: input.runtimeSourceKind }
         : {}),
     });
-  }
-
-  // ---- 旧 ContextMessageUnit ingest（legacy；Pi seam 迁移用）----------------
-
-  /**
-   * @legacy 旧 RuntimeEvent 原子 ingest（RuntimeEventInput → CanonicalRuntimeEventV1 +
-   * ContextMessageUnitV1）。DSH 正常路径已由 {@link admitRuntimeMessage} 取代；
-   * 本方法仅保留给 legacy Pi seam / 历史测试 / 迁移对账。Feature 6 将从公共
-   * API 移除。
-   */
-  ingestRuntimeEvent(input: RuntimeEventInput): {
-    event: CanonicalRuntimeEventV1;
-    unit: ContextMessageUnitV1 | null;
-  } {
-    return this.requireOpen(this.ingestValue, "ingestRuntimeEvent").ingestRuntimeEvent(input);
-  }
-
-  /** @legacy 读取某 runtime session 的已提交单元（旧 ContextMessageUnit 视图）。 */
-  listUnits(
-    runtimeSessionId: string,
-    options?: { afterContextSeq?: number; limit?: number; disposition?: UnitDispositionFilter },
-  ): ContextMessageUnitV1[] {
-    const ingest = this.requireOpen(this.ingestValue, "listUnits");
-    return ingest.listUnits(runtimeSessionId, options);
-  }
-
-  /** @legacy 按 lineage 直查已提交单元（Recovery/历史 Session 路径）。 */
-  listUnitsByLineage(
-    lineageId: string,
-    options?: { afterContextSeq?: number; limit?: number; disposition?: UnitDispositionFilter },
-  ): ContextMessageUnitV1[] {
-    return this.requireOpen(this.storeValue, "listUnitsByLineage").listUnitsByLineage(
-      lineageId,
-      options,
-    );
-  }
-
-  /**
-   * @legacy 重放/恢复对账：为已提交事件补建缺失单元（幂等安全网）。
-   */
-  ensureUnitsUpTo(runtimeSessionId: string, options?: { limit?: number }): ContextMessageUnitV1[] {
-    return this.requireOpen(this.ingestValue, "ensureUnitsUpTo").ensureUnitsUpTo(
-      runtimeSessionId,
-      options,
-    );
   }
 
   /** 创建 durable Session→lineage 绑定（host 在 session 进入时调用）。 */

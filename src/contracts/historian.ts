@@ -19,7 +19,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import type {
-  ContextMessageUnitV1,
   HistorianDisposition,
   JsonValue,
   RawArchiveRefV1,
@@ -60,22 +59,6 @@ export interface HistorianBatchV2 {
   rangeHash: string;
   semanticSchemaIds: string[];
   units: HistorianBatchUnit[];
-  estimatedTokens: number;
-  frozenAt: string;
-  leaseExpiresAt: string;
-}
-
-/** @legacy 旧 V1 batch（units 为 ContextMessageUnitV1[]）；仅 legacy 测试/迁移用。 */
-export interface HistorianBatchV1 {
-  schemaId: "iris.historian_batch.v1";
-  batchId: string;
-  claimId: string;
-  contextLineageId: string;
-  fromContextSeq: number;
-  throughContextSeq: number;
-  rangeHash: string;
-  semanticSchemaIds: string[];
-  units: ContextMessageUnitV1[];
   estimatedTokens: number;
   frozenAt: string;
   leaseExpiresAt: string;

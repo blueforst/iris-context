@@ -2,22 +2,15 @@
  * R3-P1 + v27–v29：ContextHistoryReadPort —— 跨库窄读取端口（Context lineage →
  * Historian）。
  *
- * 权威来源：Notion v27–v29 —— Historian 只通过 Context semantic history 消费
- * committed ContextMessageUnitV1（ContextHistoryReadPort），绝不消费 provider
+ * 权威来源：Notion 2026-08-15 —— Historian 只通过 Context semantic history 消费
+ * 统一 ContextUnit（ContextHistoryReadPort，HistorianBatchV2），绝不消费 provider
  * wire / Session transcript。本端口只把 Context 坐标暴露为 VALUE（contextSeq、
  * content hash、状态字符串、JsonValue payload），绝不向消费方泄漏 context.db
  * 的句柄、Repository / ORM entity / 具体 Adapter，也不建立跨库外键。
  *
  * 跨库规则（AGENTS.md）：本端口是窄、版本化的契约；batch 形状以
- * src/contracts/historian.ts（权威 HistorianBatchV1）为准。
+ * src/contracts/historian.ts（权威 HistorianBatchV2）为准。
  */
-
-import type {
-  ContextMessageUnitV1,
-  HistorianDisposition,
-  RuntimeEventKind,
-  SemanticDerivationRefsV1,
-} from "../contracts/context-v27.js";
 
 import {
   estimateSemanticTokens,
@@ -56,46 +49,6 @@ export interface ContextHistoryReadPort {
 
   /** 本 data root 的权威 identity-level Context lineage id（one per data root）。 */
   lineageId(): string;
-
-  /**
-   * 读取 lineage 内 [fromContextSeq, toContextSeq] 闭区间的
-   * ContextMessageUnitV1 窄视图（values-only）。供 Historian 在构建 Evidence
-   * 时做 anti-echo 分类；不泄漏 context.db 句柄。
-   */
-  listUnitsForHistorian(
-    lineageId: string,
-    fromContextSeq: number,
-    toContextSeq: number,
-  ): Array<{
-    contextUnitId: string;
-    contextSeq: number;
-    runtimeEventId: string;
-    kind: RuntimeEventKind;
-    historianDisposition: HistorianDisposition;
-    contentHash: string;
-    derivationRefs: SemanticDerivationRefsV1;
-  }>;
-
-  /**
-   * 读取 lineage 区间 WITH canonical provider-visible payloads（values-only
-   * JsonValue —— 同一物化行，Context 提交的 canonical 语义内容）。仅供
-   * publication envelope builder；anti-echo 视图保持 content-free。
-   */
-  listUnitsWithPayload(
-    lineageId: string,
-    fromContextSeq: number,
-    toContextSeq: number,
-  ): Array<{
-    contextUnitId: string;
-    contextSeq: number;
-    runtimeEventId: string;
-    kind: RuntimeEventKind;
-    historianDisposition: HistorianDisposition;
-    contentHash: string;
-    derivationRefs: SemanticDerivationRefsV1;
-    payload: ContextMessageUnitV1["semanticContent"];
-    payloadTimestamp?: string;
-  }>;
 
   /**
    * Context-owned CLAIM —— Historian 的唯一正常语义 batch selector。按
@@ -163,26 +116,6 @@ export function resolveEntrySeqForWatermark(
   return max;
 }
 
-/** values-only derivation refs（anti-echo 层永不看到 undefined refs）。 */
-function toSemanticDerivationRefs(
-  refs: ContextMessageUnitV1["derivationRefs"],
-): SemanticDerivationRefsV1 {
-  if (refs === undefined) {
-    return { schemaId: "iris.semantic_derivation_refs.v1" };
-  }
-  return {
-    schemaId: "iris.semantic_derivation_refs.v1",
-    ...(refs.memoryRefs !== undefined ? { memoryRefs: [...refs.memoryRefs] } : {}),
-    ...(refs.compartmentIds !== undefined ? { compartmentIds: [...refs.compartmentIds] } : {}),
-    ...(refs.workSnapshotVersion !== undefined
-      ? { workSnapshotVersion: refs.workSnapshotVersion }
-      : {}),
-    ...(refs.sourceContextMessageUnitIds !== undefined
-      ? { sourceContextMessageUnitIds: [...refs.sourceContextMessageUnitIds] }
-      : {}),
-  };
-}
-
 /** Adapter：把 ContextStore（context.db 权威 owner）适配为窄读取端口。 */
 export function createContextHistoryReadPort(store: ContextStore): ContextHistoryReadPort {
   return {
@@ -205,30 +138,6 @@ export function createContextHistoryReadPort(store: ContextStore): ContextHistor
         lineageStatus: deriveLineageStatus(lineage),
         providerProfileId: lineage.providerProfileId,
       };
-    },
-    listUnitsForHistorian(lineageId, fromContextSeq, toContextSeq) {
-      return store.listUnitsByLineageRange(lineageId, fromContextSeq, toContextSeq).map((unit) => ({
-        contextUnitId: unit.contextUnitId,
-        contextSeq: unit.contextSeq,
-        runtimeEventId: unit.runtimeEventId,
-        kind: unit.kind,
-        historianDisposition: unit.historianDisposition,
-        contentHash: unit.contentHash,
-        derivationRefs: toSemanticDerivationRefs(unit.derivationRefs),
-      }));
-    },
-    listUnitsWithPayload(lineageId, fromContextSeq, toContextSeq) {
-      return store.listUnitsByLineageRange(lineageId, fromContextSeq, toContextSeq).map((unit) => ({
-        contextUnitId: unit.contextUnitId,
-        contextSeq: unit.contextSeq,
-        runtimeEventId: unit.runtimeEventId,
-        kind: unit.kind,
-        historianDisposition: unit.historianDisposition,
-        contentHash: unit.contentHash,
-        derivationRefs: toSemanticDerivationRefs(unit.derivationRefs),
-        payload: unit.semanticContent,
-        payloadTimestamp: unit.createdAt,
-      }));
     },
     claimHistorianBatch({ afterContextSeqExclusive, throughContextSeqInclusive }) {
       // 只读 lineage 内闭区间统一 ContextUnit + sidecar；按 contextSeq 升序。

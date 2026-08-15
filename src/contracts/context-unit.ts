@@ -50,6 +50,11 @@ import {
 // 领域类型名（无版本后缀）；wire 版本只由 schemaId 表达
 // ---------------------------------------------------------------------------
 
+export type {
+  JsonValue,
+  HistorianDisposition,
+  ContextGenerationV3,
+} from "../../contracts/generated/types.js";
 export { IRIS_CONTEXT_UNIT_V3_SCHEMA_ID as CONTEXT_UNIT_V3_SCHEMA_ID };
 export { IRIS_DSH_MESSAGE_REF_V1_SCHEMA_ID as DSH_MESSAGE_REF_V1_SCHEMA_ID };
 export { IRIS_CONTEXT_GENERATION_V3_SCHEMA_ID as CONTEXT_GENERATION_V3_SCHEMA_ID };

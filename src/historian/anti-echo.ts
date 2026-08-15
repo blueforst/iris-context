@@ -3,7 +3,7 @@
  *
  * 权威来源：Notion v29 Evidence dispositions and anti-echo ——
  *   - 只有 disposition=include 且已进入 committed Historian batch 的
- *     ContextMessageUnitV1 可以成为新 MemoryObservation 的 source basis；
+ *     ContextUnit 可以成为新 MemoryObservation 的 source basis；
  *   - reference_only 可以参与解释关系/目标，但不增加 evidence 计数/置信度；
  *   - exclude 不得进入分析 basis；
  *   - derived-only（assistant 语句完全派生自已有 memory/Compartment/work/

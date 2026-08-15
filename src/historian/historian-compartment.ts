@@ -11,7 +11,7 @@
  * ContinuitySnapshot/wrapup）。
  *
  * 不变量（纯构造，调用方在事务内 commit）：
- *  - content 只来自已验证的 committed ContextMessageUnitV1（批量成员）；
+ *  - content 只来自已验证的 committed ContextUnit（批量成员，同一个 Unit）；
  *  - start/end/sourceRangeHash 由同一批单元推导（contextSeq 坐标）；
  *  - attribution 区分 user / external_document / tool_observation / iris_decision；
  *  - anti-echo：evidenceBasis 只含 include 且非 derived-only 的单元；
@@ -107,7 +107,7 @@ export function compartmentRangeHash(input: {
 }
 
 /**
- * Canonical provider-visible semantic text for a ContextMessageUnitV1
+ * Canonical provider-visible semantic text for a HistorianBatchUnit（ContextUnit.content）
  * （B4 content source —— 与 Context pipeline 同一渲染 basis；工具内部与
  * companion 元数据永不渲染）。
  */

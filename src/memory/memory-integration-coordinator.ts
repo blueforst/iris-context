@@ -7,10 +7,10 @@
  *   - Context-owned Recall Intent → Memory Integration Coordinator →
  *     active Memory Service Adapter → provider-neutral RecollectionSnapshot
  *     → Context-owned validation/sanitization/dedupe/budget/ordering → P4
- *     ContextUnitV2 projection（P4RecollectionProjector，本模块不含投影）；
+ *     ContextUnit projection（P4RecollectionProjector，本模块不含投影）；
  *   - Identity scope 中 exactly one、thin/reconstructable；backend 为
  *     zero-or-one（zero-backend 合法 → P4 为空，Context/Historian 正常运行）；
- *   - backend 只返回 provider-neutral snapshot，绝不创建 ContextUnitV2；
+ *   - backend 只返回 provider-neutral snapshot，绝不创建 ContextUnit；
  *     backend 的 revision/可用性变化只能产生 memory source invalidation →
  *     requestBust(...)，不能直接更新 P4；
  *   - provider 不可用时显式标记 unavailable（绝不伪装为"无记忆"）。
@@ -54,7 +54,7 @@ export interface RecollectionCandidate {
 
 /**
  * Memory Service Adapter 返回的原始 recall 结果（provider-neutral 数据快照）。
- * 接口层面保证：backend 只能返回 snapshot，不能创建 ContextUnitV2。
+ * 接口层面保证：backend 只能返回 snapshot，不能创建 ContextUnit。
  */
 export interface MemoryRecallResult {
   snapshotId?: string;

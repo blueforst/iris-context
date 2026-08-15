@@ -59,7 +59,7 @@ export interface MemoryObservationV1 {
   throughContextSeq: number;
   rangeHash: string;
   semanticSchemaId: string;
-  /** 中性语义陈述（文本或结构化 JsonValue；与 ContextMessageUnitV1.semanticContent 同源）。 */
+  /** 中性语义陈述（文本或结构化 JsonValue；与 ContextUnit.content 同源）。 */
   statement: JsonValue;
   semanticKind: string;
   attributionClass: ObservationAttributionClass;

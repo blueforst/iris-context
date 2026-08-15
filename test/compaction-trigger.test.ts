@@ -111,8 +111,6 @@ function stubHistoryPort(representedThroughContextSeq: number): ContextHistoryRe
       };
     },
     lineageId: () => "lineage-1",
-    listUnitsForHistorian: () => [],
-    listUnitsWithPayload: () => [],
     claimHistorianBatch: () => {
       throw new Error("unused");
     },
@@ -129,8 +127,6 @@ function throwingHistoryPort(): ContextHistoryReadPort {
       throw new Error("no lineage");
     },
     lineageId: () => "lineage-1",
-    listUnitsForHistorian: () => [],
-    listUnitsWithPayload: () => [],
     claimHistorianBatch: () => {
       throw new Error("unused");
     },
