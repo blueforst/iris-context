@@ -92,11 +92,30 @@ export function dshSourceAnchor(ref: DshMessageRef): string {
   return `dsh:${ref.sessionId}:${ref.messageId}`;
 }
 
-/** 通用 sourceRef 的默认 exactly-once 锚。 */
+/**
+ * 通用 sourceRef 的默认 exactly-once 锚（iris-context#4）。
+ *
+ * 必须与 `deriveContextUnitId()` 的 identity 语义一致地区分语义 source
+ * revision：当前 `ContextUnit` identity 对通用 source 包含 `sourceRevision?`
+ * 与 `sourceHash`，因此同一 `sourceSchemaId + sourceId` 的两个不同合法
+ * revision 会派生不同的 `unitId`。若 exactly-once 锚只取
+ * `${sourceSchemaId}:${sourceId}`，第二次 admission 会在持久层
+ * `source_event_id UNIQUE` 上碰撞（而不是材料化新 Unit 所需的
+ * `ContextUnit`），破坏 single-Unit lifecycle 的“新 revision → 新 Unit”
+ * 不变量。
+ *
+ * 锚格式与 `deriveContextUnitId` 的 hash basis 同源：
+ * `sourceSchemaId:sourceId[:sourceRevision]:sourceHash` —— 同一 source
+ * identity + 同一 revision/hash → 同一锚（幂等）；revision/hash 任一变化 →
+ * 新锚（新行，不碰撞）。纯函数，跨 restart 确定性。
+ */
 export function genericSourceAnchor(
   ref: Extract<ContextUnitSourceRef, { schemaId: "iris.context_unit_source_ref.v1" }>,
 ): string {
-  return `${ref.sourceSchemaId}:${ref.sourceId}`;
+  const basis = [ref.sourceSchemaId, ref.sourceId]
+    .concat(ref.sourceRevision !== undefined ? [ref.sourceRevision] : [])
+    .concat([ref.sourceHash]);
+  return basis.join(":");
 }
 
 /** sourceRef → exactly-once 锚（未显式提供时）。 */
