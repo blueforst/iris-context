@@ -1,0 +1,28 @@
+# CI
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, extract-context-module]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm ci
+      # Single aggregate gate that always reflects the repository's own
+      # check contract. Codegen/contract gates and the full test suites come
+      # online as Phase B+ land; the check script is the single source of
+      # truth for what CI runs at any given point.
+      - run: npm run check

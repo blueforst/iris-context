@@ -1,0 +1,91 @@
+{
+  "registryId": "iris.agent-domain-contracts.v1",
+  "status": "design_locked_pending_R0_codegen",
+  "lockedAt": "2026-08-09",
+  "generatedAt": "2026-08-14",
+  "currentGenerationSchemaId": "iris.context_generation.v3",
+  "currentGenerationUnitSchemaId": "iris.context_unit.v3",
+  "currentGenerationHeaderSchemaId": "iris.context_generation_header.v1",
+  "currentGenerationUnitHeaderSchemaId": "iris.context_unit_header.v1",
+  "schemas": [
+    {
+      "schemaId": "iris.raw_archive_ref.v1",
+      "file": "json-schemas/raw_archive_ref-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.semantic_derivation_refs.v1",
+      "file": "json-schemas/semantic_derivation_refs-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.context_message_unit.v1",
+      "file": "json-schemas/context_message_unit-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.context_unit_source_ref.v1",
+      "file": "json-schemas/context_unit_source_ref-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.context_unit_header.v1",
+      "file": "json-schemas/context_unit_header-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.dsh_message_ref.v1",
+      "file": "json-schemas/dsh_message_ref-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.context_unit.v3",
+      "file": "json-schemas/context_unit-v3.schema.json"
+    },
+    {
+      "schemaId": "iris.context_unit.v2",
+      "file": "json-schemas/context_unit-v2.schema.json"
+    },
+    {
+      "schemaId": "iris.context_generation.v3",
+      "file": "json-schemas/context_generation-v3.schema.json"
+    },
+    {
+      "schemaId": "iris.context_generation_header.v1",
+      "file": "json-schemas/context_generation_header-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.context_generation.v2",
+      "file": "json-schemas/context_generation-v2.schema.json"
+    }
+  ],
+  "semanticSchemas": [
+    {
+      "schemaId": "iris.semantic.context_message.user.v1",
+      "file": "json-schemas/semantic-context_message-user-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.semantic.context_message.assistant.v1",
+      "file": "json-schemas/semantic-context_message-assistant-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.semantic.context_message.tool_call.v1",
+      "file": "json-schemas/semantic-context_message-tool_call-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.semantic.context_message.tool_result.v1",
+      "file": "json-schemas/semantic-context_message-tool_result-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.semantic.context_message.body_event.v1",
+      "file": "json-schemas/semantic-context_message-body_event-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.semantic.context_message.operational.v1",
+      "file": "json-schemas/semantic-context_message-operational-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.semantic.compartment.v1",
+      "file": "json-schemas/semantic-compartment-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.semantic.recollection.v1",
+      "file": "json-schemas/semantic-recollection-v1.schema.json"
+    }
+  ],
+  "manifestSha256": "fc6676116e95df21a150f41d9f343624c2826af4a137cefd2dbbff5825c9943b"
+}

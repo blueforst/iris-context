@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "iris.semantic.recollection.v1",
+  "type": "object",
+  "properties": {
+    "schemaId": {
+      "const": "iris.semantic.recollection.v1"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["available", "unavailable"]
+    },
+    "recollectionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "statement": {
+      "type": "string"
+    },
+    "sourceTrust": {
+      "type": "string",
+      "enum": ["observed", "verified", "generated"]
+    },
+    "referenceTime": {
+      "type": "string"
+    },
+    "provenanceRef": {
+      "type": "string"
+    },
+    "relevanceScore": {
+      "type": "number"
+    },
+    "unavailableReason": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": ["schemaId", "status"],
+  "additionalProperties": false,
+  "if": {
+    "properties": {
+      "status": {
+        "const": "available"
+      }
+    },
+    "required": ["status"]
+  },
+  "then": {
+    "required": ["recollectionId", "statement", "sourceTrust"]
+  },
+  "else": {
+    "required": ["unavailableReason"]
+  }
+}

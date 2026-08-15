@@ -1,0 +1,20 @@
+# Generated golden fixtures must stay byte-exact: any reformat changes the
+# recorded content hashes and breaks the golden-provenance guarantee.
+test/fixtures/context/opencode-v0.33.0/
+
+# Generated provenance manifest (also hash-bound).
+evidence/context-golden/
+
+# Notion spec snapshots are raw dumps of the authoritative source.
+evidence/notion-round4/
+
+# Cross-repo memory contract artifact: byte-reproducible from the producer
+# repo (iris_memory). Any reformat changes the manifest hashes and breaks
+# the artifact-verification gate — never prettier these files.
+fixtures/memory-contracts-artifact/
+
+# Subagent review files are written by reviewers, not by the repo formatter.
+evidence/reviews/
+
+# Architecture consultation transcripts are raw advisory outputs (R1 planning).
+evidence/r1/

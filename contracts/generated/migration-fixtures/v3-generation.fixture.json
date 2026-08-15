@@ -1,0 +1,31 @@
+{
+  "schemaId": "iris.context_generation.v3",
+  "header": {
+    "schemaId": "iris.context_generation_header.v1",
+    "contextGenerationId": "fixture-gen-v3-0001",
+    "contextLineageId": "fixture-lineage-v3",
+    "sourceSnapshotHash": "fixture-source-snapshot-v3",
+    "layerEnds": [0, 0, 0, 0, 0, 1],
+    "contextGenerationHash": "f8888393399dbf95fa98404f4c5c9b7b814bc5033458a118c2a23c267e4ad77c",
+    "createdAt": "2026-08-01T00:00:00Z"
+  },
+  "units": [
+    {
+      "schemaId": "iris.context_unit.v3",
+      "unitId": "fixture-unit-v3-0001",
+      "contextId": "fixture-lineage-v3",
+      "contentSchemaId": "iris.semantic.context_message.user.v1",
+      "content": {
+        "role": "user",
+        "content": "v3 unified unit"
+      },
+      "sourceRef": {
+        "schemaId": "iris.dsh_message_ref.v1",
+        "sessionId": "fixture-session-v3",
+        "messageId": "fixture-message-v3-0001",
+        "eventSeq": 3
+      },
+      "contentHash": "36b329dd27b391bea4277e3522679293fa1161d1fbd0d2205a13f9b5053772f6"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+# iris-context bundle patch（DSH/Cordis 组合层）
+#
+# 补丁层语义（cordis-plugin-include）：顶层是 YAML 数组；`insert` 在组合里
+# 插入插件行。patch 覆盖是整行 config 替换，不是 merge。
+#
+# `iris-context` 是 iris Context + Historian 领域仓库的唯一装配插件：在
+# Identity scope 注册 irisContext / irisHistorian / irisMemory 三个 typed
+# services（含 auto-BUST 监听与单向依赖 wiring）。
+#
+# 说明：
+# - 行序不携带加载语义（activation 由 service-availability 驱动）；
+# - 若 iris 服务应每会话隔离，宿主组合需用 isolate realm 包住 provider +
+#   全部 consumer（见 editing-cordis-compositions 规范）；
+# - 本 bundle 不安装任何第二套 Plugin Manager / DI / hook bus。
+- insert:
+    - id: iris-context
+      name: "@iris/context"
+      # 可选 config（装配时按需覆盖）：
+      # config:
+      #   dataRoot: '/path/to/data-root'
+      #   lineageId: 'lineage-<sha256(dataRoot) 前缀>'
