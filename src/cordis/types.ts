@@ -8,7 +8,7 @@
  * 事件命名约定（DSH §4.2）：`<域>/<动词>`；本仓库域为 `iris`。
  * 事件均为 `@mode emit`（同步、不等返回）。
  */
-import type { ContextGenerationV3 } from "../../contracts/generated/types.js";
+import type { ContextGeneration } from "../contracts/context-unit.js";
 import type { HistorianCommitReceiptV1 } from "../contracts/historian.js";
 import type { BustReason } from "../context/bust-coordinator.js";
 import type { ContextService } from "./context-service.js";
@@ -36,7 +36,7 @@ declare module "@deepseek-ai/cordis" {
      * canonical BUST 已成功原子发布新 generation（唯一 materializer 的输出）。
      * @mode emit
      */
-    "iris/context-generation-published"(generation: ContextGenerationV3): void;
+    "iris/context-generation-published"(generation: ContextGeneration): void;
 
     /**
      * Historian 已原子提交一个 batch（commit protocol 的 receipt 已产出；

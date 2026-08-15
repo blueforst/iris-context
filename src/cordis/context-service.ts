@@ -297,8 +297,8 @@ export class ContextService extends Service {
     }
   }
 
-  /** 当前已发布 generation（v3；fail-closed：BUST 失败后为 null，无 LKG fallback）。 */
-  getCurrentGeneration(): import("../../contracts/generated/types.js").ContextGenerationV3 | null {
+  /** 当前已发布 generation（无版本领域容器；fail-closed：BUST 失败后为 null，无 LKG fallback）。 */
+  getCurrentGeneration(): import("../contracts/context-unit.js").ContextGeneration | null {
     return this.requireOpen(this.bustValue, "getCurrentGeneration").getCurrentGeneration();
   }
 

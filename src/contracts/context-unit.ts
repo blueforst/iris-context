@@ -27,6 +27,7 @@ import { createHash } from "node:crypto";
 
 import type {
   ContextUnitV3,
+  ContextGenerationV3,
   ContextUnitSourceRefV1,
   DshMessageRefV1,
   JsonValue,
@@ -38,6 +39,7 @@ import {
   IRIS_CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID,
   IRIS_SEMANTIC_DERIVATION_REFS_V1_SCHEMA_ID,
   IRIS_CONTEXT_GENERATION_V3_SCHEMA_ID,
+  IRIS_CONTEXT_GENERATION_HEADER_V1_SCHEMA_ID,
 } from "../../contracts/generated/types.js";
 import {
   validate_iris_dsh_message_ref_v1,
@@ -57,18 +59,27 @@ export type {
   RuntimeEventKind,
   ContextMessageUnitLifecycleState,
   RawArchiveRefV1,
-  ContextGenerationV3,
 } from "../../contracts/generated/types.js";
 export { KIND_TO_SEMANTIC_SCHEMA_ID } from "../../contracts/generated/types.js";
 export { IRIS_CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID as CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID } from "../../contracts/generated/types.js";
 export { IRIS_CONTEXT_UNIT_V3_SCHEMA_ID as CONTEXT_UNIT_V3_SCHEMA_ID };
 export { IRIS_DSH_MESSAGE_REF_V1_SCHEMA_ID as DSH_MESSAGE_REF_V1_SCHEMA_ID };
 export { IRIS_CONTEXT_GENERATION_V3_SCHEMA_ID as CONTEXT_GENERATION_V3_SCHEMA_ID };
+export { IRIS_CONTEXT_GENERATION_HEADER_V1_SCHEMA_ID as CONTEXT_GENERATION_HEADER_V1_SCHEMA_ID };
 
 /** `ContextUnit` —— Context 唯一内容领域类型（= 生成式 `ContextUnitV3` + sourceRef 窄化）。 */
 export type ContextUnit = Omit<ContextUnitV3, "sourceRef"> & {
   readonly sourceRef: ContextUnitSourceRef;
 };
+
+/**
+ * `ContextGeneration` —— 无版本 current Context container 领域别名
+ * （iris-context#5）。当前容器成员直接为 `ContextUnit[]`，P0–P5 是数组上的
+ * 六个连续逻辑区间（header.layerEnds）。wire/storage 版本由 schemaId 表达；
+ * 生成式 `ContextGenerationV3` 是 wire/schema 实现细节，正常公共领域代码使用
+ * 本无版本名称。
+ */
+export type ContextGeneration = ContextGenerationV3;
 
 /** 生成式 `ContextUnitV3`（wire/storage 形状，单一机器权威）。 */
 export type { ContextUnitV3 };

@@ -30,7 +30,7 @@ import {
   unitLayer,
   unitsInLayer,
   type FrozenContextSources,
-} from "../src/context/generation-builder.js";
+} from "../src/context/legacy/generation-builder-v2.js";
 
 // ---------------------------------------------------------------------------
 // Helper: create a minimal valid ContextUnitV2

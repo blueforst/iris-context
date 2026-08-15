@@ -10,7 +10,7 @@
  *   → 冻结权威 P0–P5 sources（P0–P2 来自 contributor seam；P3 读 committed
  *     Compartments；P4 经 Memory Integration Coordinator；P5 读 durable live
  *     units）
- *   → 用 buildContextGenerationV3 完整重建（唯一 materializer；current Context
+ *   → 用 buildContextGeneration 完整重建（唯一 materializer；current Context
  *     直接包含 ContextUnit[]）
  *   → validate（build 已内建 fail-closed）
  *   → 原子发布（内存中替换 current generation；发布对象带 generationId+hash）
@@ -27,7 +27,6 @@
 
 import { createHash } from "node:crypto";
 
-import { CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID } from "../contracts/context-unit.js";
 import type { ContextRetirementPortV1 } from "../contracts/context-retirement.js";
 import type {
   MemoryIntegrationCoordinator,
@@ -37,11 +36,9 @@ import type { CommittedCompartmentReadPort } from "./committed-compartment-read-
 import type { ContextStore } from "./context-store.js";
 import { projectCommittedCompartmentCandidate } from "./p3-compartment.js";
 import { P4RecollectionProjector } from "./p4-recollection.js";
-import { materializeContextUnit } from "./context-admission.js";
-import type { ContextUnit } from "../contracts/context-unit.js";
-import type { P0P1P2P3P4Unit } from "./generation-builder.js";
-import { buildContextGenerationV3 } from "./generation-builder.js";
-import type { ContextGenerationV3 } from "../../contracts/generated/types.js";
+import { materializeContextUnit, type AdmissionCandidate } from "./context-admission.js";
+import type { ContextGeneration, ContextUnit } from "../contracts/context-unit.js";
+import { buildContextGeneration, type FrozenContextSources } from "./generation-builder.js";
 
 // ---------------------------------------------------------------------------
 // BUST request / evidence（audit）
@@ -88,18 +85,20 @@ export interface BustRequest {
 // ---------------------------------------------------------------------------
 
 /**
- * P0–P2 权威 source 的 contribution seam。owner（Persona / Skill / System /
- * Capability 模块）只提供 frozen snapshot / identity / hash 与 invalidation；
- * 不允许直接 push/splice generation（Notion Composition）。BUST 时 coordinator
- * 调用 project() 冻结投影。允许零 contributor（P0–P2 空）。
+ * P0–P2 权威 source 的 contribution seam（iris-context#5）。owner（Persona /
+ * Skill / System / Capability 模块）只提供 frozen snapshot / identity / hash
+ * 与 invalidation；不允许直接 push/splice generation（Notion Composition）。
+ * BUST 时 coordinator 调用 project() 冻结投影为**中性 AdmissionCandidate**
+ * （当前 source candidate；不是 legacy P0P1P2P3P4Unit pre-projection DTO）。
+ * 允许零 contributor（P0–P2 空）。
  */
 export interface ContextSourceContributor {
   readonly layer: "p0" | "p1" | "p2";
   readonly sourceId: string;
   readonly sourceRevision: string;
   readonly sourceHash: string;
-  /** 冻结并投影当前 authoritative source 为 pre-projected units。 */
-  project(): readonly P0P1P2P3P4Unit[];
+  /** 冻结并投影当前 authoritative source 为中性 AdmissionCandidate[]。 */
+  project(): readonly AdmissionCandidate[];
   /**
    * 可选 invalidation seam：sourceId 属于本 contributor 时返回 true。
    * 只发出 invalidation 信号（coordinator 据此 requestBust）；不直接触发
@@ -122,7 +121,7 @@ export interface BustRunResult {
   /** 失败原因（audit）。 */
   error?: string;
   /** 发布成功后的 generation（失败时 null）。 */
-  generation: ContextGenerationV3 | null;
+  generation: ContextGeneration | null;
   /** 本次 BUST 的 audit id。 */
   bustId?: string;
 }
@@ -193,7 +192,7 @@ export class BustCoordinator {
   /** coalesced pending 请求（有界）。 */
   private pendingRequests: BustRequest[] = [];
   /** 当前已发布 generation（fail-closed：BUST 失败后为 undefined）。 */
-  private currentGeneration: ContextGenerationV3 | undefined;
+  private currentGeneration: ContextGeneration | undefined;
   private runInProgress = false;
   private bustSequence = 0;
   private lastRun:
@@ -336,7 +335,7 @@ export class BustCoordinator {
    * generation 不被新请求使用（返回 null），不存在 LKG/previous-generation
    * fallback。
    */
-  getCurrentGeneration(): ContextGenerationV3 | null {
+  getCurrentGeneration(): ContextGeneration | null {
     return this.currentGeneration ?? null;
   }
 
@@ -387,7 +386,7 @@ export class BustCoordinator {
       //    v3：current Context 直接包含 ContextUnit[]（无投影/重包装）。
       const generationId = `gen-${this.contextLineageId}-${this.bustSequence}-${bustId}`;
       const createdAt = this.now();
-      const generation = buildContextGenerationV3(frozen.sources, generationId, createdAt);
+      const generation = buildContextGeneration(frozen.sources, generationId, createdAt);
 
       // 5. 原子发布（内存中替换 current generation；对象带 generationId+hash）。
       this.currentGeneration = generation;
@@ -446,7 +445,7 @@ export class BustCoordinator {
   ): Promise<
     | {
         ok: true;
-        sources: import("./generation-builder.js").FrozenContextSourcesV3;
+        sources: FrozenContextSources;
         representedThrough: number;
         retiredThrough: number;
       }
@@ -454,8 +453,8 @@ export class BustCoordinator {
   > {
     void coalesced;
     // P0–P2：contributor seam（允许零 contributor → 空层）。contributor 只提供
-    // 冻结 source 投影；Context admission（materializeContextUnit）负责物化
-    // ContextUnit（不重新包装、不复制为第二 DTO）。
+    // 冻结的中性 AdmissionCandidate；Context admission（materializeContextUnit）
+    // 负责物化 ContextUnit（同一 materializer；不重新包装、不复制为第二 DTO）。
     const p0Units: ContextUnit[] = [];
     const p1Units: ContextUnit[] = [];
     const p2Units: ContextUnit[] = [];
@@ -463,12 +462,19 @@ export class BustCoordinator {
       const projected = contributor.project();
       const target =
         contributor.layer === "p0" ? p0Units : contributor.layer === "p1" ? p1Units : p2Units;
-      for (const unit of projected) {
-        const error = validateProjectedUnit(unit);
+      for (const candidate of projected) {
+        const error = validateAdmissionCandidate(candidate);
         if (error !== null) {
           return { ok: false, error: `contributor ${contributor.sourceId}: ${error}` };
         }
-        target.push(convertProjectedUnitToContextUnit(this.contextLineageId, unit));
+        try {
+          target.push(materializeContextUnit(this.contextLineageId, candidate));
+        } catch (materializeError) {
+          return {
+            ok: false,
+            error: `contributor ${contributor.sourceId}: ${materializeError instanceof Error ? materializeError.message : String(materializeError)}`,
+          };
+        }
       }
     }
 
@@ -605,28 +611,20 @@ export class BustCoordinator {
   }
 }
 
-/** 校验 contributor/投影 unit 的最小形状（fail-closed）。 */
-function validateProjectedUnit(unit: P0P1P2P3P4Unit): string | null {
-  if (typeof unit.contextUnitId !== "string" || unit.contextUnitId.length === 0) {
-    return "unit contextUnitId must be a non-empty string";
+/** 校验 contributor 提供的中性 AdmissionCandidate 最小形状（fail-closed）。 */
+function validateAdmissionCandidate(candidate: AdmissionCandidate): string | null {
+  if (candidate.sourceRef === null || typeof candidate.sourceRef !== "object") {
+    return "candidate sourceRef must be an object";
   }
-  if (unit.source === null || typeof unit.source !== "object") {
-    return "unit source must be an object";
+  const candidateSourceId = (candidate.sourceRef as { sourceId?: string }).sourceId;
+  if (typeof candidateSourceId !== "string" || candidateSourceId.length === 0) {
+    return "candidate sourceRef must carry a sourceId";
   }
-  if (
-    unit.source.schemaId !== CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID ||
-    typeof unit.source.sourceId !== "string" ||
-    unit.source.sourceId.length === 0 ||
-    typeof unit.source.sourceHash !== "string" ||
-    unit.source.sourceHash.length === 0
-  ) {
-    return "unit source must carry a valid ContextUnitSourceRefV1 (sourceId + sourceHash)";
+  if (typeof candidate.contentSchemaId !== "string" || candidate.contentSchemaId.length === 0) {
+    return "candidate contentSchemaId must be a non-empty string";
   }
-  if (typeof unit.semanticSchemaId !== "string" || unit.semanticSchemaId.length === 0) {
-    return "unit semanticSchemaId must be a non-empty string";
-  }
-  if (unit.semanticContent === undefined) {
-    return "unit semanticContent is required";
+  if (candidate.content === undefined) {
+    return "candidate content is required";
   }
   return null;
 }
@@ -634,18 +632,4 @@ function validateProjectedUnit(unit: P0P1P2P3P4Unit): string | null {
 /** 装配工厂（Phase F 接线 Cordis 时再扩展）。 */
 export function createBustCoordinator(options: BustCoordinatorOptions): BustCoordinator {
   return new BustCoordinator(options);
-}
-
-/**
- * Feature 3：把 contributor seam 的 pre-projected unit（P0P1P2P3P4Unit，
- * legacy 兼容形状，iris_agent consumer 仍提供）转换为中性 AdmissionCandidate，
- * 再经 Context admission materialize 为 ContextUnit（同一 materializer；
- * 不重新包装为 generation-only DTO）。
- */
-function convertProjectedUnitToContextUnit(lineageId: string, unit: P0P1P2P3P4Unit): ContextUnit {
-  return materializeContextUnit(lineageId, {
-    sourceRef: unit.source,
-    contentSchemaId: unit.semanticSchemaId,
-    content: unit.semanticContent,
-  });
 }

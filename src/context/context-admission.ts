@@ -53,7 +53,8 @@ export interface AdmitSourceInput {
   runtimeSessionId?: string;
   /**
    * exactly-once 锚（source_event_id）。缺省按 sourceRef 派生
-   * （dsh:<sessionId>:<messageId> 或 <sourceSchemaId>:<sourceId>）。
+   * （DshMessageRef → dsh:<sessionId>:<messageId>；通用 source →
+   * sourceSchemaId:sourceId[:sourceRevision]:sourceHash，iris-context#4）。
    */
   sourceAnchor?: string;
   /**

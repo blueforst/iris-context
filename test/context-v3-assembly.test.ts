@@ -2,7 +2,7 @@
  * Feature 3（iris-context#2）：current Context assembly 直接 ContextUnit[]。
  *
  * 证明：
- *  - buildContextGenerationV3 直接装配六层 ContextUnit[]（无
+ *  - buildContextGeneration 直接装配六层 ContextUnit[]（无
  *    ContextMessageUnit → ContextUnitV2 投影；无 generation-only 包装 DTO）；
  *  - P5 中出现的单元就是 admission 产生的同一个 ContextUnit（同一 unitId/
  *    contentHash —— 不复制、不重新包装）；
@@ -18,10 +18,10 @@ import { join } from "node:path";
 import { ContextAdmission } from "../src/context/context-admission.js";
 import { ContextStore } from "../src/context/context-store.js";
 import {
-  buildContextGenerationV3,
-  computeContextGenerationHashV3,
-  unitsInLayerV3,
-  validateContextGenerationV3,
+  buildContextGeneration,
+  computeContextGenerationHash,
+  unitsInLayer,
+  validateContextGeneration,
 } from "../src/context/generation-builder.js";
 import {
   computeContextUnitContentHash,
@@ -31,7 +31,7 @@ import { cleanupDir, makeLineageInput, tempDir } from "./helpers/context-fixture
 
 const LINEAGE = "lineage-v3-assembly";
 
-test("F3: buildContextGenerationV3 assembles ContextUnit[] directly (same P5 units, no projection)", () => {
+test("F3: buildContextGeneration assembles ContextUnit[] directly (same P5 units, no projection)", () => {
   const dir = tempDir();
   try {
     const store = ContextStore.open(join(dir, "context.db"), { lineageId: LINEAGE });
@@ -50,7 +50,7 @@ test("F3: buildContextGenerationV3 assembles ContextUnit[] directly (same P5 uni
       runtimeSessionId: "session-1",
     });
 
-    const generation = buildContextGenerationV3(
+    const generation = buildContextGeneration(
       {
         contextLineageId: LINEAGE,
         sourceSnapshotHash: "snap-1",
@@ -67,7 +67,7 @@ test("F3: buildContextGenerationV3 assembles ContextUnit[] directly (same P5 uni
     assert.equal(generation.schemaId, "iris.context_generation.v3");
     assert.deepEqual([...generation.header.layerEnds], [0, 0, 0, 0, 0, 2]);
     // P5 单元就是 admission 的同一个 ContextUnit（同一 identity/content/hash）。
-    const p5 = unitsInLayerV3(generation, 5);
+    const p5 = unitsInLayer(generation, 5);
     assert.deepEqual(
       p5.map((u) => u.unitId),
       [u1.unitId, u2.unitId],
@@ -78,7 +78,7 @@ test("F3: buildContextGenerationV3 assembles ContextUnit[] directly (same P5 uni
     );
     assert.deepEqual(p5[0]?.content, u1.content);
     // 严格校验通过。
-    assert.equal(validateContextGenerationV3(generation).valid, true);
+    assert.equal(validateContextGeneration(generation).valid, true);
     store.close();
   } finally {
     cleanupDir(dir);
@@ -100,14 +100,14 @@ test("F3: generation hash is deterministic and sensitive to layers/units", () =>
       sourceHash: "sh",
     },
   };
-  const hashA = computeContextGenerationHashV3({
+  const hashA = computeContextGenerationHash({
     schemaId: "iris.context_generation.v3",
     contextLineageId: LINEAGE,
     sourceSnapshotHash: "snap",
     units: [u1],
     layerEnds: [0, 0, 0, 0, 0, 1],
   });
-  const hashB = computeContextGenerationHashV3({
+  const hashB = computeContextGenerationHash({
     schemaId: "iris.context_generation.v3",
     contextLineageId: LINEAGE,
     sourceSnapshotHash: "snap",
@@ -115,7 +115,7 @@ test("F3: generation hash is deterministic and sensitive to layers/units", () =>
     layerEnds: [0, 0, 0, 0, 0, 1],
   });
   assert.equal(hashA, hashB, "equivalent rebuild → same hash");
-  const hashLayerChanged = computeContextGenerationHashV3({
+  const hashLayerChanged = computeContextGenerationHash({
     schemaId: "iris.context_generation.v3",
     contextLineageId: LINEAGE,
     sourceSnapshotHash: "snap",
@@ -123,7 +123,7 @@ test("F3: generation hash is deterministic and sensitive to layers/units", () =>
     layerEnds: [0, 0, 0, 0, 1, 1],
   });
   assert.notEqual(hashA, hashLayerChanged, "layer boundary change → different hash");
-  const hashUnitChanged = computeContextGenerationHashV3({
+  const hashUnitChanged = computeContextGenerationHash({
     schemaId: "iris.context_generation.v3",
     contextLineageId: LINEAGE,
     sourceSnapshotHash: "snap",
@@ -145,7 +145,7 @@ test("F3: validation fails closed on tampered generation hash and unknown unit s
       content: { role: "user", content: "hello" },
       runtimeSessionId: "session-1",
     });
-    const generation = buildContextGenerationV3(
+    const generation = buildContextGeneration(
       {
         contextLineageId: LINEAGE,
         sourceSnapshotHash: "snap",
@@ -164,14 +164,14 @@ test("F3: validation fails closed on tampered generation hash and unknown unit s
       header: { contextGenerationHash: string };
     };
     tampered.header.contextGenerationHash = "tampered";
-    const r1 = validateContextGenerationV3(tampered);
+    const r1 = validateContextGeneration(tampered);
     assert.ok(!r1.valid);
     assert.match(r1.reason ?? "", /contextGenerationHash mismatch/);
 
     // 篡改单元 schemaId → fail-closed。
     const tampered2 = JSON.parse(JSON.stringify(generation)) as typeof generation;
     (tampered2.units[0] as { schemaId: string }).schemaId = "iris.context_unit.v2";
-    const r2 = validateContextGenerationV3(tampered2);
+    const r2 = validateContextGeneration(tampered2);
     assert.ok(!r2.valid);
     assert.match(r2.reason ?? "", /ContextUnit v3/);
 
@@ -179,7 +179,7 @@ test("F3: validation fails closed on tampered generation hash and unknown unit s
     const tampered3 = JSON.parse(JSON.stringify(generation)) as typeof generation;
     (tampered3.units[0] as unknown as { content: { content: string } }).content.content =
       "TAMPERED";
-    const r3 = validateContextGenerationV3(tampered3);
+    const r3 = validateContextGeneration(tampered3);
     assert.ok(!r3.valid);
     assert.match(r3.reason ?? "", /contentHash mismatch/);
     store.close();
@@ -218,7 +218,7 @@ test("F3: validation fails closed on duplicate unitIds (identity collapse)", () 
   // 但 build 边界（与 validateContextGenerationV3 一致）必须拒绝重复 unitId。
   assert.throws(
     () =>
-      buildContextGenerationV3(
+      buildContextGeneration(
         {
           contextLineageId: LINEAGE,
           sourceSnapshotHash: "snap",
@@ -247,7 +247,7 @@ test("F3: validation returns invalid (not TypeError) on malformed header hash-ba
     content: { role: "user", content: "hello" },
     runtimeSessionId: "session-1",
   });
-  const generation = buildContextGenerationV3(
+  const generation = buildContextGeneration(
     {
       contextLineageId: LINEAGE,
       sourceSnapshotHash: "snap",
@@ -267,13 +267,13 @@ test("F3: validation returns invalid (not TypeError) on malformed header hash-ba
     Record<string, unknown>
   >;
   delete noLineage["header"]?.["contextLineageId"];
-  const r1 = validateContextGenerationV3(noLineage);
+  const r1 = validateContextGeneration(noLineage);
   assert.ok(!r1.valid, "missing contextLineageId must return invalid");
   assert.match(r1.reason ?? "", /contextLineageId/);
   // 缺 sourceSnapshotHash → invalid。
   const noSnap = JSON.parse(JSON.stringify(generation)) as Record<string, Record<string, unknown>>;
   delete noSnap["header"]?.["sourceSnapshotHash"];
-  const r2 = validateContextGenerationV3(noSnap);
+  const r2 = validateContextGeneration(noSnap);
   assert.ok(!r2.valid, "missing sourceSnapshotHash must return invalid");
   assert.match(r2.reason ?? "", /sourceSnapshotHash/);
   store.close();
