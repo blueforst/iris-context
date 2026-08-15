@@ -2,7 +2,7 @@
  * Historian analysis view + PURE range validation（Phase D，contextSeq 坐标）。
  *
  * v29：Historian 唯一输入是 ContextHistoryReadPort.freezeBatch 冻结的
- * HistorianBatchV1（有限、不可变、带 rangeHash）。本模块在 commit 前
+ * HistorianBatchV2（有限、不可变、带 rangeHash）。本模块在 commit 前
  * PURE 地重新验证（无 I/O、确定性）：
  *   - 批窗口端点不变量：fromContextSeq 严格等于 durable cursor+1（claim 锚定）；
  *   - source range hash 不变量：冻结 hash 必须与当前批的 ordered unit 身份

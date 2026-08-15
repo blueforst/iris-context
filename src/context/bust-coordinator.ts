@@ -27,7 +27,7 @@
 
 import { createHash } from "node:crypto";
 
-import { CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID } from "../contracts/context-v27.js";
+import { CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID } from "../contracts/context-unit.js";
 import type { ContextRetirementPortV1 } from "../contracts/context-retirement.js";
 import type {
   MemoryIntegrationCoordinator,

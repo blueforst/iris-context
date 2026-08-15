@@ -18,7 +18,7 @@
 
 import { createHash } from "node:crypto";
 
-import type { JsonValue } from "./context-v27.js";
+import type { JsonValue } from "./context-unit.js";
 
 /** 反回显分类（anti-echo 输出为 provider-neutral observation authoring）。 */
 export type ObservationAttributionClass =
@@ -40,9 +40,9 @@ export interface EvidenceBasisRefV1 {
   contentHash: string;
   historianDisposition: "include" | "reference_only" | "exclude";
   /** 派生引用（anti-echo 审计面；derived-only 单元不得进入 basis）。 */
-  derivationRefs?: import("./context-v27.js").SemanticDerivationRefsV1;
+  derivationRefs?: import("./context-unit.js").SemanticDerivationRefsV1;
   /** 原始 archive 引用（values-only；原文由 raw archive/blob 保留）。 */
-  rawArchiveRef?: import("./context-v27.js").RawArchiveRefV1;
+  rawArchiveRef?: import("./context-unit.js").RawArchiveRefV1;
 }
 
 /**

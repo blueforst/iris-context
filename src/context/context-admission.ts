@@ -28,12 +28,12 @@ import {
   type ContextUnitSourceRef,
   type DshMessageRef,
 } from "../contracts/context-unit.js";
-import { KIND_TO_SEMANTIC_SCHEMA_ID } from "../contracts/context-v27.js";
+import { KIND_TO_SEMANTIC_SCHEMA_ID } from "../contracts/context-unit.js";
 
 /** runtime-origin user 消息的语义 schema（anti-echo 判别目标）。 */
 const USER_MESSAGE_SEMANTIC_SCHEMA_ID = KIND_TO_SEMANTIC_SCHEMA_ID.user;
 import { validateSemanticContent } from "../../contracts/generated/validators.js";
-import type { JsonValue, SemanticDerivationRefsV1 } from "../contracts/context-v27.js";
+import type { JsonValue, SemanticDerivationRefsV1 } from "../contracts/context-unit.js";
 import type { ContextStore } from "./context-store.js";
 
 /** 接纳输入：source identity + 语义类型 + canonical content。 */

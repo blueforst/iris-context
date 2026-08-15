@@ -27,7 +27,7 @@
 
 import { createHash } from "node:crypto";
 
-import type { JsonValue } from "../contracts/context-v27.js";
+import type { JsonValue } from "../contracts/context-unit.js";
 import type {
   RecollectionCandidate,
   RecollectionSnapshot,

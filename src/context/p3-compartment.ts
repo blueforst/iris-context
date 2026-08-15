@@ -23,7 +23,7 @@
  * ContextUnit 只在当前 generation 中按确定性 identity 材料化。
  */
 
-import type { JsonValue } from "../contracts/context-v27.js";
+import type { JsonValue } from "../contracts/context-unit.js";
 import type { AdmissionCandidate } from "./context-admission.js";
 import type { HistoricalCompartment } from "../historian/historian-compartment.js";
 

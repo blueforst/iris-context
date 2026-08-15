@@ -20,7 +20,7 @@ import type {
   HistorianDisposition,
   RuntimeEventKind,
   SemanticDerivationRefsV1,
-} from "../contracts/context-v27.js";
+} from "../contracts/context-unit.js";
 import type { HistorianBatchUnit } from "../contracts/historian.js";
 import type { EvidenceBasisRefV1 } from "../contracts/memory-publication.js";
 
@@ -34,7 +34,7 @@ export interface HistorianUnitView {
   contentHash: string;
   derivationRefs: SemanticDerivationRefsV1;
   /** raw archive 引用（attribution；缺失不影响 anti-echo 分类）。 */
-  rawArchiveRef?: import("../contracts/context-v27.js").RawArchiveRefV1;
+  rawArchiveRef?: import("../contracts/context-unit.js").RawArchiveRefV1;
 }
 
 /**

@@ -53,7 +53,7 @@ export interface ContextHistoryReadPort {
   /**
    * Context-owned CLAIM —— Historian 的唯一正常语义 batch selector。按
    * identity-level lineage 的全局 contextSeq 冻结不可变、可重放的
-   * HistorianBatchV1（权威形状见 src/contracts/historian.ts）。batch
+   * HistorianBatchV2（权威形状见 src/contracts/historian.ts）。batch
    * membership/order/identity 只由 Context 坐标决定；runtimeSessionId、entry
    * ids、entry ranges 只是可选 attribution，缺失不改变 batch。
    */
@@ -64,7 +64,7 @@ export interface ContextHistoryReadPort {
 
   /**
    * Phase D（v29 freezeBatch）：Context 冻结完整 semantic boundary 并返回
-   * 有限、不可变、带 rangeHash 与 claim lease 的 HistorianBatchV1。
+   * 有限、不可变、带 rangeHash 与 claim lease 的 HistorianBatchV2。
    * 与 claimHistorianBatch 同一批选择语义；freezeBatch 显式表达
    * "Context 在事务中冻结 + claim lease"（frozenAt / leaseExpiresAt /
    * claimId 每次新建）。Historian 不得扩大 range、不得绕开

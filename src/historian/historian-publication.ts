@@ -24,7 +24,7 @@
 
 import { createHash } from "node:crypto";
 
-import type { JsonValue } from "../contracts/context-v27.js";
+import type { JsonValue } from "../contracts/context-unit.js";
 import type {
   HistorianBatchUnit,
   HistorianBatchV2,
@@ -601,7 +601,7 @@ function nowIso(now: number): string {
 
 /** canonical JSON（供测试与审计使用）。 */
 export function canonicalJson(value: unknown): string {
-  return canonicalJsonStringify(value as import("../contracts/context-v27.js").JsonValue);
+  return canonicalJsonStringify(value as import("../contracts/context-unit.js").JsonValue);
 }
 
 /** Deterministic sha256 of a canonical JSON payload. */

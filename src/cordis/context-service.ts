@@ -233,7 +233,7 @@ export class ContextService extends Service {
     messageId: string;
     eventSeq?: number;
     contentSchemaId: string;
-    content: import("../contracts/context-v27.js").JsonValue;
+    content: import("../contracts/context-unit.js").JsonValue;
     runtimeSourceKind?: "user" | "plugin" | "model" | "tool" | "other";
     sourceHash?: string;
   }): ContextUnit {

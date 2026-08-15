@@ -1417,7 +1417,8 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
   /**
    * R3 (anti-echo)：按 lineage 内闭区间 [fromContextSeq, toContextSeq] 读取
    * 全部单元（含 reference_only / exclude —— Historian 需要完整分类视图）。
-   * 供 ContextHistoryReadPort.listUnitsForHistorian 消费（values-only）。
+   * 供 ContextHistoryReadPort 的历史单元读取消费（values-only；含
+   * reference_only/exclude —— Historian 需要完整分类视图做 anti-echo）。
    */
   listUnitsByLineageRange(
     lineageId: string,

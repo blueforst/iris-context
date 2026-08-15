@@ -23,7 +23,7 @@ import type {
   JsonValue,
   RawArchiveRefV1,
   SemanticDerivationRefsV1,
-} from "./context-v27.js";
+} from "./context-unit.js";
 import type { ContextUnit } from "./context-unit.js";
 
 /**

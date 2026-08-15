@@ -52,9 +52,15 @@ import {
 
 export type {
   JsonValue,
+  JsonPrimitive,
   HistorianDisposition,
+  RuntimeEventKind,
+  ContextMessageUnitLifecycleState,
+  RawArchiveRefV1,
   ContextGenerationV3,
 } from "../../contracts/generated/types.js";
+export { KIND_TO_SEMANTIC_SCHEMA_ID } from "../../contracts/generated/types.js";
+export { IRIS_CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID as CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID } from "../../contracts/generated/types.js";
 export { IRIS_CONTEXT_UNIT_V3_SCHEMA_ID as CONTEXT_UNIT_V3_SCHEMA_ID };
 export { IRIS_DSH_MESSAGE_REF_V1_SCHEMA_ID as DSH_MESSAGE_REF_V1_SCHEMA_ID };
 export { IRIS_CONTEXT_GENERATION_V3_SCHEMA_ID as CONTEXT_GENERATION_V3_SCHEMA_ID };
