@@ -10,7 +10,7 @@
   "main": "./dist/src/cordis/index.js",
   "exports": {
     ".": "./dist/src/cordis/index.js",
-    "./contracts": "./dist/src/contracts/context-unit.js",
+    "./contracts": "./dist/src/contracts/index.js",
     "./contracts/legacy": "./dist/src/contracts/context-v27.js",
     "./contracts/context-unit": "./dist/src/contracts/context-unit.js",
     "./contracts/historian": "./dist/src/contracts/historian.js",
