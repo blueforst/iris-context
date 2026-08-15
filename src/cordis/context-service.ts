@@ -29,7 +29,12 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 
-import { DSH_MESSAGE_REF_V1_SCHEMA_ID, type ContextUnit } from "../contracts/context-unit.js";
+import {
+  CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID,
+  DSH_MESSAGE_REF_V1_SCHEMA_ID,
+  canonicalJson,
+  type ContextUnit,
+} from "../contracts/context-unit.js";
 import type { ContextRetirementPortV1 } from "../contracts/context-retirement.js";
 import { ContextAdmission } from "../context/context-admission.js";
 import {
@@ -249,6 +254,54 @@ export class ContextService extends Service {
       contentSchemaId: input.contentSchemaId,
       content: input.content,
       runtimeSessionId: input.sessionId,
+      ...(input.runtimeSourceKind !== undefined
+        ? { runtimeSourceKind: input.runtimeSourceKind }
+        : {}),
+    });
+  }
+
+  /**
+   * 非 DSH runtime 来源的统一 admission（iris_agent#130：Pi compatibility
+   * baseline 专用）。
+   *
+   * `iris.dsh_message_ref.v1` 只能来自真实 DSH Session message 身份；Pi
+   * runtimeSessionId + entryId 不能伪装成 DSH provenance。因此 Pi 兼容路径经
+   * 本方法使用**通用** `ContextUnitSourceRefV1`（sourceSchemaId 由调用方声明，
+   * 例如 `iris.pi_archive_entry.v1`），raw provenance 查找可无歧义地判定来源
+   * runtime/archive。canonical content 语义与 DSH 路径一致（同一 ContextUnit
+   * 模型，保留接纳时确定的 canonical content）。
+   *
+   * - `sourceId` = Pi entryId（稳定 identity）；`sourceRevision` = Pi entrySeq
+   *   （archive-local 定位；可缺省）；`sourceHash` 缺省时按 canonical content
+   *   确定性派生；
+   * - `runtimeSessionId` = Pi runtimeSessionId（Session→lineage binding 校验）；
+   * - 不恢复旧 RuntimeEvent/ContextMessageUnit 桥；不写 DSH Session。
+   */
+  admitGenericRuntimeSource(input: {
+    sourceSchemaId: string;
+    sourceId: string;
+    sourceRevision?: string;
+    sourceHash?: string;
+    contentSchemaId: string;
+    content: import("../contracts/context-unit.js").JsonValue;
+    runtimeSessionId?: string;
+    runtimeSourceKind?: "user" | "plugin" | "model" | "tool" | "other";
+  }): ContextUnit {
+    const admission = this.requireOpen(this.admissionValue, "admitGenericRuntimeSource");
+    const sourceHash =
+      input.sourceHash ??
+      createHash("sha256").update(canonicalJson(input.content), "utf8").digest("hex");
+    return admission.admit({
+      sourceRef: {
+        schemaId: CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID,
+        sourceSchemaId: input.sourceSchemaId,
+        sourceId: input.sourceId,
+        ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
+        sourceHash,
+      },
+      contentSchemaId: input.contentSchemaId,
+      content: input.content,
+      ...(input.runtimeSessionId !== undefined ? { runtimeSessionId: input.runtimeSessionId } : {}),
       ...(input.runtimeSourceKind !== undefined
         ? { runtimeSourceKind: input.runtimeSourceKind }
         : {}),

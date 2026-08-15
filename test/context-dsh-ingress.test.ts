@@ -19,13 +19,18 @@ import * as path from "node:path";
 
 import assert from "node:assert/strict";
 
+import { Context, type Fiber } from "@deepseek-ai/cordis";
+
 import { ContextAdmission } from "../src/context/context-admission.js";
 import { ContextStore } from "../src/context/context-store.js";
 import {
+  CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID,
   DSH_MESSAGE_REF_V1_SCHEMA_ID,
+  isGenericSourceRef,
   type ContextUnit,
   type DshMessageRef,
 } from "../src/contracts/context-unit.js";
+import { createIrisContextPlugin } from "../src/cordis/index.js";
 import { cleanupDir, makeLineageInput, tempDir } from "./helpers/context-fixtures.js";
 
 const LINEAGE = "lineage-dsh-ingress";
@@ -225,4 +230,106 @@ test("F4: P0-P4 never written to DSH Session — Context has no DSH session writ
   }
   // 持久化权威只经 ContextStore（context.db）；admission/store 是唯一写路径。
   assert.ok(fs.existsSync(join(REPO_ROOT, "src/context/context-store.ts")));
+});
+
+// ---------------------------------------------------------------------------
+// iris_agent#130：Pi compatibility 通用 source admission（非 DshMessageRef）
+// ---------------------------------------------------------------------------
+
+/** 等待某服务在 ctx 上 ACTIVE（inject 驱动的异步加载，poll 直到可见）。 */
+async function waitForActive(ctx: Context, name: string): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (ctx.get(name, true) !== undefined) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`service ${name} did not become ACTIVE within timeout`);
+}
+
+test("F4: admitGenericRuntimeSource 使用通用 source ref（不伪装 DshMessageRef）", async () => {
+  const dir = tempDir();
+  try {
+    const ctx = new Context();
+    const fiber: Fiber = await ctx.plugin(
+      createIrisContextPlugin({ dataRoot: dir, withHistorian: false }),
+    );
+    try {
+      await waitForActive(ctx, "irisContext");
+      const lineageId = ctx.irisContext.lineageId;
+      ctx.irisContext.createLineage({
+        lineageId,
+        runtimeSessionId: "pi-session-1",
+        providerProfileId: "pi-mock",
+        canonicalSystemPrompt: "sys",
+        systemProjectionHash: "hash",
+        preparedAt: "2026-08-05T00:00:00.000Z",
+      });
+      const unit = ctx.irisContext.admitGenericRuntimeSource({
+        sourceSchemaId: "iris.pi_archive_entry.v1",
+        sourceId: "pi-entry-1",
+        sourceRevision: "7",
+        sourceHash: "entry-hash-1",
+        contentSchemaId: "iris.semantic.context_message.user.v1",
+        content: { role: "user", content: "pi hello" },
+        runtimeSessionId: "pi-session-1",
+        runtimeSourceKind: "user",
+      });
+      // 通用 source ref —— 不是 DshMessageRef（raw provenance 无歧义）。
+      assert.ok(isGenericSourceRef(unit.sourceRef));
+      const ref = unit.sourceRef as {
+        schemaId: string;
+        sourceSchemaId: string;
+        sourceId: string;
+        sourceRevision?: string;
+        sourceHash: string;
+      };
+      assert.equal(ref.schemaId, CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID);
+      assert.equal(ref.sourceSchemaId, "iris.pi_archive_entry.v1");
+      assert.equal(ref.sourceId, "pi-entry-1");
+      assert.equal(ref.sourceRevision, "7");
+      assert.equal(ref.sourceHash, "entry-hash-1");
+
+      // exactly-once：同一 source 幂等返回既有 Unit，不新增行。
+      const again = ctx.irisContext.admitGenericRuntimeSource({
+        sourceSchemaId: "iris.pi_archive_entry.v1",
+        sourceId: "pi-entry-1",
+        sourceRevision: "7",
+        sourceHash: "entry-hash-1",
+        contentSchemaId: "iris.semantic.context_message.user.v1",
+        content: { role: "user", content: "pi hello" },
+        runtimeSessionId: "pi-session-1",
+        runtimeSourceKind: "user",
+      });
+      assert.equal(again.unitId, unit.unitId);
+      assert.equal(
+        ctx.irisContext.getStore().listContextUnits(lineageId, { disposition: "all" }).length,
+        1,
+      );
+    } finally {
+      await fiber.dispose();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("F4 sensitivity: Pi entry 伪装成 DshMessageRef 会失败（DSH ref 只来自真实 DSH）", () => {
+  // admitRuntimeMessage 只接受 DSH session/message 语义；Pi 兼容路径必须用
+  // admitGenericRuntimeSource。本门证明 Pi bridge 不在 DSH 入口。
+  const servicePath = join(REPO_ROOT, "src", "cordis", "context-service.ts");
+  const code = fs.readFileSync(servicePath, "utf8");
+  // admitGenericRuntimeSource 存在且与 admitRuntimeMessage 分离（DSH-only）。
+  assert.match(code, /admitGenericRuntimeSource/);
+  assert.match(code, /admitRuntimeMessage/);
+  // 通用入口明确使用 ContextUnitSourceRefV1（非 DshMessageRef）。
+  const genericBlock = code.slice(code.indexOf("admitGenericRuntimeSource"));
+  assert.ok(
+    genericBlock.includes("CONTEXT_UNIT_SOURCE_REF_V1_SCHEMA_ID"),
+    "admitGenericRuntimeSource must construct a generic ContextUnitSourceRefV1",
+  );
+  assert.ok(
+    !genericBlock.slice(0, 1200).includes("DSH_MESSAGE_REF_V1_SCHEMA_ID"),
+    "admitGenericRuntimeSource must not construct a DshMessageRef",
+  );
 });
