@@ -172,14 +172,17 @@ export function classifyEvidenceBasis(
 /**
  * 从 HistorianBatchUnit（同一个 ContextUnit + sidecar 坐标）构造窄视图
  * （runner/authoring 使用）。runtimeEventId 在新模型下由 sourceRef 溯源：
- * DshMessageRef → `dsh:<sessionId>:<messageId>`；通用 source → sourceId。
+ * DshMessageRef → `dsh:<sessionId>:<messageId>`；PiArchiveEntryRef →
+ * `pi:<runtimeSessionId>:<entryId>`；通用 source → sourceId。
  */
 export function unitViewOf(lineageId: string, unit: HistorianBatchUnit): HistorianUnitView {
   const ref = unit.unit.sourceRef;
   const runtimeEventId =
     ref.schemaId === "iris.dsh_message_ref.v1"
       ? `dsh:${ref.sessionId}:${ref.messageId}`
-      : ref.sourceId;
+      : ref.schemaId === "iris.pi_archive_entry_ref.v1"
+        ? `pi:${ref.runtimeSessionId}:${ref.entryId}`
+        : ref.sourceId;
   return {
     contextUnitId: unit.unit.unitId,
     contextSeq: unit.contextSeq,

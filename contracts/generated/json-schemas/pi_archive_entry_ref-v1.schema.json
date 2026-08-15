@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "iris.pi_archive_entry_ref.v1",
+  "title": "PiArchiveEntryRefV1",
+  "$comment": "Pi compatibility archive entry 的专用判别 source ref（iris_agent#130 A2）。稳定 identity = runtimeSessionId + entryId；entrySeq 是 archive-local locator（可保存/恢复扫描，不进入 semantic revision，不进入稳定 identity）；sourceHash 是 entry content 指纹。禁止构造 DshMessageRef（architecture gate）。",
+  "type": "object",
+  "properties": {
+    "schemaId": {
+      "const": "iris.pi_archive_entry_ref.v1"
+    },
+    "runtimeSessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "entryId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "entrySeq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sourceHash": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": ["schemaId", "runtimeSessionId", "entryId", "sourceHash"],
+  "additionalProperties": false
+}

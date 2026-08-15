@@ -22,7 +22,7 @@ import {
   CONTEXT_UNIT_V3_SCHEMA_ID,
   computeContextUnitContentHash,
   deriveContextUnitId,
-  isDshMessageRef,
+  sourceAnchorOf,
   validateContextUnitStrict,
   type ContextUnit,
   type ContextUnitSourceRef,
@@ -53,7 +53,8 @@ export interface AdmitSourceInput {
   runtimeSessionId?: string;
   /**
    * exactly-once 锚（source_event_id）。缺省按 sourceRef 派生
-   * （dsh:<sessionId>:<messageId> 或 <sourceSchemaId>:<sourceId>）。
+   * （DshMessageRef → dsh:<sessionId>:<messageId>；通用 source →
+   * sourceSchemaId:sourceId[:sourceRevision]:sourceHash，iris-context#4）。
    */
   sourceAnchor?: string;
   /**
@@ -87,25 +88,40 @@ export interface AdmissionCandidate {
   derivation?: SemanticDerivationRefsV1;
 }
 
-/** DshMessageRef 的默认 exactly-once 锚。 */
+/**
+ * DshMessageRef 的默认 exactly-once 锚（兼容导出；thin wrapper）。
+ * 实际 canonical 派生见 `sourceAnchorOf`（src/contracts/context-unit.ts，
+ * 与 unitId 共享同一 identity 字段规则）。
+ */
 export function dshSourceAnchor(ref: DshMessageRef): string {
-  return `dsh:${ref.sessionId}:${ref.messageId}`;
+  return sourceAnchorOf(ref);
 }
 
-/** 通用 sourceRef 的默认 exactly-once 锚。 */
+/**
+ * 通用 sourceRef 的默认 exactly-once 锚（兼容导出；thin wrapper）。
+ *
+ * 必须与 `deriveContextUnitId()` 的 identity 语义一致地区分语义 source
+ * revision：当前 `ContextUnit` identity 对通用 source 包含 `sourceRevision?`
+ * 与 `sourceHash`，因此同一 `sourceSchemaId + sourceId` 的两个不同合法
+ * revision 会派生不同的 `unitId`。若 exactly-once 锚只取
+ * `${sourceSchemaId}:${sourceId}`，第二次 admission 会在持久层
+ * `source_event_id UNIQUE` 上碰撞（而不是材料化新 Unit 所需的
+ * `ContextUnit`），破坏 single-Unit lifecycle 的"新 revision → 新 Unit"
+ * 不变量。
+ *
+ * 锚格式与 `deriveContextUnitId` 的 identity 语义同源（canonical JSON 编码，
+ * 无 `|`/`:` 分隔符碰撞；A1）。同一 source identity + 同一 revision/hash →
+ * 同一锚（幂等）；revision/hash 任一变化 → 新锚（新行，不碰撞）。纯函数，
+ * 跨 restart 确定性。
+ */
 export function genericSourceAnchor(
   ref: Extract<ContextUnitSourceRef, { schemaId: "iris.context_unit_source_ref.v1" }>,
 ): string {
-  return `${ref.sourceSchemaId}:${ref.sourceId}`;
+  return sourceAnchorOf(ref);
 }
 
-/** sourceRef → exactly-once 锚（未显式提供时）。 */
-export function sourceAnchorOf(sourceRef: ContextUnitSourceRef): string {
-  if (isDshMessageRef(sourceRef)) {
-    return dshSourceAnchor(sourceRef);
-  }
-  return genericSourceAnchor(sourceRef);
-}
+/** sourceRef → exactly-once 锚（未显式提供时）。canonical 实现见 context-unit.ts。 */
+export { sourceAnchorOf };
 
 /**
  * 材料化一个统一 ContextUnit（纯函数；exactly-once 由调用方/store 的

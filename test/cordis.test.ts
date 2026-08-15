@@ -38,7 +38,7 @@ import {
   IRIS_IDENTITY_SCOPE,
   type IrisContextPluginConfig,
 } from "../src/cordis/index.js";
-import { unitsInLayerV3 } from "../src/context/generation-builder.js";
+import { unitsInLayer } from "../src/context/generation-builder.js";
 import { deriveContextUnitId } from "../src/contracts/context-unit.js";
 import type { ContextGenerationV3 } from "../contracts/generated/types.js";
 import {
@@ -121,15 +121,14 @@ function trackingContributor(sourceId: string, text: string) {
       calls += 1;
       return [
         {
-          contextUnitId: `static-${text}`,
-          source: {
+          sourceRef: {
             schemaId: "iris.context_unit_source_ref.v1" as const,
             sourceSchemaId: "test.static.v1",
             sourceId,
             sourceHash: `hash-${sourceId}`,
           },
-          semanticSchemaId: "iris.semantic.context_message.user.v1",
-          semanticContent: { role: "user", content: text },
+          contentSchemaId: "iris.semantic.context_message.user.v1",
+          content: { role: "user", content: text },
         },
       ];
     },
@@ -343,7 +342,7 @@ test("cordis: reversible effects —— contributor unregister 后不再投影",
     assert.ok(calls() >= 1, "contributor projected during BUST");
     const gen1 = ctx.irisContext.getCurrentGeneration();
     assert.ok(gen1 !== null);
-    const p0 = unitsInLayerV3(gen1, 0);
+    const p0 = unitsInLayer(gen1, 0);
     // P0 contributor 只提供 source；Context admission 派生确定性 unitId。
     const expectedP0Id = deriveContextUnitId(lineageId, {
       schemaId: "iris.context_unit_source_ref.v1",
@@ -363,7 +362,7 @@ test("cordis: reversible effects —— contributor unregister 后不再投影",
     assert.equal(calls(), callsBefore, "unregistered contributor not projected");
     const gen2 = ctx.irisContext.getCurrentGeneration();
     assert.ok(gen2 !== null);
-    assert.equal(unitsInLayerV3(gen2, 0).length, 0, "P0 empty after contributor removal");
+    assert.equal(unitsInLayer(gen2, 0).length, 0, "P0 empty after contributor removal");
     await fiber.dispose();
   } finally {
     cleanupDir(dir);

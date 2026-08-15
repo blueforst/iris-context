@@ -20,8 +20,12 @@ import {
   type UnitDispositionFilter,
 } from "../contracts/context-v27.js";
 import {
+  canonicalJson,
   computeContextUnitContentHash,
+  isDshMessageRef,
+  isPiArchiveEntryRef,
   parseContextUnitSourceRef,
+  sourceIdentityFields,
   validateContextUnitStrict,
   type ContextUnit,
   type ContextUnitSourceRef,
@@ -148,6 +152,14 @@ function hasAnyDerivationRef(refs: SemanticDerivationRefsV1): boolean {
     (refs.compartmentIds !== undefined && refs.compartmentIds.length > 0) ||
     refs.workSnapshotVersion !== undefined ||
     (refs.sourceContextMessageUnitIds !== undefined && refs.sourceContextMessageUnitIds.length > 0)
+  );
+}
+
+/** canonical semantic content 相等（A1 compatibility lookup 用；键序无关）。 */
+function sameCanonicalContent(a: ContextUnit, b: ContextUnit): boolean {
+  return (
+    canonicalJson(a.content as import("../contracts/context-unit.js").JsonValue) ===
+    canonicalJson(b.content as import("../contracts/context-unit.js").JsonValue)
   );
 }
 
@@ -1543,6 +1555,23 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
       }
       return existing;
     }
+    // A1/A2 compatibility lookup：既有 durable rows 可能以旧 unitId 派生/旧锚
+    // 写入（canonical identity encoder 升级前）。只依赖持久化 source_ref 的
+    // identity 归一化比较定位同一 source → 幂等返回既有 Unit，绝不静默创建
+    // 重复 Unit（不得静默改变既有 durable Unit identity）。contentHash 覆盖
+    // unitId，因此对旧行比较 canonical **semantic content**（而非 hash ——
+    // 旧行的 hash 基于旧 unitId）。
+    const legacy = this.findExistingContextUnitBySourceRef(unit.contextId, unit.sourceRef);
+    if (legacy !== undefined) {
+      if (legacy.contentSchemaId !== unit.contentSchemaId || !sameCanonicalContent(legacy, unit)) {
+        throw new Error(
+          `context admitContextUnit: source for ${unit.unitId} already exists (legacy row ` +
+            `${legacy.unitId}) with different semantic content (fail closed; same source must ` +
+            "resolve to the same content)",
+        );
+      }
+      return legacy;
+    }
     const disposition = count >= this.maxUnitsPerSession ? "exclude" : "include";
     const kind = this.contentSchemaIdToRuntimeKind(unit.contentSchemaId);
     this.db
@@ -1581,6 +1610,71 @@ export class ContextStore implements ContextUnitStorePort, RuntimeEventIngestPor
       );
     }
     return stored;
+  }
+
+  /**
+   * A1/A2 compatibility lookup —— 只依赖**持久化 source information** 定位
+   * 同一 source 的既有行（以旧 unitId/anchor 派生写入的 pre-upgrade 行）。
+   * 归一化 identity 比较（`sourceIdentityFields`；locator 排除）；损坏的
+   * `source_ref` 一律 fail-closed（绝不静默跳过）。已回收 payload 的行跳过
+   * （其 canonical content 已不可读，无法作为幂等目标返回）。
+   */
+  private findExistingContextUnitBySourceRef(
+    contextId: string,
+    sourceRef: ContextUnitSourceRef,
+  ): ContextUnit | undefined {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM context_units
+         WHERE context_lineage_id = ? AND unit_schema_id = ? AND payload_reclaimed_at IS NULL
+         ORDER BY context_seq`,
+      )
+      .all(contextId, "iris.context_unit.v3") as unknown as UnitRow[];
+    const incomingFields = sourceIdentityFields(sourceRef);
+    for (const row of rows) {
+      if (row.source_ref === null) {
+        continue;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.source_ref) as unknown;
+      } catch {
+        throw new Error(
+          `context admitContextUnit: corrupt stored source_ref for ${row.unit_id} (fail closed)`,
+        );
+      }
+      const stored = parseContextUnitSourceRef(parsed);
+      if (this.sourceRefIdentityMatches(stored, sourceRef, incomingFields)) {
+        return this.rowToContextUnit(row).unit;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * 归一化 identity 匹配。PiArchiveEntryRef 额外兼容旧通用 Pi 行
+   * （A2：旧行未保存 archive owner，只能按 entryId + contentHash 保守匹配；
+   * 绝不把不同 runtime 的相同 entryId 静默合并）。
+   */
+  private sourceRefIdentityMatches(
+    stored: ContextUnitSourceRef,
+    incoming: ContextUnitSourceRef,
+    incomingFields: (string | null)[],
+  ): boolean {
+    if (JSON.stringify(sourceIdentityFields(stored)) === JSON.stringify(incomingFields)) {
+      return true;
+    }
+    if (
+      isPiArchiveEntryRef(incoming) &&
+      !isPiArchiveEntryRef(stored) &&
+      !isDshMessageRef(stored) &&
+      stored.sourceSchemaId === "iris.pi_archive_entry.v1" &&
+      stored.sourceId === incoming.entryId &&
+      stored.sourceHash === incoming.sourceHash
+    ) {
+      return true;
+    }
+    return false;
   }
 
   /** 按 contextId + unitId 读取统一 ContextUnit v3（不存在 → undefined）。 */

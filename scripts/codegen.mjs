@@ -96,10 +96,14 @@ const main = async () => {
   // Also generate semantic payload schemas
   const semanticSchemaFiles = [];
   for (const [schemaId, spec] of Object.entries(source.semanticSchemas || {})) {
+    // Resolve intra-registry $refs (e.g. image part → iris.dsh_attachment_ref.v1)
+    // so the emitted standalone semantic JSON Schema is self-contained and Ajv
+    // validates it without a registry root.
+    const resolved = resolveRefs(spec.schema, source);
     const jsonSchema = {
       $schema: "http://json-schema.org/draft-07/schema#",
       $id: schemaId,
-      ...spec.schema,
+      ...resolved,
     };
     const fileName = schemaId.replace(/^iris\./, "").replace(/\./g, "-") + ".schema.json";
     const filePath = path.join(SCHEMA_DIR, fileName);

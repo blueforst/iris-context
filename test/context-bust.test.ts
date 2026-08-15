@@ -20,7 +20,7 @@ import {
   createBustCoordinator,
   type ContextSourceContributor,
 } from "../src/context/bust-coordinator.js";
-import { unitsInLayerV3 } from "../src/context/generation-builder.js";
+import { unitsInLayer } from "../src/context/generation-builder.js";
 import { materializeContextUnit } from "../src/context/context-admission.js";
 import { projectCommittedCompartmentCandidate } from "../src/context/p3-compartment.js";
 import {
@@ -61,15 +61,14 @@ function makeContributor(
 function bustEnvContributorUnits(text: string) {
   return [
     {
-      contextUnitId: `static-${text}`,
-      source: {
+      sourceRef: {
         schemaId: "iris.context_unit_source_ref.v1" as const,
         sourceSchemaId: "test.static.v1",
         sourceId: `source-${text}`,
         sourceHash: `hash-${text}`,
       },
-      semanticSchemaId: "iris.semantic.context_message.user.v1",
-      semanticContent: { role: "user", content: text },
+      contentSchemaId: "iris.semantic.context_message.user.v1",
+      content: { role: "user", content: text },
     },
   ];
 }
@@ -184,7 +183,7 @@ test("BUST: first rebuild publishes a full P0–P5 generation with live units as
       assert.equal(e4, 2, "P4 empty (zero-backend)");
       assert.equal(e5, 4, "P5 = 2 live units");
       assert.deepEqual(
-        unitsInLayerV3(gen, 5).map((u) => u.unitId),
+        unitsInLayer(gen, 5).map((u) => u.unitId),
         [id1, id2],
         "P5 live units in contextSeq order (same ContextUnit ids)",
       );
@@ -240,7 +239,7 @@ test("BUST: committed compartment moves covered units from P5 into P3 and advanc
       assert.equal(e3, 1, "P3 = 1 compartment unit");
       assert.equal(e5, 1, "P5 empty — covered live units left P5");
       assert.deepEqual(
-        unitsInLayerV3(gen, 3).map((u) => u.unitId),
+        unitsInLayer(gen, 3).map((u) => u.unitId),
         [expectedP3Id],
       );
       // watermark 推进到 compartment 覆盖的边界（=3）
@@ -286,7 +285,7 @@ test("BUST: units committed after representation stay live (P5) on the next rebu
       assert.ok(run.generation, "generation published");
       const gen = run.generation;
       assert.deepEqual(
-        unitsInLayerV3(gen, 5).map((u) => u.unitId),
+        unitsInLayer(gen, 5).map((u) => u.unitId),
         [id4, id5],
         "units after the represented boundary stay live",
       );
@@ -411,7 +410,7 @@ test("BUST: P4 zero-backend → empty P4; ready backend → projected P4; P4 nev
         1,
         "P4 = 1 recollection unit",
       );
-      const p4 = unitsInLayerV3(gen, 4)[0];
+      const p4 = unitsInLayer(gen, 4)[0];
       assert.equal(p4?.contentSchemaId, "iris.semantic.recollection.v1");
       assert.equal((p4?.content as Record<string, unknown>)["status"], "available");
       // P4 不推进 retirement（无 compartment；watermark 保持 0）
@@ -455,7 +454,7 @@ test("BUST: memory unavailable → P4 explicit marker in the published generatio
         1,
         "P4 = 1 explicit marker",
       );
-      const marker = unitsInLayerV3(gen, 4)[0];
+      const marker = unitsInLayer(gen, 4)[0];
       assert.equal((marker?.content as Record<string, unknown>)["status"], "unavailable");
     } finally {
       env.contextStore.close();

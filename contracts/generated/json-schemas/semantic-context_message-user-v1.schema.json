@@ -35,6 +35,47 @@
                   "type": {
                     "const": "image"
                   },
+                  "attachmentRef": {
+                    "$comment": "DSH durable attachment 的 typed reference（iris_agent#128 A3）。attachmentId 是 content-addressed 不可变存储的稳定标识（不是文件路径/bearer URL/图片字节）；bytes/width/height 是持久元数据。不可用/校验失败时渲染必须 fail-closed，不得把 attachmentId 当图片 data。",
+                    "type": "object",
+                    "properties": {
+                      "schemaId": {
+                        "const": "iris.dsh_attachment_ref.v1"
+                      },
+                      "attachmentId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "mediaType": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "bytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "width": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "height": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "schemaId",
+                      "attachmentId",
+                      "mediaType",
+                      "bytes",
+                      "width",
+                      "height"
+                    ],
+                    "additionalProperties": false
+                  },
                   "data": {
                     "type": "string"
                   },
@@ -42,7 +83,14 @@
                     "type": "string"
                   }
                 },
-                "required": ["type", "data", "mimeType"],
+                "oneOf": [
+                  {
+                    "required": ["type", "attachmentRef"]
+                  },
+                  {
+                    "required": ["type", "data", "mimeType"]
+                  }
+                ],
                 "additionalProperties": false
               },
               {

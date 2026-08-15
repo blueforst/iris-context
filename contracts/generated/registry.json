@@ -2,7 +2,7 @@
   "registryId": "iris.agent-domain-contracts.v1",
   "status": "design_locked_pending_R0_codegen",
   "lockedAt": "2026-08-09",
-  "generatedAt": "2026-08-14",
+  "generatedAt": "2026-08-15",
   "currentGenerationSchemaId": "iris.context_generation.v3",
   "currentGenerationUnitSchemaId": "iris.context_unit.v3",
   "currentGenerationHeaderSchemaId": "iris.context_generation_header.v1",
@@ -31,6 +31,14 @@
     {
       "schemaId": "iris.dsh_message_ref.v1",
       "file": "json-schemas/dsh_message_ref-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.pi_archive_entry_ref.v1",
+      "file": "json-schemas/pi_archive_entry_ref-v1.schema.json"
+    },
+    {
+      "schemaId": "iris.dsh_attachment_ref.v1",
+      "file": "json-schemas/dsh_attachment_ref-v1.schema.json"
     },
     {
       "schemaId": "iris.context_unit.v3",
@@ -87,5 +95,5 @@
       "file": "json-schemas/semantic-recollection-v1.schema.json"
     }
   ],
-  "manifestSha256": "fc6676116e95df21a150f41d9f343624c2826af4a137cefd2dbbff5825c9943b"
+  "manifestSha256": "d82f80fed9cffd96a8929b61d82b87c096d85558971678b53ae0842125f8ae0d"
 }

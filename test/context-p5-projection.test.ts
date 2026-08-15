@@ -28,7 +28,7 @@ import {
 import {
   buildContextGenerationV2,
   type FrozenContextSources,
-} from "../src/context/generation-builder.js";
+} from "../src/context/legacy/generation-builder-v2.js";
 
 import v1FlatGeneration from "../contracts/generated/migration-fixtures/v1-flat-generation.fixture.json" with { type: "json" };
 import v2Generation from "../contracts/generated/migration-fixtures/v2-generation.fixture.json" with { type: "json" };

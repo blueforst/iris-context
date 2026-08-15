@@ -6,7 +6,7 @@
  * - sourceRef 绑定 compartment/lineage/hash；contentSchemaId=
  *   'iris.semantic.compartment.v1'；content 为结构化摘要；
  * - coveredUnitIds → derivation.sourceContextMessageUnitIds（immutable basis）；
- * - materialize 后的 ContextUnit 能通过 buildContextGenerationV3 严格校验。
+ * - materialize 后的 ContextUnit 能通过 buildContextGeneration 严格校验。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -16,8 +16,8 @@ import {
   compartmentSemanticContent,
 } from "../src/context/p3-compartment.js";
 import { materializeContextUnit } from "../src/context/context-admission.js";
-import { buildContextGenerationV3, unitsInLayerV3 } from "../src/context/generation-builder.js";
-import { validateContextGenerationV3 } from "../src/context/generation-builder.js";
+import { buildContextGeneration, unitsInLayer } from "../src/context/generation-builder.js";
+import { validateContextGeneration } from "../src/context/generation-builder.js";
 import { validateContextUnitStrict } from "../src/contracts/context-unit.js";
 import type { HistoricalCompartment } from "../src/historian/historian-compartment.js";
 
@@ -92,7 +92,7 @@ test("F3: covered unit ids become immutable basis refs (new ContextUnit, not ret
 test("F3: two compartments materialize in deterministic order and pass v3 generation validation", () => {
   const c1 = materializeContextUnit(LINEAGE, projectCommittedCompartmentCandidate(compartment(1)));
   const c2 = materializeContextUnit(LINEAGE, projectCommittedCompartmentCandidate(compartment(2)));
-  const generation = buildContextGenerationV3(
+  const generation = buildContextGeneration(
     {
       contextLineageId: LINEAGE,
       sourceSnapshotHash: "snap-p3",
@@ -106,11 +106,11 @@ test("F3: two compartments materialize in deterministic order and pass v3 genera
     "gen-p3-1",
     "2026-08-01T00:00:00.000Z",
   );
-  const p3 = unitsInLayerV3(generation, 3);
+  const p3 = unitsInLayer(generation, 3);
   assert.equal(p3.length, 2);
   assert.equal(p3[0]?.unitId, c1.unitId);
   assert.equal(p3[1]?.unitId, c2.unitId);
-  const check = validateContextGenerationV3(generation);
+  const check = validateContextGeneration(generation);
   assert.equal(check.valid, true, check.reason ?? "compartment projection must validate");
 });
 

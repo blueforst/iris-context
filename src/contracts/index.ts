@@ -2,10 +2,10 @@
  * contracts 公共入口（barrel）—— 统一 ContextUnit 生命周期的公共 API 面
  * （iris-context#2 Feature 6：公共 API 收敛）。
  *
- * 权威来源（2026-08-15 Notion override + iris-context#2）：
+ * 权威来源（2026-08-15 Notion override + iris-context#2/#5）：
  *   - semantic source → Context admission → ContextUnit exactly once；
- *   - 消费方（iris_agent 等）经本入口获得：领域类型（ContextUnit/
- *     ContextUnitSourceRef/DshMessageRef/ContextGenerationV3）、纯函数
+ *   - 消费方（iris_agent 等）经本入口获得：无版本领域类型（ContextUnit/
+ *     ContextUnitSourceRef/DshMessageRef/ContextGeneration）、纯函数
  *     （materializeContextUnit/deriveContextUnitId/computeContextUnitContentHash/
  *     validateContextUnitStrict）、以及 ContextAdmission 接纳边界服务；
  *   - `./contracts/context-unit` 子路径仍可直接指向 context-unit.js；

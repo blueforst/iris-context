@@ -24,6 +24,10 @@ const context_unit_source_ref_v1 =
 const context_unit_header_v1 =
   require("./json-schemas/context_unit_header-v1.schema.json") as AnySchema;
 const dsh_message_ref_v1 = require("./json-schemas/dsh_message_ref-v1.schema.json") as AnySchema;
+const pi_archive_entry_ref_v1 =
+  require("./json-schemas/pi_archive_entry_ref-v1.schema.json") as AnySchema;
+const dsh_attachment_ref_v1 =
+  require("./json-schemas/dsh_attachment_ref-v1.schema.json") as AnySchema;
 const context_unit_v3 = require("./json-schemas/context_unit-v3.schema.json") as AnySchema;
 const context_unit_v2 = require("./json-schemas/context_unit-v2.schema.json") as AnySchema;
 const context_generation_v3 =
@@ -61,6 +65,8 @@ ajv.addSchema(context_message_unit_v1, "iris.context_message_unit.v1");
 ajv.addSchema(context_unit_source_ref_v1, "iris.context_unit_source_ref.v1");
 ajv.addSchema(context_unit_header_v1, "iris.context_unit_header.v1");
 ajv.addSchema(dsh_message_ref_v1, "iris.dsh_message_ref.v1");
+ajv.addSchema(pi_archive_entry_ref_v1, "iris.pi_archive_entry_ref.v1");
+ajv.addSchema(dsh_attachment_ref_v1, "iris.dsh_attachment_ref.v1");
 ajv.addSchema(context_unit_v3, "iris.context_unit.v3");
 ajv.addSchema(context_unit_v2, "iris.context_unit.v2");
 ajv.addSchema(context_generation_v3, "iris.context_generation.v3");
@@ -194,6 +200,46 @@ export function validate_iris_dsh_message_ref_v1(data: unknown): {
   const validate = ajv.getSchema("iris.dsh_message_ref.v1");
   if (!validate)
     return { valid: false, errors: ["schema not registered: iris.dsh_message_ref.v1"] };
+  const valid = validate(data);
+  if (!valid) {
+    return {
+      valid: false,
+      errors:
+        (validate.errors as ErrorObject[] | undefined)?.map(
+          (e) => `${e.instancePath}: ${e.message ?? ""}`,
+        ) ?? [],
+    };
+  }
+  return { valid: true };
+}
+
+export function validate_iris_pi_archive_entry_ref_v1(data: unknown): {
+  valid: boolean;
+  errors?: string[];
+} {
+  const validate = ajv.getSchema("iris.pi_archive_entry_ref.v1");
+  if (!validate)
+    return { valid: false, errors: ["schema not registered: iris.pi_archive_entry_ref.v1"] };
+  const valid = validate(data);
+  if (!valid) {
+    return {
+      valid: false,
+      errors:
+        (validate.errors as ErrorObject[] | undefined)?.map(
+          (e) => `${e.instancePath}: ${e.message ?? ""}`,
+        ) ?? [],
+    };
+  }
+  return { valid: true };
+}
+
+export function validate_iris_dsh_attachment_ref_v1(data: unknown): {
+  valid: boolean;
+  errors?: string[];
+} {
+  const validate = ajv.getSchema("iris.dsh_attachment_ref.v1");
+  if (!validate)
+    return { valid: false, errors: ["schema not registered: iris.dsh_attachment_ref.v1"] };
   const valid = validate(data);
   if (!valid) {
     return {

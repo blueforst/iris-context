@@ -244,6 +244,67 @@
       "required": ["schemaId", "sessionId", "messageId"],
       "additionalProperties": false
     },
+    "iris.pi_archive_entry_ref.v1": {
+      "$comment": "Pi compatibility archive entry 的专用判别 source ref（iris_agent#130 A2）。稳定 identity = runtimeSessionId + entryId；entrySeq 是 archive-local locator（可保存/恢复扫描，不进入 semantic revision，不进入稳定 identity）；sourceHash 是 entry content 指纹。禁止构造 DshMessageRef（architecture gate）。",
+      "type": "object",
+      "properties": {
+        "schemaId": {
+          "const": "iris.pi_archive_entry_ref.v1"
+        },
+        "runtimeSessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "entryId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "entrySeq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sourceHash": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["schemaId", "runtimeSessionId", "entryId", "sourceHash"],
+      "additionalProperties": false
+    },
+    "iris.dsh_attachment_ref.v1": {
+      "$comment": "DSH durable attachment 的 typed reference（iris_agent#128 A3）。attachmentId 是 content-addressed 不可变存储的稳定标识（不是文件路径/bearer URL/图片字节）；bytes/width/height 是持久元数据。不可用/校验失败时渲染必须 fail-closed，不得把 attachmentId 当图片 data。",
+      "type": "object",
+      "properties": {
+        "schemaId": {
+          "const": "iris.dsh_attachment_ref.v1"
+        },
+        "attachmentId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": ["schemaId", "attachmentId", "mediaType", "bytes", "width", "height"],
+      "additionalProperties": false
+    },
     "iris.context_unit.v3": {
       "type": "object",
       "properties": {
@@ -439,6 +500,9 @@
                         "type": {
                           "const": "image"
                         },
+                        "attachmentRef": {
+                          "$ref": "#/schemas/iris.dsh_attachment_ref.v1"
+                        },
                         "data": {
                           "type": "string"
                         },
@@ -446,7 +510,14 @@
                           "type": "string"
                         }
                       },
-                      "required": ["type", "data", "mimeType"],
+                      "oneOf": [
+                        {
+                          "required": ["type", "attachmentRef"]
+                        },
+                        {
+                          "required": ["type", "data", "mimeType"]
+                        }
+                      ],
                       "additionalProperties": false
                     },
                     {
@@ -553,6 +624,9 @@
                         "type": {
                           "const": "image"
                         },
+                        "attachmentRef": {
+                          "$ref": "#/schemas/iris.dsh_attachment_ref.v1"
+                        },
                         "data": {
                           "type": "string"
                         },
@@ -560,7 +634,14 @@
                           "type": "string"
                         }
                       },
-                      "required": ["type", "data", "mimeType"],
+                      "oneOf": [
+                        {
+                          "required": ["type", "attachmentRef"]
+                        },
+                        {
+                          "required": ["type", "data", "mimeType"]
+                        }
+                      ],
                       "additionalProperties": false
                     },
                     {
@@ -669,6 +750,10 @@
               "totalTokens": {
                 "type": "number"
               },
+              "costStatus": {
+                "type": "string",
+                "enum": ["known", "unavailable"]
+              },
               "cost": {
                 "type": "object",
                 "properties": {
@@ -692,7 +777,7 @@
                 "additionalProperties": false
               }
             },
-            "required": ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"],
+            "required": ["input", "output", "cacheRead", "cacheWrite", "totalTokens"],
             "additionalProperties": false
           },
           "stopReason": {
@@ -756,6 +841,9 @@
                     "type": {
                       "const": "image"
                     },
+                    "attachmentRef": {
+                      "$ref": "#/schemas/iris.dsh_attachment_ref.v1"
+                    },
                     "data": {
                       "type": "string"
                     },
@@ -763,7 +851,14 @@
                       "type": "string"
                     }
                   },
-                  "required": ["type", "data", "mimeType"],
+                  "oneOf": [
+                    {
+                      "required": ["type", "attachmentRef"]
+                    },
+                    {
+                      "required": ["type", "data", "mimeType"]
+                    }
+                  ],
                   "additionalProperties": false
                 },
                 {
@@ -898,6 +993,9 @@
                     "type": {
                       "const": "image"
                     },
+                    "attachmentRef": {
+                      "$ref": "#/schemas/iris.dsh_attachment_ref.v1"
+                    },
                     "data": {
                       "type": "string"
                     },
@@ -905,7 +1003,14 @@
                       "type": "string"
                     }
                   },
-                  "required": ["type", "data", "mimeType"],
+                  "oneOf": [
+                    {
+                      "required": ["type", "attachmentRef"]
+                    },
+                    {
+                      "required": ["type", "data", "mimeType"]
+                    }
+                  ],
                   "additionalProperties": false
                 },
                 {
@@ -949,6 +1054,10 @@
               "totalTokens": {
                 "type": "number"
               },
+              "costStatus": {
+                "type": "string",
+                "enum": ["known", "unavailable"]
+              },
               "cost": {
                 "type": "object",
                 "properties": {
@@ -972,7 +1081,7 @@
                 "additionalProperties": false
               }
             },
-            "required": ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"],
+            "required": ["input", "output", "cacheRead", "cacheWrite", "totalTokens"],
             "additionalProperties": false
           },
           "addedToolNames": {
